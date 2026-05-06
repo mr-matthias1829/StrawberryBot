@@ -2,122 +2,229 @@ import cv2
 import numpy as np
 import os
 
+# ── HSV colour range for red (hue wraps around 0°) ───────────────────────────
+RED_LOWER1, RED_UPPER1 = np.array([0,   50, 50]), np.array([10,  255, 255])
+RED_LOWER2, RED_UPPER2 = np.array([170, 50, 50]), np.array([179, 255, 255])
 
-def main():
-    base_dir = os.path.dirname(__file__)
-    img_path = os.path.join(base_dir, "..", "Assets", "StrawberryPlant1Full.jpg")
+# ── Morphology ────────────────────────────────────────────────────────────────
+MORPH_OPEN_ITER  = 3   # noise removal passes
+MORPH_CLOSE_ITER = 5   # gap-filling passes
 
-    frame = cv2.imread(img_path)
-    if frame is None:
-        print("Image not found")
-        return
+# ── Primary seed detection ────────────────────────────────────────────────────
+PRIMARY_PEAK_KERNEL    = 50  # minimum pixel distance between adjacent peaks
+PRIMARY_PEAK_THRESHOLD = 12   # ignore peaks too close to the mask edge
 
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+# ── Colour-transition splitting ───────────────────────────────────────────────
+# Keep only the top N% of gradient magnitudes (within the red mask) as
+# transition lines. Higher = more aggressive splitting; lower = more passive.
+# 85 is a safe starting point; raise toward 95 if berries are still merging,
+# lower toward 70 if a single berry is being cut in half.
+TRANSITION_PERCENTILE  = 80.0
+TRANSITION_PEAK_KERNEL = 250  # peak spacing after splitting on transition lines
+TRANSITION_PEAK_THRESHOLD = 15
 
-    lower1 = np.array([0, 50, 50])
-    upper1 = np.array([10, 255, 255])
-    lower2 = np.array([170, 50, 50])
-    upper2 = np.array([179, 255, 255])
+# ── Fallback for large blobs that still have only one seed ───────────────────
+FALLBACK_BLOB_MIN_AREA   = 10_000  # px² — blobs smaller than this are left alone
+FALLBACK_PEAK_KERNEL     = 11
+FALLBACK_PEAK_THRESHOLD  = 5
 
-    mask1 = cv2.inRange(hsv, lower1, upper1)
-    mask2 = cv2.inRange(hsv, lower2, upper2)
-    mask = cv2.bitwise_or(mask1, mask2)
+# ── Final seed dilation before watershed ─────────────────────────────────────
+SEED_DILATION = 25  # grow seeds into stable regions; smaller than single-berry
+                    # version to avoid merging nearby seeds back together
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_red_mask(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (hsv, mask) where mask is a cleaned binary mask of red regions."""
+    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.bitwise_or(
+        cv2.inRange(hsv, RED_LOWER1, RED_UPPER1),
+        cv2.inRange(hsv, RED_LOWER2, RED_UPPER2),
+    )
     kernel = np.ones((3, 3), np.uint8)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel, iterations=MORPH_OPEN_ITER)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=MORPH_CLOSE_ITER)
+    return hsv, mask
 
-    # This only seems to backfire, hence it's commented out
-    #mask = cv2.erode(mask, kernel, iterations=2)
 
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=5)
+def _local_maxima(dist: np.ndarray, kernel_size: int, threshold: float) -> np.ndarray:
+    """Return a binary image with local maxima of *dist* above *threshold*."""
+    local_max = cv2.dilate(dist, np.ones((kernel_size,) * 2, np.uint8))
+    return np.uint8((dist == local_max) & (dist > threshold))
 
-    # Distance transform
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    dist_view = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # Each strawberry's center is a local peak — even when two touch,
-    # each has its own local maximum. This dilation trick finds them all.
-    kernel_lm = np.ones((21, 21), np.uint8)  # Controls min distance between peaks
-    local_max = cv2.dilate(dist, kernel_lm)
-    sure_fg = np.uint8((dist == local_max) & (dist > 8))  # >8 filters out background noise
+def _find_transition_lines(hsv: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Return a binary mask of likely berry-boundary lines inside *mask*.
 
-    # Dilate seeds slightly so watershed has a stable region to grow from
-    sure_fg = cv2.dilate(sure_fg, np.ones((50, 50), np.uint8))
+    Combines saturation and value gradients, then keeps only the strongest
+    TRANSITION_PERCENTILE percent — making aggressiveness a single, stable knob
+    rather than an Otsu threshold that shifts unpredictably between images.
+    If the gradient signal inside the mask is too weak (all berries well-separated),
+    the function returns an empty mask so downstream logic isn't misled.
+    """
+    sat_blur = cv2.GaussianBlur(hsv[:, :, 1], (5, 5), 0)
+    val_blur = cv2.GaussianBlur(hsv[:, :, 2], (5, 5), 0)
 
+    grad_sx = cv2.Sobel(sat_blur, cv2.CV_32F, 1, 0, ksize=3)
+    grad_sy = cv2.Sobel(sat_blur, cv2.CV_32F, 0, 1, ksize=3)
+    grad_vx = cv2.Sobel(val_blur, cv2.CV_32F, 1, 0, ksize=3)
+    grad_vy = cv2.Sobel(val_blur, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = cv2.magnitude(grad_sx + grad_vx, grad_sy + grad_vy)
+
+    # Threshold at percentile of gradient values *within the mask only*.
+    # This is image-scale-independent: "top 15% inside the berry region"
+    # means the same thing regardless of overall image contrast.
+    mask_pixels = grad_mag[mask > 0]
+    if mask_pixels.size == 0:
+        return np.zeros_like(mask)
+
+    cutoff = np.percentile(mask_pixels, TRANSITION_PERCENTILE)
+    transition = np.uint8(grad_mag >= cutoff) * 255
+    transition = cv2.bitwise_and(transition, mask)
+    transition = cv2.dilate(transition, np.ones((3, 3), np.uint8), iterations=1)
+    return transition
+
+
+def _find_fallback_seeds(
+    dist: np.ndarray,
+    mask: np.ndarray,
+    sure_fg: np.ndarray,
+) -> np.ndarray:
+    """Add seeds to large blobs that ended up with zero or one seed.
+
+    This catches cases where both primary and transition detection missed an
+    overlap — if a blob is big enough to be two berries but has only one seed,
+    we force-add a secondary peak from a finer local-max search.
+    """
+    extra_peaks = _local_maxima(dist, FALLBACK_PEAK_KERNEL, FALLBACK_PEAK_THRESHOLD)
+
+    num_blobs, blob_labels, blob_stats, _ = cv2.connectedComponentsWithStats(mask)
+    result = sure_fg.copy()
+
+    for blob_id in range(1, num_blobs):
+        if blob_stats[blob_id, cv2.CC_STAT_AREA] < FALLBACK_BLOB_MIN_AREA:
+            continue  # small enough to be a single berry — leave it alone
+
+        blob_mask    = blob_labels == blob_id
+        seeds_in_blob = np.uint8(blob_mask & (sure_fg > 0))
+        n_seed_components, _ = cv2.connectedComponents(seeds_in_blob)
+
+        if n_seed_components <= 2:  # only background + (at most) one seed region
+            result[blob_mask & (extra_peaks > 0)] = 1
+
+    return result
+
+
+def find_seeds(
+    dist: np.ndarray,
+    hsv: np.ndarray,
+    mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (sure_fg, unknown) seed maps for watershed initialisation.
+
+    Three-stage strategy:
+      1. Primary seeds   — local maxima on the full distance transform.
+      2. Transition seeds — secondary maxima found after erasing likely
+                           berry boundaries from the mask.
+      3. Fallback seeds  — force-split any large blob still left with one seed.
+    """
+    # Stage 1: primary seeds
+    sure_fg = _local_maxima(dist, PRIMARY_PEAK_KERNEL, PRIMARY_PEAK_THRESHOLD)
+
+    # Stage 2: transition-aware seeds
+    transition_lines = _find_transition_lines(hsv, mask)
+    split_mask       = cv2.bitwise_and(mask, cv2.bitwise_not(transition_lines))
+    dist_split       = cv2.distanceTransform(split_mask, cv2.DIST_L2, 5)
+    transition_seeds = _local_maxima(dist_split, TRANSITION_PEAK_KERNEL, TRANSITION_PEAK_THRESHOLD)
+    sure_fg          = cv2.bitwise_or(sure_fg, transition_seeds)
+
+    # Stage 3: fallback for large blobs still lacking a second seed
+    sure_fg = _find_fallback_seeds(dist, mask, sure_fg)
+
+    # Dilate all seeds into stable watershed regions
+    sure_fg = cv2.dilate(sure_fg, np.ones((SEED_DILATION,) * 2, np.uint8))
     unknown = cv2.subtract(mask, sure_fg)
+    return sure_fg, unknown
+
+
+def run_watershed(
+    frame: np.ndarray,
+    hsv: np.ndarray,
+    mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Segment *mask* into individual objects; return (dist_transform, markers)."""
+    dist            = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    sure_fg, unknown = find_seeds(dist, hsv, mask)
 
     _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
+    markers += 1
     markers[unknown == 255] = 0
-
     markers = cv2.watershed(frame, markers)
 
-
-    # Visualize watershed labels with depth ordering: front=1, back=highest.
-    unique_labels = sorted([l for l in np.unique(markers) if l > 1])
-
-    # Find center Y position of each label to determine depth order
-    label_to_order = {}
-    for i, label in enumerate(unique_labels):
-        y_coords = np.where(markers == label)[0]
-        if len(y_coords) > 0:
-            center_y = np.mean(y_coords)
-            label_to_order[label] = (i + 1, center_y)
-
-    # Sort by Y position: lower Y (top/front) gets lower order number
-    sorted_by_y = sorted(label_to_order.items(), key=lambda x: x[1][1])
-    label_to_order = {label: i + 1 for i, (label, _) in enumerate(sorted_by_y)}
-
-    # Create grayscale visualization and add order numbers
-    markers_view = np.zeros_like(markers, dtype=np.uint8)
-    for label in unique_labels:
-        order_num = label_to_order[label]
-        markers_view[markers == label] = int(order_num * 255 / len(unique_labels))
-
-    # Add text labels showing order numbers
-    markers_view_display = cv2.cvtColor(markers_view, cv2.COLOR_GRAY2BGR)
-    for label, order_num in label_to_order.items():
-        y_coords, x_coords = np.where(markers == label)
-        if len(x_coords) > 0:
-            center_x, center_y = int(np.median(x_coords)), int(np.median(y_coords))
-            cv2.putText(markers_view_display, str(order_num), (center_x, center_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+    return dist, markers
 
 
+def depth_ordered_labels(markers: np.ndarray) -> dict[int, int]:
+    """Map each watershed label to a 1-based depth order.
 
+    Lower Y coordinate → smaller order number (closer to camera).
+    """
+    object_labels = [l for l in np.unique(markers) if l > 1]
+    center_y      = {l: np.mean(np.where(markers == l)[0]) for l in object_labels}
+    ranked        = sorted(object_labels, key=lambda l: center_y[l])
+    return {label: rank + 1 for rank, label in enumerate(ranked)}
+
+
+def draw_results(
+    frame: np.ndarray,
+    markers: np.ndarray,
+    label_order: dict[int, int],
+) -> tuple[np.ndarray, int]:
+    """Draw a bounding box and depth-order number on each detected berry.
+
+    Returns (annotated image, berry count).
+    """
     output = frame.copy()
-    count = 0
+    count  = 0
 
-    for label in np.unique(markers):
-        if label <= 1:
-            continue
-
-        obj_mask = np.uint8(markers == label)
-        contours, _ = cv2.findContours(
-            obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+    for label, order in label_order.items():
+        obj_mask    = np.uint8(markers == label)
+        contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < 1: # adjust as needed, will likely need to be made dynamic
+            if cv2.contourArea(cnt) < 1:  # TODO: make threshold dynamic
                 continue
 
             x, y, w, h = cv2.boundingRect(cnt)
             cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            cv2.putText(output, str(order), (x + 4, y + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             count += 1
 
-    #cv2.imshow("Original", frame)
-    #cv2.imshow("Mask", mask) # markers view is better
+    return output, count
+
+
+def main() -> None:
+    img_path = os.path.join(os.path.dirname(__file__), "..", "Assets", "StrawberryPlant1Full.jpg")
+    frame    = cv2.imread(img_path)
+    if frame is None:
+        raise FileNotFoundError(f"Image not found: {img_path}")
+
+    hsv, mask           = build_red_mask(frame)
+    dist, markers       = run_watershed(frame, hsv, mask)
+    label_order         = depth_ordered_labels(markers)
+    result, count       = draw_results(frame, markers, label_order)
+
+    dist_view = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
     cv2.imshow("Distance", dist_view)
-    cv2.imshow("Watershed Labels (Ordered)", markers_view_display)
-    cv2.imshow("Result", output) # the only one we truely care about
+    cv2.imshow("Result",   result)
+    print(f"Detected strawberries: {count}")
 
-    print("Detected objects:", count)
-
-
-    # should be removed at one point when we make this autonomous
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
 
-main()
+if __name__ == "__main__":
+    main()
