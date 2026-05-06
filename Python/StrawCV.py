@@ -22,6 +22,7 @@ MORPH_OPEN_ITER  = 3   # noise removal passes
 MORPH_CLOSE_ITER = 5   # gap-filling passes
 
 # ── Primary seed detection ────────────────────────────────────────────────────
+# These are now MINIMUM values — the adaptive logic scales them up per blob.
 PRIMARY_PEAK_KERNEL    = 50  # minimum pixel distance between adjacent peaks
 PRIMARY_PEAK_THRESHOLD = 12  # ignore peaks too close to the mask edge
 
@@ -39,12 +40,12 @@ FALLBACK_PEAK_THRESHOLD = 5
 SEED_DILATION = 25
 
 # ── Post-processing: duplicate box merging ────────────────────────────────────
-# Two boxes are merged when (intersection area / area of the smaller box)
-# exceeds this ratio. Scale-independent: works the same at any zoom level.
-# Raise toward 1.0 to only merge near-identical boxes; lower toward 0.5 if
-# watershed noise still produces obvious duplicates. Avoid going below ~0.5
-# or genuinely adjacent berries with touching boxes may get merged.
-MERGE_OVERLAP_RATIO = 0.65
+# Lowered from 0.65 → 0.45 so the "one big + one small inside" case collapses.
+MERGE_OVERLAP_RATIO = 0.45
+
+# ── Minimum bounding-box area to draw ────────────────────────────────────────
+# Watershed noise up-close produces tiny fragments; drop anything below this.
+MIN_BOX_AREA = 800  # px² — tune per your close-up resolution
 
 
 def build_red_mask(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -61,10 +62,28 @@ def build_red_mask(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return hsv, mask
 
 
+def _adaptive_peak_kernel(area: float, scale: float = 0.4) -> int:
+    """Return a kernel size proportional to the blob's effective radius.
+
+    At close range a berry has a much larger pixel footprint, so the minimum
+    distance between seeds must grow with it.  scale=0.4 means two seeds need
+    to be at least 40 % of the blob's radius apart — tune between 0.3–0.6.
+    """
+    radius = np.sqrt(area / np.pi)
+    return max(PRIMARY_PEAK_KERNEL, int(radius * scale))
+
+
 def _local_maxima(dist: np.ndarray, kernel_size: int, threshold: float) -> np.ndarray:
-    """Return a binary image with local maxima of *dist* above *threshold*."""
-    local_max = cv2.dilate(dist, np.ones((kernel_size,) * 2, np.uint8))
-    return np.uint8((dist == local_max) & (dist > threshold))
+    """Return a binary image with local maxima of *dist* above *threshold*.
+
+    The distance transform is Gaussian-smoothed before peak detection so that
+    surface-noise bumps (berry dimples, specular highlights) don't fire as
+    spurious seeds up close.
+    """
+    # Smooth before finding maxima — suppresses close-up surface noise.
+    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 3)
+    local_max   = cv2.dilate(dist_smooth, np.ones((kernel_size,) * 2, np.uint8))
+    return np.uint8((dist_smooth == local_max) & (dist_smooth > threshold))
 
 
 def _find_transition_lines(hsv: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -94,7 +113,13 @@ def _find_fallback_seeds(
     mask: np.ndarray,
     sure_fg: np.ndarray,
 ) -> np.ndarray:
-    """Add seeds to large blobs that ended up with zero or one seed."""
+    """Add seeds to large blobs that ended up with zero seeds.
+
+    Changed condition: only add extra seeds when a blob has *no* seeds at all
+    (n_seed_components < 2, i.e. only the background component).  Previously
+    the threshold was ≤ 2 which added seeds to single-berry blobs and caused
+    double-detections up close.
+    """
     extra_peaks = _local_maxima(dist, FALLBACK_PEAK_KERNEL, FALLBACK_PEAK_THRESHOLD)
 
     num_blobs, blob_labels, blob_stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -108,7 +133,9 @@ def _find_fallback_seeds(
         seeds_in_blob         = np.uint8(blob_mask & (sure_fg > 0))
         n_seed_components, _  = cv2.connectedComponents(seeds_in_blob)
 
-        if n_seed_components <= 2:
+        # FIX: was <= 2 (added seeds to already-seeded blobs); now < 2
+        # so we only intervene for blobs that have absolutely no seed yet.
+        if n_seed_components < 2:
             result[blob_mask & (extra_peaks > 0)] = 1
 
     return result
@@ -120,8 +147,17 @@ def find_seeds(
     mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (sure_fg, unknown) seed maps for watershed initialisation."""
-    # Stage 1: primary seeds
-    sure_fg = _local_maxima(dist, PRIMARY_PEAK_KERNEL, PRIMARY_PEAK_THRESHOLD)
+    # Compute per-blob adaptive kernel sizes.
+    _, _, blob_stats, _ = cv2.connectedComponentsWithStats(mask)
+    # Use the largest blob's area to set the primary kernel (conservative).
+    if blob_stats.shape[0] > 1:
+        max_area          = float(blob_stats[1:, cv2.CC_STAT_AREA].max())
+        adaptive_kernel   = _adaptive_peak_kernel(max_area)
+    else:
+        adaptive_kernel   = PRIMARY_PEAK_KERNEL
+
+    # Stage 1: primary seeds (scale-adaptive kernel)
+    sure_fg = _local_maxima(dist, adaptive_kernel, PRIMARY_PEAK_THRESHOLD)
 
     # Stage 2: transition-aware seeds
     transition_lines = _find_transition_lines(hsv, mask)
@@ -130,7 +166,7 @@ def find_seeds(
     transition_seeds = _local_maxima(dist_split, TRANSITION_PEAK_KERNEL, TRANSITION_PEAK_THRESHOLD)
     sure_fg          = cv2.bitwise_or(sure_fg, transition_seeds)
 
-    # Stage 3: fallback for large blobs still lacking a second seed
+    # Stage 3: fallback for large blobs still lacking any seed
     sure_fg = _find_fallback_seeds(dist, mask, sure_fg)
 
     # Dilate all seeds into stable watershed regions
@@ -172,9 +208,8 @@ def _draw_cv_results(
     """Draw bounding boxes and depth-order numbers on each detected berry.
 
     Boxes are collected from all watershed regions first, then merged if their
-    overlap ratio exceeds MERGE_OVERLAP_RATIO, and finally drawn. This collapses
-    duplicate detections of the same berry caused by watershed noise without
-    affecting well-separated berries whose boxes merely touch.
+    overlap ratio exceeds MERGE_OVERLAP_RATIO, tiny noise boxes are dropped,
+    and finally the survivors are drawn.
     """
     output = frame.copy()
 
@@ -188,7 +223,10 @@ def _draw_cv_results(
                 continue
             raw_boxes.append(cv2.boundingRect(cnt))
 
-    final_boxes = _merge_boxes(raw_boxes)
+    merged_boxes = _merge_boxes(raw_boxes)
+
+    # Drop tiny noise boxes before drawing
+    final_boxes = [(x, y, w, h) for x, y, w, h in merged_boxes if w * h >= MIN_BOX_AREA]
 
     for i, (x, y, w, h) in enumerate(final_boxes, start=1):
         cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
@@ -199,11 +237,7 @@ def _draw_cv_results(
 
 
 def _box_overlap_ratio(a: tuple, b: tuple) -> float:
-    """Return intersection area / area of the smaller box.
-
-    Boxes are (x, y, w, h). A ratio near 1.0 means one box is almost entirely
-    inside the other — very likely the same berry detected twice.
-    """
+    """Return intersection area / area of the smaller box."""
     ax1, ay1, aw, ah = a
     bx1, by1, bw, bh = b
     ax2, ay2 = ax1 + aw, ay1 + ah
@@ -220,11 +254,7 @@ def _box_overlap_ratio(a: tuple, b: tuple) -> float:
 
 
 def _merge_boxes(boxes: list[tuple]) -> list[tuple]:
-    """Iteratively merge boxes whose overlap ratio exceeds MERGE_OVERLAP_RATIO.
-
-    Merging produces the union bounding box. Repeats until stable so that
-    chains of overlapping boxes collapse fully in one call.
-    """
+    """Iteratively merge boxes whose overlap ratio exceeds MERGE_OVERLAP_RATIO."""
     merged = True
     while merged:
         merged   = False
