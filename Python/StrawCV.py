@@ -25,17 +25,15 @@ def main():
 
     kernel = np.ones((3, 3), np.uint8)
 
-    # ✅ FIX 1: More erosion — breaks thin bridges between touching strawberries
     #mask = cv2.erode(mask, kernel, iterations=2)
 
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=5)
 
     # --- Distance transform ---
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_view = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # ✅ FIX 2: Local maxima instead of global threshold
     # Each strawberry's center is a local peak — even when two touch,
     # each has its own local maximum. The dilation trick finds them all.
     kernel_lm = np.ones((21, 21), np.uint8)  # Controls min distance between peaks
@@ -43,7 +41,7 @@ def main():
     sure_fg = np.uint8((dist == local_max) & (dist > 8))  # >8 filters out background noise
 
     # Dilate seeds slightly so watershed has a stable region to grow from
-    sure_fg = cv2.dilate(sure_fg, np.ones((12, 12), np.uint8))
+    sure_fg = cv2.dilate(sure_fg, np.ones((50, 50), np.uint8))
 
     unknown = cv2.subtract(mask, sure_fg)
 
@@ -67,14 +65,14 @@ def main():
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 100:  # ✅ FIX 3: Raised from 100 — avoids watershed boundary fragments
+            if area < 1: # adjust as needed, will likely need to be made dynamic
                 continue
 
             x, y, w, h = cv2.boundingRect(cnt)
             cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
             count += 1
 
-    cv2.imshow("Original", frame)
+    #cv2.imshow("Original", frame)
     cv2.imshow("Mask", mask)
     cv2.imshow("Distance", dist_view)
     cv2.imshow("Result", output)
