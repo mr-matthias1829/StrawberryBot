@@ -14,8 +14,8 @@ model = YOLO("yolov8n.pt")
 # =============================================================================
 
 # ── HSV colour range for red (hue wraps around 0°) ───────────────────────────
-RED_LOWER1, RED_UPPER1 = np.array([0,   100, 70]),  np.array([10,  255, 255])
-RED_LOWER2, RED_UPPER2 = np.array([170, 100, 70]),  np.array([179, 255, 255])
+RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]),  np.array([10,  255, 255])
+RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]),  np.array([179, 255, 255])
 
 # ── Morphology ────────────────────────────────────────────────────────────────
 MORPH_OPEN_ITER  = 3   # noise removal passes
@@ -37,6 +37,14 @@ FALLBACK_PEAK_THRESHOLD = 5
 
 # ── Final seed dilation before watershed ─────────────────────────────────────
 SEED_DILATION = 25
+
+# ── Post-processing: duplicate box merging ────────────────────────────────────
+# Two boxes are merged when (intersection area / area of the smaller box)
+# exceeds this ratio. Scale-independent: works the same at any zoom level.
+# Raise toward 1.0 to only merge near-identical boxes; lower toward 0.5 if
+# watershed noise still produces obvious duplicates. Avoid going below ~0.5
+# or genuinely adjacent berries with touching boxes may get merged.
+MERGE_OVERLAP_RATIO = 0.65
 
 
 def build_red_mask(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -96,9 +104,9 @@ def _find_fallback_seeds(
         if blob_stats[blob_id, cv2.CC_STAT_AREA] < FALLBACK_BLOB_MIN_AREA:
             continue
 
-        blob_mask         = blob_labels == blob_id
-        seeds_in_blob     = np.uint8(blob_mask & (sure_fg > 0))
-        n_seed_components, _ = cv2.connectedComponents(seeds_in_blob)
+        blob_mask             = blob_labels == blob_id
+        seeds_in_blob         = np.uint8(blob_mask & (sure_fg > 0))
+        n_seed_components, _  = cv2.connectedComponents(seeds_in_blob)
 
         if n_seed_components <= 2:
             result[blob_mask & (extra_peaks > 0)] = 1
@@ -156,42 +164,111 @@ def depth_ordered_labels(markers: np.ndarray) -> dict[int, int]:
     return {label: rank + 1 for rank, label in enumerate(ranked)}
 
 
-def cv_pipeline(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
-    """Full CV pipeline: HSV masking → watershed → bounding boxes.
-
-    Returns (annotated_frame, mask, berry_count).
-    """
-    hsv, mask         = build_red_mask(frame)
-    dist, markers     = run_watershed(frame, hsv, mask)
-    label_order       = depth_ordered_labels(markers)
-    output, count     = _draw_cv_results(frame, markers, label_order)
-    return output, mask, count
-
-
 def _draw_cv_results(
     frame: np.ndarray,
     markers: np.ndarray,
     label_order: dict[int, int],
 ) -> tuple[np.ndarray, int]:
-    """Draw bounding boxes and depth-order numbers on each detected berry."""
-    output = frame.copy()
-    count  = 0
+    """Draw bounding boxes and depth-order numbers on each detected berry.
 
-    for label, order in label_order.items():
+    Boxes are collected from all watershed regions first, then merged if their
+    overlap ratio exceeds MERGE_OVERLAP_RATIO, and finally drawn. This collapses
+    duplicate detections of the same berry caused by watershed noise without
+    affecting well-separated berries whose boxes merely touch.
+    """
+    output = frame.copy()
+
+    # Collect one box per valid contour across all labels
+    raw_boxes = []
+    for label in label_order:
         obj_mask    = np.uint8(markers == label)
         contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         for cnt in contours:
             if cv2.contourArea(cnt) < 1:
                 continue
+            raw_boxes.append(cv2.boundingRect(cnt))
 
-            x, y, w, h = cv2.boundingRect(cnt)
-            cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
-            cv2.putText(output, str(order), (x + 4, y + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            count += 1
+    final_boxes = _merge_boxes(raw_boxes)
 
-    return output, count
+    for i, (x, y, w, h) in enumerate(final_boxes, start=1):
+        cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        cv2.putText(output, str(i), (x + 4, y + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    return output, len(final_boxes)
+
+
+def _box_overlap_ratio(a: tuple, b: tuple) -> float:
+    """Return intersection area / area of the smaller box.
+
+    Boxes are (x, y, w, h). A ratio near 1.0 means one box is almost entirely
+    inside the other — very likely the same berry detected twice.
+    """
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if intersection == 0:
+        return 0.0
+
+    return intersection / min(aw * ah, bw * bh)
+
+
+def _merge_boxes(boxes: list[tuple]) -> list[tuple]:
+    """Iteratively merge boxes whose overlap ratio exceeds MERGE_OVERLAP_RATIO.
+
+    Merging produces the union bounding box. Repeats until stable so that
+    chains of overlapping boxes collapse fully in one call.
+    """
+    merged = True
+    while merged:
+        merged   = False
+        kept     = []
+        absorbed = [False] * len(boxes)
+
+        for i, box_a in enumerate(boxes):
+            if absorbed[i]:
+                continue
+            current = box_a
+            for j, box_b in enumerate(boxes):
+                if i == j or absorbed[j]:
+                    continue
+                if _box_overlap_ratio(current, box_b) >= MERGE_OVERLAP_RATIO:
+                    ax1, ay1, aw, ah = current
+                    bx1, by1, bw, bh = box_b
+                    nx1 = min(ax1, bx1)
+                    ny1 = min(ay1, by1)
+                    nx2 = max(ax1 + aw, bx1 + bw)
+                    ny2 = max(ay1 + ah, by1 + bh)
+                    current     = (nx1, ny1, nx2 - nx1, ny2 - ny1)
+                    absorbed[j] = True
+                    merged      = True
+            kept.append(current)
+        boxes = kept
+
+    return boxes
+
+
+def _dist_to_view(dist: np.ndarray) -> np.ndarray:
+    """Normalise a distance transform to a displayable uint8 image."""
+    return cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
+def cv_pipeline(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Full CV pipeline: HSV masking → watershed → bounding boxes.
+
+    Returns (annotated_frame, mask, dist_view, berry_count).
+    """
+    hsv, mask     = build_red_mask(frame)
+    dist, markers = run_watershed(frame, hsv, mask)
+    label_order   = depth_ordered_labels(markers)
+    output, count = _draw_cv_results(frame, markers, label_order)
+    return output, mask, _dist_to_view(dist), count
 
 
 # =============================================================================
@@ -237,8 +314,8 @@ def run_webcam() -> None:
         if not ret:
             break
 
-        cv_out, mask, cv_count = cv_pipeline(frame)
-        ai_out, ai_count       = ai_pipeline(frame)
+        cv_out, mask, dist_view, cv_count = cv_pipeline(frame)
+        ai_out, ai_count                  = ai_pipeline(frame)
 
         combined = frame.copy()
         cv2.putText(combined, f"CV: {cv_count}", (10, 30),
@@ -250,6 +327,7 @@ def run_webcam() -> None:
         cv2.imshow("AI",       ai_out)
         cv2.imshow("CV",       cv_out)
         cv2.imshow("Mask",     mask)
+        cv2.imshow("Distance", dist_view)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -259,21 +337,16 @@ def run_webcam() -> None:
 
 
 def run_image() -> None:
-    """Single-image mode (file 1 behaviour): load from Assets folder."""
+    """Single-image mode: load from Assets folder."""
     img_path = os.path.join(os.path.dirname(__file__), "..", "Assets", "StrawberryPlant1Full.jpg")
     frame    = cv2.imread(img_path)
     if frame is None:
         raise FileNotFoundError(f"Image not found: {img_path}")
 
-    hsv, mask         = build_red_mask(frame)
-    dist, markers     = run_watershed(frame, hsv, mask)
-    label_order       = depth_ordered_labels(markers)
-    result, count     = _draw_cv_results(frame, markers, label_order)
-
-    dist_view = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    cv_out, mask, dist_view, count = cv_pipeline(frame)
 
     cv2.imshow("Distance", dist_view)
-    cv2.imshow("Result",   result)
+    cv2.imshow("Result",   cv_out)
     print(f"Detected strawberries: {count}")
 
     cv2.waitKey(0)
@@ -281,5 +354,5 @@ def run_image() -> None:
 
 
 if __name__ == "__main__":
-    # Change to run_image() to use single-image mode from file 1.
+    # Change to run_image() to use single-image mode.
     run_webcam()
