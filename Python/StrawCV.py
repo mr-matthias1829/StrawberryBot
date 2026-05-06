@@ -12,11 +12,15 @@ model = YOLO("yolov8n.pt")
 # CV PIPELINE (HSV)
 # =========================
 def cv_pipeline(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # blur = stabielere kleurdetectie
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
 
-    lower1 = np.array([0, 50, 50])
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+
+    # strenger rood filter (minder huid / ruis)
+    lower1 = np.array([0, 100, 70])
     upper1 = np.array([10, 255, 255])
-    lower2 = np.array([170, 50, 50])
+    lower2 = np.array([170, 100, 70])
     upper2 = np.array([179, 255, 255])
 
     mask = cv2.bitwise_or(
@@ -24,7 +28,7 @@ def cv_pipeline(frame):
         cv2.inRange(hsv, lower2, upper2)
     )
 
-    kernel = np.ones((3, 3), np.uint8)
+    kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
 
@@ -35,10 +39,31 @@ def cv_pipeline(frame):
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 1500:
+        if area < 2500:   # hoger = minder ruis
             continue
 
+        # --- vorm check (circularity) ---
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+
+        circularity = (4 * np.pi * area) / (perimeter * perimeter)
+        if circularity < 0.45:   # aardbeien zijn niet perfect rond
+            continue
+
+        # --- solidity check (belangrijk tegen handen/achtergrond) ---
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        if hull_area == 0:
+            continue
+
+        solidity = area / hull_area
+        if solidity < 0.75:
+            continue
+
+        # bounding box
         x, y, w, h = cv2.boundingRect(cnt)
+
         cv2.rectangle(output, (x, y), (x + w, y + h), (255, 0, 0), 2)
         count += 1
 
