@@ -25,17 +25,18 @@ def main():
 
     kernel = np.ones((3, 3), np.uint8)
 
+    # This only seems to backfire, hence it's commented out
     #mask = cv2.erode(mask, kernel, iterations=2)
 
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=3)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=5)
 
-    # --- Distance transform ---
+    # Distance transform
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     dist_view = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
     # Each strawberry's center is a local peak — even when two touch,
-    # each has its own local maximum. The dilation trick finds them all.
+    # each has its own local maximum. This dilation trick finds them all.
     kernel_lm = np.ones((21, 21), np.uint8)  # Controls min distance between peaks
     local_max = cv2.dilate(dist, kernel_lm)
     sure_fg = np.uint8((dist == local_max) & (dist > 8))  # >8 filters out background noise
@@ -50,6 +51,39 @@ def main():
     markers[unknown == 255] = 0
 
     markers = cv2.watershed(frame, markers)
+
+
+    # Visualize watershed labels with depth ordering: front=1, back=highest.
+    unique_labels = sorted([l for l in np.unique(markers) if l > 1])
+
+    # Find center Y position of each label to determine depth order
+    label_to_order = {}
+    for i, label in enumerate(unique_labels):
+        y_coords = np.where(markers == label)[0]
+        if len(y_coords) > 0:
+            center_y = np.mean(y_coords)
+            label_to_order[label] = (i + 1, center_y)
+
+    # Sort by Y position: lower Y (top/front) gets lower order number
+    sorted_by_y = sorted(label_to_order.items(), key=lambda x: x[1][1])
+    label_to_order = {label: i + 1 for i, (label, _) in enumerate(sorted_by_y)}
+
+    # Create grayscale visualization and add order numbers
+    markers_view = np.zeros_like(markers, dtype=np.uint8)
+    for label in unique_labels:
+        order_num = label_to_order[label]
+        markers_view[markers == label] = int(order_num * 255 / len(unique_labels))
+
+    # Add text labels showing order numbers
+    markers_view_display = cv2.cvtColor(markers_view, cv2.COLOR_GRAY2BGR)
+    for label, order_num in label_to_order.items():
+        y_coords, x_coords = np.where(markers == label)
+        if len(x_coords) > 0:
+            center_x, center_y = int(np.median(x_coords)), int(np.median(y_coords))
+            cv2.putText(markers_view_display, str(order_num), (center_x, center_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+
+
 
     output = frame.copy()
     count = 0
@@ -73,12 +107,15 @@ def main():
             count += 1
 
     #cv2.imshow("Original", frame)
-    cv2.imshow("Mask", mask)
+    #cv2.imshow("Mask", mask) # markers view is better
     cv2.imshow("Distance", dist_view)
-    cv2.imshow("Result", output)
+    cv2.imshow("Watershed Labels (Ordered)", markers_view_display)
+    cv2.imshow("Result", output) # the only one we truely care about
 
     print("Detected objects:", count)
 
+
+    # should be removed at one point when we make this autonomous
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
