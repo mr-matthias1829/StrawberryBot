@@ -5,7 +5,7 @@ import os
 
 def main():
     base_dir = os.path.dirname(__file__)
-    img_path = os.path.join(base_dir, "..", "Assets", "StrawberryPlant1.jpg")
+    img_path = os.path.join(base_dir, "..", "Assets", "StrawberryPlant1Full.jpg")
 
     frame = cv2.imread(img_path)
     if frame is None:
