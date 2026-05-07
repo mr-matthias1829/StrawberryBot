@@ -1,0 +1,7 @@
+path: dataset
+
+train: images
+val: images
+
+names:
+  0: Strawberry
