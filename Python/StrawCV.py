@@ -7,7 +7,7 @@ from ultralytics import YOLO
 # AI MODEL
 # =============================================================================
 #model = YOLO("yolov8n.pt")
-model = YOLO(r"../runs/detect/superv1/weights/best.pt")
+model = YOLO(r"../runs/detect/train-4/weights/best.pt")
 print(model.names)
 
 
@@ -331,7 +331,7 @@ def cv_pipeline(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 # AI PIPELINE — YOLO (file 2)
 # =============================================================================
 
-def ai_pipeline(frame: np.ndarray, conf: float = 0.75) -> tuple[np.ndarray, int]:
+def ai_pipeline(frame: np.ndarray, conf: float = 0.5) -> tuple[np.ndarray, int]:
     results = model(frame, conf=conf)
     output  = frame.copy()
     count   = 0
