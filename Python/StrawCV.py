@@ -7,8 +7,19 @@ from ultralytics import YOLO
 # AI MODEL
 # =============================================================================
 #model = YOLO("yolov8n.pt")
-model = YOLO(r"runs\detect\train-4\weights\best.pt")
+model = YOLO(r"../runs/detect/superv1/weights/best.pt")
+print(model.names)
 
+
+# tests to view how well the ai works
+
+results = model (os.path.join(os.path.dirname(__file__), "..", "Python/dataset/images", "PXL_20260506_104946241.jpg"), conf=0.12)
+print(results[0].boxes)
+results[0].show()
+
+#results = model (os.path.join(os.path.dirname(__file__), "..", "Python/dataset/images", "PXL_20260506_105211597.jpg"), conf=0.12)
+#print(results[0].boxes)
+#results[0].show()
 
 # =============================================================================
 # CV PIPELINE — HSV + WATERSHED (file 1)
@@ -320,21 +331,16 @@ def cv_pipeline(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 # AI PIPELINE — YOLO (file 2)
 # =============================================================================
 
-def ai_pipeline(frame: np.ndarray) -> tuple[np.ndarray, int]:
-    """Run YOLOv8 inference; return (annotated_frame, detection_count)."""
-    results = model(frame)
+def ai_pipeline(frame: np.ndarray, conf: float = 0.75) -> tuple[np.ndarray, int]:
+    results = model(frame, conf=conf)
     output  = frame.copy()
     count   = 0
 
     for r in results:
         for box in r.boxes:
-            conf = float(box.conf[0])
-            if conf < 0.2:
-                continue
-
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cv2.rectangle(output, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(output, f"{conf:.2f}", (x1, y1 - 10),
+            cv2.putText(output, f"{float(box.conf[0]):.2f}", (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             count += 1
 

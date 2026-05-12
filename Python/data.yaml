@@ -1,7 +1,7 @@
-path: dataset
+path: dataset_aug
+train: images/train
+val:   images/val
 
-train: images
-val: images
-
+nc: 1
 names:
   0: Strawberry
