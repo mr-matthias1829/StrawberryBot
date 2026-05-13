@@ -7,7 +7,7 @@ from ultralytics import YOLO
 # AI MODEL
 # =============================================================================
 #model = YOLO("yolov8n.pt")
-model = YOLO(r"../runs/detect/superv1.5/weights/best.pt")
+model = YOLO(r"../runs/detect/superv2/weights/best.pt")
 print(model.names)
 
 
