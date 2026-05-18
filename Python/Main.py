@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 from detection import AIDetector, CVDectector, Detection, iou
+from robot_controller import RobotController
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,26 +264,39 @@ class FusionEngine:
     def __init__(self) -> None:
         ai_det = AIDetector()
         cv_det = CVDectector()
+
         self._worker = DetectionWorker(ai_det, cv_det)
+
+        # ─────────────────────────────────────────
+        # ROBOT CONTROLLER
+        # ─────────────────────────────────────────
+        self.robot = RobotController()
 
         self.tracked_objects: Dict[int, TrackedObject] = {}
         self.next_id = 1
         self.recheck_counter: Dict[str, int] = defaultdict(int)
 
-        self.frame_count  = 0
+        self.frame_count = 0
         self.detect_count = 0
 
         self.last_confirmed_hits: List[TrackedObject] = []
-        self.last_possible_hits:  List[TrackedObject] = []
+        self.last_possible_hits: List[TrackedObject] = []
 
         self._last_annotated: Optional[np.ndarray] = None
-        self._last_mask:      Optional[np.ndarray] = None
+        self._last_mask: Optional[np.ndarray] = None
+
         self._last_debug: Dict = {
-            "ai_count": 0, "cv_count": 0, "matches": 0,
-            "fused_count": 0, "confirmed_count": 0, "possible_count": 0,
+            "ai_count": 0,
+            "cv_count": 0,
+            "matches": 0,
+            "fused_count": 0,
+            "confirmed_count": 0,
+            "possible_count": 0,
         }
 
-    # ── source helpers ────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # SOURCE HELPERS
+    # ─────────────────────────────────────────────
 
     @staticmethod
     def _is_cv_like(src: str) -> bool:
@@ -292,48 +306,82 @@ class FusionEngine:
     def _is_ai_like(src: str) -> bool:
         return src.startswith("ai") or "zoomed_ai" in src
 
-    # ── detection matching ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # DETECTION MATCHING
+    # ─────────────────────────────────────────────
 
     @staticmethod
     def _match_detections(
-        ai_dets: List[Detection], cv_dets: List[Detection]
+        ai_dets: List[Detection],
+        cv_dets: List[Detection]
     ) -> Tuple[Dict[int, int], List[int], List[int]]:
+
         matches: Dict[int, int] = {}
         used_cv: set = set()
 
         for i, ai in enumerate(ai_dets):
-            best_iou, best_j = 0.0, -1
+
+            best_iou = 0.0
+            best_j = -1
+
             for j, cv in enumerate(cv_dets):
+
                 if j in used_cv:
                     continue
+
                 score = iou(ai, cv)
+
                 if score > best_iou and score >= config.IOU_MATCH_THRESHOLD:
-                    best_iou, best_j = score, j
+                    best_iou = score
+                    best_j = j
+
             if best_j >= 0:
                 matches[i] = best_j
                 used_cv.add(best_j)
 
-        unmatched_ai = [i for i in range(len(ai_dets)) if i not in matches]
-        unmatched_cv = [j for j in range(len(cv_dets)) if j not in used_cv]
+        unmatched_ai = [
+            i for i in range(len(ai_dets))
+            if i not in matches
+        ]
+
+        unmatched_cv = [
+            j for j in range(len(cv_dets))
+            if j not in used_cv
+        ]
+
         return matches, unmatched_ai, unmatched_cv
 
-    # ── zoom recheck (async — just enqueues, never blocks) ───────────────────
+    # ─────────────────────────────────────────────
+    # ZOOM RECHECK
+    # ─────────────────────────────────────────────
 
     def _request_zoom(
-        self, frame: np.ndarray, box: Tuple[int,int,int,int], source: str
+        self,
+        frame: np.ndarray,
+        box: Tuple[int, int, int, int],
+        source: str
     ) -> None:
-        """Queue a zoom job.  Returns immediately — result arrives next cycle."""
+
         if self.detect_count % RECHECK_EVERY_N_DETECTIONS != 0:
             return
+
         x1, y1, x2, y2 = box
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+
         key = f"{source}_{cx // 50}_{cy // 50}"
+
         if self.recheck_counter[key] >= config.MAX_RECHECKS:
             return
+
         self.recheck_counter[key] += 1
+
         self._worker.push_zoom(frame, box, source)
 
-    # ── fusion decision (no blocking calls) ───────────────────────────────────
+    # ─────────────────────────────────────────────
+    # FUSION DECISION
+    # ─────────────────────────────────────────────
 
     def _fuse_decision(
         self,
@@ -341,97 +389,176 @@ class FusionEngine:
         cv_det: Optional[Detection],
         frame: np.ndarray,
     ) -> Optional[Detection]:
+
         if ai_det and cv_det:
-            fused = (config.YOLO_FUSION_WEIGHT * ai_det.confidence
-                     + config.CV_FUSION_WEIGHT  * cv_det.confidence)
-            return Detection(x1=ai_det.x1, y1=ai_det.y1, x2=ai_det.x2, y2=ai_det.y2,
-                             confidence=fused, source="fused")
+
+            fused = (
+                config.YOLO_FUSION_WEIGHT * ai_det.confidence
+                + config.CV_FUSION_WEIGHT * cv_det.confidence
+            )
+
+            return Detection(
+                x1=ai_det.x1,
+                y1=ai_det.y1,
+                x2=ai_det.x2,
+                y2=ai_det.y2,
+                confidence=fused,
+                source="fused"
+            )
 
         if ai_det:
+
             if ai_det.confidence > config.HIGH_AI_CONFIDENCE:
-                return Detection(x1=ai_det.x1, y1=ai_det.y1, x2=ai_det.x2, y2=ai_det.y2,
-                                 confidence=ai_det.confidence, source="ai_high")
-            # Fire async zoom — returns None now, result merges in next cycle.
-            self._request_zoom(frame, (ai_det.x1, ai_det.y1, ai_det.x2, ai_det.y2), "ai")
+
+                return Detection(
+                    x1=ai_det.x1,
+                    y1=ai_det.y1,
+                    x2=ai_det.x2,
+                    y2=ai_det.y2,
+                    confidence=ai_det.confidence,
+                    source="ai_high"
+                )
+
+            self._request_zoom(
+                frame,
+                (ai_det.x1, ai_det.y1, ai_det.x2, ai_det.y2),
+                "ai"
+            )
+
             return None
 
         if cv_det:
+
             if cv_det.confidence >= config.CV_DIRECT_ACCEPT_THRESHOLD:
                 return cv_det
-            self._request_zoom(frame, (cv_det.x1, cv_det.y1, cv_det.x2, cv_det.y2), "cv")
+
+            self._request_zoom(
+                frame,
+                (cv_det.x1, cv_det.y1, cv_det.x2, cv_det.y2),
+                "cv"
+            )
+
             return None
 
         return None
 
-    # ── classification ────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # CLASSIFICATION
+    # ─────────────────────────────────────────────
 
     def _classify_hits(
-        self, tracked: List[TrackedObject]
+        self,
+        tracked: List[TrackedObject]
     ) -> Tuple[List[TrackedObject], List[TrackedObject]]:
+
         confirmed: List[TrackedObject] = []
-        possible:  List[TrackedObject] = []
+        possible: List[TrackedObject] = []
 
         for obj in tracked:
+
             if obj.is_confirmed:
                 confirmed.append(obj)
                 continue
 
-            src   = (obj.detection.source or "").lower()
+            src = (obj.detection.source or "").lower()
             score = obj.fused_confidence
 
             if self._is_cv_like(src):
-                min_seen, min_conf = config.POSSIBLE_CV_ONLY_MIN_SEEN, config.POSSIBLE_CV_ONLY_MIN_CONF
+
+                min_seen = config.POSSIBLE_CV_ONLY_MIN_SEEN
+                min_conf = config.POSSIBLE_CV_ONLY_MIN_CONF
+
             elif self._is_ai_like(src):
-                min_seen, min_conf = config.POSSIBLE_AI_ONLY_MIN_SEEN, config.POSSIBLE_AI_ONLY_MIN_CONF
+
+                min_seen = config.POSSIBLE_AI_ONLY_MIN_SEEN
+                min_conf = config.POSSIBLE_AI_ONLY_MIN_CONF
+
                 score *= config.POSSIBLE_AI_CONF_WEIGHT
+
             else:
-                min_seen, min_conf = config.POSSIBLE_HIT_MIN_SEEN, config.POSSIBLE_HIT_MIN_CONF
+
+                min_seen = config.POSSIBLE_HIT_MIN_SEEN
+                min_conf = config.POSSIBLE_HIT_MIN_CONF
 
             if obj.seen_count >= min_seen and score >= min_conf:
                 possible.append(obj)
 
         return confirmed, possible
 
-    # ── tracking ─────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # TRACKING
+    # ─────────────────────────────────────────────
 
-    def _update_tracking(self, fused_dets: List[Detection]) -> List[TrackedObject]:
+    def _update_tracking(
+        self,
+        fused_dets: List[Detection]
+    ) -> List[TrackedObject]:
+
         new_tracked: List[TrackedObject] = []
         used: set = set()
 
         for det in fused_dets:
-            best_iou, best_id = 0.0, -1
+
+            best_iou = 0.0
+            best_id = -1
+
             for obj_id, obj in self.tracked_objects.items():
+
                 if obj_id in used or not obj.is_active:
                     continue
+
                 score = iou(det, obj.detection)
+
                 if score > best_iou and score >= config.IOU_MATCH_THRESHOLD:
-                    best_iou, best_id = score, obj_id
+                    best_iou = score
+                    best_id = obj_id
 
             if best_id >= 0:
+
                 self.tracked_objects[best_id].update(det, best_iou)
-                new_tracked.append(self.tracked_objects[best_id])
+
+                new_tracked.append(
+                    self.tracked_objects[best_id]
+                )
+
                 used.add(best_id)
+
             else:
-                obj = TrackedObject(id=self.next_id, detection=det,
-                                    fused_confidence=det.confidence)
+
+                obj = TrackedObject(
+                    id=self.next_id,
+                    detection=det,
+                    fused_confidence=det.confidence
+                )
+
                 self.tracked_objects[self.next_id] = obj
+
                 self.next_id += 1
+
                 new_tracked.append(obj)
 
         for obj_id, obj in self.tracked_objects.items():
+
             if obj_id not in used and obj.is_active:
+
                 obj.miss()
+
                 if obj.is_active:
                     new_tracked.append(obj)
 
         if self.detect_count % CLEANUP_INTERVAL == 0:
+
             self.tracked_objects = {
-                oid: o for oid, o in self.tracked_objects.items() if o.is_active
+                oid: o
+                for oid, o in self.tracked_objects.items()
+                if o.is_active
             }
 
         return new_tracked
 
-    # ── annotations ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # DRAWING
+    # ─────────────────────────────────────────────
 
     @staticmethod
     def _draw_annotations(
@@ -439,112 +566,366 @@ class FusionEngine:
         ai_dets: List[Detection],
         cv_dets: List[Detection],
         confirmed: List[TrackedObject],
-        possible:  List[TrackedObject],
+        possible: List[TrackedObject],
         frame_count: int,
+        gripper_x: int,
+        gripper_y: int,
+        target_id: Optional[int],
+        target_center: Optional[Tuple[int, int]],
+        movement_text: str,
     ) -> np.ndarray:
+
         out = frame.copy()
 
+        # ─────────────────────────────────────────
+        # AI DETS
+        # ─────────────────────────────────────────
+
         for det in ai_dets:
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_AI, 1)
-            cv2.putText(out, f"AI:{det.confidence:.2f}", (det.x1, det.y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_AI, 1)
+
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_AI,
+                1
+            )
+
+            cv2.putText(
+                out,
+                f"AI:{det.confidence:.2f}",
+                (det.x1, det.y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                config.COLOR_AI,
+                1
+            )
+
+        # ─────────────────────────────────────────
+        # CV DETS
+        # ─────────────────────────────────────────
 
         for det in cv_dets:
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_CV, 1)
-            cv2.putText(out, f"CV:{det.confidence:.2f}", (det.x1, det.y2 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_CV, 1)
+
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_CV,
+                1
+            )
+
+            cv2.putText(
+                out,
+                f"CV:{det.confidence:.2f}",
+                (det.x1, det.y2 - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                config.COLOR_CV,
+                1
+            )
+
+        # ─────────────────────────────────────────
+        # CONFIRMED
+        # ─────────────────────────────────────────
 
         for obj in confirmed:
+
             det = obj.detection
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_FUSED, 2)
-            cv2.putText(out, f"#{obj.id} {det.confidence:.2f}", (det.x1, det.y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, config.COLOR_FUSED, 2)
+
+            color = config.COLOR_FUSED
+
+            # TARGET = ORANGE
+            if obj.id == target_id:
+                color = (0, 165, 255)
+
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                color,
+                2
+            )
+
+            cv2.putText(
+                out,
+                f"#{obj.id} {det.confidence:.2f}",
+                (det.x1, det.y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2
+            )
+
+        # ─────────────────────────────────────────
+        # POSSIBLE
+        # ─────────────────────────────────────────
 
         for obj in possible:
-            det = obj.detection
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_POSSIBLE, 1)
-            cv2.putText(out, f"P#{obj.id} {obj.fused_confidence:.2f}", (det.x1, det.y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_POSSIBLE, 1)
 
-        cv2.putText(out,
-                    f"Frame {frame_count} | Hits: {len(confirmed)} | Possible: {len(possible)}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            det = obj.detection
+
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_POSSIBLE,
+                1
+            )
+
+            cv2.putText(
+                out,
+                f"P#{obj.id} {obj.fused_confidence:.2f}",
+                (det.x1, det.y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                config.COLOR_POSSIBLE,
+                1
+            )
+
+        # ─────────────────────────────────────────
+        # GRIPPER POINT
+        # ─────────────────────────────────────────
+
+        cv2.circle(
+            out,
+            (gripper_x, gripper_y),
+            8,
+            (255, 0, 255),
+            -1
+        )
+
+        cv2.putText(
+            out,
+            "GRIPPER",
+            (gripper_x + 10, gripper_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 0, 255),
+            2
+        )
+
+        # ─────────────────────────────────────────
+        # TARGET LINE
+        # ─────────────────────────────────────────
+
+        if target_center is not None:
+
+            cv2.line(
+                out,
+                (gripper_x, gripper_y),
+                target_center,
+                (0, 165, 255),
+                2
+            )
+
+        # ─────────────────────────────────────────
+        # STATUS TEXT
+        # ─────────────────────────────────────────
+
+        cv2.putText(
+            out,
+            f"Frame {frame_count} | Hits: {len(confirmed)} | Possible: {len(possible)}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            out,
+            f"Robot: {movement_text}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 165, 255),
+            2
+        )
+
         return out
 
-    # ── main pipeline (zero blocking calls) ──────────────────────────────────
+    # ─────────────────────────────────────────────
+    # MAIN PIPELINE
+    # ─────────────────────────────────────────────
 
     def process_frame(
-        self, frame: np.ndarray
+        self,
+        frame: np.ndarray
     ) -> Tuple[np.ndarray, List[TrackedObject], Dict, Optional[np.ndarray]]:
+
         self.frame_count += 1
 
-        # Always push so the worker stays as fresh as possible.
-        small = cv2.resize(frame, (0, 0), fx=INFER_SCALE, fy=INFER_SCALE,
-                           interpolation=cv2.INTER_LINEAR)
+        small = cv2.resize(
+            frame,
+            (0, 0),
+            fx=INFER_SCALE,
+            fy=INFER_SCALE,
+            interpolation=cv2.INTER_LINEAR
+        )
+
         self._worker.push_frame(frame, small)
 
-        # Non-detect frame: just re-stamp the cached annotation.
-        if self.frame_count % DETECT_EVERY != 0 and self._last_annotated is not None:
-            out = self._last_annotated.copy()
-            cv2.rectangle(out, (0, 0), (500, 40), (0, 0, 0), -1)
-            cv2.putText(out,
-                        f"Frame {self.frame_count} | "
-                        f"Hits: {len(self.last_confirmed_hits)} | "
-                        f"Possible: {len(self.last_possible_hits)}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            return out, self.last_confirmed_hits, self._last_debug, self._last_mask
+        if (
+            self.frame_count % DETECT_EVERY != 0
+            and self._last_annotated is not None
+        ):
 
-        # Detection frame.
+            return (
+                self._last_annotated,
+                self.last_confirmed_hits,
+                self._last_debug,
+                self._last_mask
+            )
+
+        # ─────────────────────────────────────────
+        # DETECTION
+        # ─────────────────────────────────────────
+
         self.detect_count += 1
+
         ai_dets, cv_dets, mask = self._worker.read_frame()
 
-        # Merge any finished zoom results from the worker.
         zoom_dets = self._worker.read_zoom()
 
-        matches, unmatched_ai, unmatched_cv = self._match_detections(ai_dets, cv_dets)
-        fused: List[Detection] = list(zoom_dets)   # start with zoom results
+        matches, unmatched_ai, unmatched_cv = self._match_detections(
+            ai_dets,
+            cv_dets
+        )
+
+        fused: List[Detection] = list(zoom_dets)
 
         for ai_idx, cv_idx in matches.items():
-            r = self._fuse_decision(ai_dets[ai_idx], cv_dets[cv_idx], frame)
+
+            r = self._fuse_decision(
+                ai_dets[ai_idx],
+                cv_dets[cv_idx],
+                frame
+            )
+
             if r:
                 fused.append(r)
 
         for ai_idx in unmatched_ai:
+
             det = ai_dets[ai_idx]
+
             if det.confidence < config.LOW_AI_CONFIDENCE:
-                self._request_zoom(frame, (det.x1, det.y1, det.x2, det.y2), "ai_low")
+
+                self._request_zoom(
+                    frame,
+                    (det.x1, det.y1, det.x2, det.y2),
+                    "ai_low"
+                )
+
             else:
+
                 r = self._fuse_decision(det, None, frame)
+
                 if r:
                     fused.append(r)
 
         for cv_idx in unmatched_cv:
-            r = self._fuse_decision(None, cv_dets[cv_idx], frame)
+
+            r = self._fuse_decision(
+                None,
+                cv_dets[cv_idx],
+                frame
+            )
+
             if r:
                 fused.append(r)
 
-        tracked   = self._update_tracking(fused)
+        tracked = self._update_tracking(fused)
+
         confirmed, possible = self._classify_hits(tracked)
+
         self.last_confirmed_hits = confirmed
-        self.last_possible_hits  = possible
+        self.last_possible_hits = possible
+
+        # ─────────────────────────────────────────
+        # ROBOT TARGETING
+        # ─────────────────────────────────────────
+
+        gripper_x = frame.shape[1] // 2
+        gripper_y = frame.shape[0] // 2
+
+        confirmed_dets = [
+            obj.detection
+            for obj in confirmed
+        ]
+
+        target = self.robot.choose_target(
+            confirmed_dets,
+            gripper_x,
+            gripper_y
+        )
+
+        movement = self.robot.generate_movement(
+            gripper_x,
+            gripper_y
+        )
+
+        print(f"[ROBOT] {movement}")
+
+        target_id = None
+        target_center = None
+
+        if target is not None:
+
+            target_center = (
+                target.center_x,
+                target.center_y
+            )
+
+            for obj in confirmed:
+
+                if obj.detection == target.detection:
+                    target_id = obj.id
+                    break
+
+        # ─────────────────────────────────────────
+        # DEBUG
+        # ─────────────────────────────────────────
 
         self._last_debug = {
-            "ai_count":       len(ai_dets),
-            "cv_count":       len(cv_dets),
-            "matches":        len(matches),
-            "fused_count":    len(fused),
+            "ai_count": len(ai_dets),
+            "cv_count": len(cv_dets),
+            "matches": len(matches),
+            "fused_count": len(fused),
             "confirmed_count": len(confirmed),
             "possible_count": len(possible),
         }
+
         self._last_mask = mask
+
+        # ─────────────────────────────────────────
+        # DRAW
+        # ─────────────────────────────────────────
+
         self._last_annotated = self._draw_annotations(
-            frame, ai_dets, cv_dets, confirmed, possible, self.frame_count
+            frame,
+            ai_dets,
+            cv_dets,
+            confirmed,
+            possible,
+            self.frame_count,
+            gripper_x,
+            gripper_y,
+            target_id,
+            target_center,
+            movement
         )
-        return self._last_annotated, confirmed, self._last_debug, mask
+
+        return (
+            self._last_annotated,
+            confirmed,
+            self._last_debug,
+            mask
+        )
 
     def shutdown(self) -> None:
         self._worker.stop()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry points
