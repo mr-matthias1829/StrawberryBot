@@ -13,7 +13,7 @@ from detection import AIDetector, CVDectector, Detection, iou
 from robot_controller import RobotController
 
 
-INFER_SCALE: float = 0.5
+INFER_SCALE: float = 1
 DETECT_EVERY: int = 2
 RECHECK_EVERY_N_DETECTIONS: int = 3
 ZOOM_QUEUE_MAXSIZE: int = 4

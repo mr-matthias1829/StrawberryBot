@@ -22,48 +22,59 @@ def _connect_camera(rtsp_url: str) -> cv2.VideoCapture:
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    connected = False
     if cap.isOpened():
         for _ in range(30):
             ok, frame = cap.read()
             if ok and frame is not None:
-                connected = True
-                break
+                print("reCamera stream connected.")
+                return cap
             time.sleep(0.1)
-
-    if connected:
-        print("reCamera stream connected.")
-        return cap
 
     print("reCamera not available - falling back to laptop camera.")
     cap.release()
+    return _open_laptop_camera()
+
+
+def _open_laptop_camera() -> cv2.VideoCapture:
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
     if not cap.isOpened():
         raise RuntimeError("No camera available.")
-
     print("Laptop camera connected.")
     return cap
 
 
-def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> None:
-    try:
-        cap = _connect_camera(rtsp_url)
-    except RuntimeError as exc:
-        print(f"Error: {exc}")
-        return
+def choose_camera_mode() -> bool:
+    """Returns True = use reCamera, False = use laptop camera."""
+    while True:
+        choice = input("Camera: [r] reCamera  [l] Laptop  → ").strip().lower()
+        if choice == "r":
+            return True
+        if choice == "l":
+            return False
+        print("  Please type 'r' or 'l'.")
 
+
+def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> None:
     fusion = FusionEngine()
-    print("\nPipeline active. Press 'q' to quit, 'd' to toggle debug mask.")
-    print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
+
+
 
     show_mask = config.SHOW_DEBUG_WINDOWS
     fps_timer = time.perf_counter()
     fps_count = 0
+    cap = None
 
     try:
+        if choose_camera_mode():
+            cap = _connect_camera(rtsp_url)
+        else:
+            cap = _open_laptop_camera()
+
+        print(f"\nInference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
+        print("Press 'q' to quit, 'd' to toggle debug mask.\n")
+
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -85,9 +96,12 @@ def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> No
                 fps_count = 0
                 fps_timer = now
 
-            cv2.imshow("Strawberry Detection", cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT)))
+            cv2.imshow("Strawberry Detection",
+                       cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT)))
+
             if show_mask and mask is not None:
-                cv2.imshow("CV Mask", cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)))
+                cv2.imshow("CV Mask",
+                           cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)))
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -96,9 +110,11 @@ def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> No
                 show_mask = not show_mask
                 if not show_mask:
                     cv2.destroyWindow("CV Mask")
+
     finally:
         fusion.shutdown()
-        cap.release()
+        if cap is not None:
+            cap.release()
         cv2.destroyAllWindows()
 
 
@@ -110,12 +126,11 @@ def run_image(image_path: Optional[str] = None) -> None:
     if frame is None:
         print(f"Error: Could not load image from {image_path}")
         return
-    frame_arr = np.asarray(frame)
 
     fusion = FusionEngine()
-    fusion.process_frame(frame_arr)
+    fusion.process_frame(np.asarray(frame))
     time.sleep(0.5)
-    annotated, confirmed, debug, mask = fusion.process_frame(frame_arr)
+    annotated, confirmed, debug, mask = fusion.process_frame(np.asarray(frame))
     possible = fusion.last_possible_hits
     fusion.shutdown()
 
