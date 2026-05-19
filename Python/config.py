@@ -1,19 +1,15 @@
 """Configuration and constants for strawberry detection system."""
 
 import os
+
 import numpy as np
 
-# =============================================================================
-# PATHS
-# =============================================================================
-MODEL_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "runs", "detect", "superv2", "weights", "best.pt"
-)
+BASE_DIR = os.path.dirname(__file__)
+MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "superv2", "weights", "best.pt")
 
 # =============================================================================
 # FUSION THRESHOLDS
 # =============================================================================
-# Primary acceptance thresholds
 YOLO_BASE_THRESHOLD = 0.5      # Minimum YOLO conf to consider
 CV_BASE_THRESHOLD = 0.6        # Minimum CV conf to consider
 CV_DIRECT_ACCEPT_THRESHOLD = 0.72  # CV-only accept gate before zoom fallback
@@ -27,7 +23,6 @@ CV_FUSION_WEIGHT = 0.5
 # =============================================================================
 # CV PIPELINE — CONTOUR + CONVEXITY DEFECT
 # =============================================================================
-# Colour ranges for red (strawberries)
 RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]),  np.array([10,  255, 255])
 RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]),  np.array([179, 255, 255])
 
@@ -49,7 +44,7 @@ CV_WEIGHT_TEMPORAL = 0.05       # Not used in single-frame, placeholder
 
 # Size scoring parameters (adaptive — these are reference values)
 BERRY_SIZE_IDEAL = 5000         # px² — ideal berry size in frame
-BERRY_SIZE_MIN = 4            # px² — below this, size score decays
+BERRY_SIZE_MIN = 4             # px² — below this, size score decays
 BERRY_SIZE_MAX = 25000          # px² — above this, size score decays
 
 # =============================================================================
@@ -69,16 +64,20 @@ PERSISTENCE_DECAY = 0.7
 IOU_MATCH_THRESHOLD = 0.4
 
 # Possible-hit lane (kept separate from confirmed hits)
-POSSIBLE_HIT_MIN_CONF = 0.55
+POSSIBLE_HIT_MIN_CONF = 0.50
 POSSIBLE_HIT_MIN_SEEN = 1
 
 # Source-aware possible-hit tuning: CV-only is easier to keep as possible,
 # AI-only is stricter and down-weighted due to known false positives.
-POSSIBLE_CV_ONLY_MIN_CONF = 0.45
+POSSIBLE_CV_ONLY_MIN_CONF = 0.6
 POSSIBLE_CV_ONLY_MIN_SEEN = 1
-POSSIBLE_AI_ONLY_MIN_CONF = 0.65
-POSSIBLE_AI_ONLY_MIN_SEEN = 2
-POSSIBLE_AI_CONF_WEIGHT = 0.60
+POSSIBLE_AI_ONLY_MIN_CONF = 0.6
+POSSIBLE_AI_ONLY_MIN_SEEN = 1
+POSSIBLE_AI_CONF_WEIGHT = 0.5
+
+# If no confirmed detections exist, optionally steer toward strong possible hits.
+POSSIBLE_TARGET_FALLBACK_ENABLED = True
+POSSIBLE_TARGET_MIN_CONF = 0.60
 
 # =============================================================================
 # DISPLAY
