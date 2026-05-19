@@ -19,6 +19,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import os
+os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
+
 import config
 from detection import AIDetector, CVDectector, Detection, iou
 from robot_controller import RobotController
@@ -41,6 +44,9 @@ RECHECK_EVERY_N_DETECTIONS: int = 3
 ZOOM_QUEUE_MAXSIZE: int = 4
 
 CLEANUP_INTERVAL: int = 30
+
+DISPLAY_WIDTH  = 1280
+DISPLAY_HEIGHT = 720
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -931,20 +937,37 @@ class FusionEngine:
 #  Entry points
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_webcam() -> None:
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Could not open webcam")
-        return
+def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> None:
+    print(f"Connecting to reCamera stream: {rtsp_url}")
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    connected = False
+    if cap.isOpened():
+        for _ in range(30):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                connected = True
+                break
+            time.sleep(0.1)
+
+    if not connected:
+        print("⚠️  reCamera not available — falling back to laptop camera.")
+        cap.release()
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        if not cap.isOpened():
+            print("❌ No camera available at all.")
+            return
+        print("✅ Laptop camera connected.")
+    else:
+        print("✅ reCamera stream connected.")
 
     fusion = FusionEngine()
-    print("Webcam started. Press 'q' to quit, 'd' to toggle debug mask.")
-    print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames. "
-          f"Zoom rechecks fully async.")
+    print("\nPipeline active. Press 'q' to quit, 'd' to toggle debug mask.")
+    print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
 
     show_mask = config.SHOW_DEBUG_WINDOWS
     fps_timer = time.perf_counter()
@@ -954,7 +977,8 @@ def run_webcam() -> None:
         while True:
             ret, frame = cap.read()
             if not ret:
-                break
+                print("Dropped frame, retrying...")
+                continue
 
             annotated, confirmed, debug, mask = fusion.process_frame(frame)
 
@@ -971,9 +995,10 @@ def run_webcam() -> None:
                 fps_count = 0
                 fps_timer = now
 
-            cv2.imshow("Strawberry Detection", annotated)
+            display = cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+            cv2.imshow("Strawberry Detection", display)
             if show_mask and mask is not None:
-                cv2.imshow("CV Mask", mask)
+                cv2.imshow("CV Mask", cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)))
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -1035,4 +1060,5 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--image":
         run_image(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
-        run_webcam()
+        url = sys.argv[1] if len(sys.argv) > 1 else "rtsp://admin:admin@192.168.42.1:554/live"
+        run_webcam(url)
