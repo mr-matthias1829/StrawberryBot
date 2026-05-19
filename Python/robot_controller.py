@@ -73,10 +73,9 @@ class RobotController:
     # ─────────────────────────────────────────────────────────
 
     def _target_still_exists(
-        self,
-        detections: List[Detection]
+            self,
+            detections: List[Detection]
     ) -> bool:
-
         if self.current_target is None:
             return False
 
@@ -84,8 +83,16 @@ class RobotController:
 
         for det in detections:
             iou_score = self._simple_iou(target, det)
-
             if iou_score > 0.3:
+                # ← Update to the fresh detection so callers see current data
+                cx, cy = self.get_box_center(det)
+                self.current_target.detection = det
+                self.current_target.center_x = cx
+                self.current_target.center_y = cy
+                self.current_target.distance = math.sqrt(
+                    (cx - self.current_target.center_x) ** 2 +
+                    (cy - self.current_target.center_y) ** 2
+                )
                 return True
 
         return False
