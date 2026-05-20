@@ -3,6 +3,11 @@ import numpy as np
 import os
 import shutil
 
+# this script is used to turn the images into training and validation data
+# additionally, it makes variations of all the images. see config below for options and toggles
+# to run: run this exact file. no other python files needed.
+# note: make sure you ran convert_csv.py, as that creates the proper data that this script uses and needs
+
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -13,8 +18,8 @@ OUT_TRAIN_LABELS = "dataset_aug/labels/train"
 OUT_VAL_IMAGES   = "dataset_aug/images/val"
 OUT_VAL_LABELS   = "dataset_aug/labels/val"
 
-SYNTHETIC_NEGATIVES_TRAIN = 80
-SYNTHETIC_NEGATIVES_VAL   = 20
+SYNTHETIC_NEGATIVES_TRAIN = 30
+SYNTHETIC_NEGATIVES_VAL   = 5
 
 # Background-swap: how many random backgrounds to composite per image
 BG_SWAP_TRAIN = 3   # dark / gradient / noisy variants each
@@ -29,13 +34,13 @@ AUGMENTATIONS = {
     "rot_neg30":  False,
     "brightness": True,
     "hsv_shift":  True,
-    "blur":       True,
+    "blur":       False,
     "zoom_in":    True,
     "zoom_out":   True,
-    "zoom_out2":  True,
+    "zoom_out2":  False,
     "darken":     True,
     "heavy_blur": True,
-    "bg_swap":    True,
+    "bg_swap":    False,
 }
 
 # =============================================================================

@@ -13,8 +13,8 @@ from detection import AIDetector, CVDectector, Detection, iou
 from robot_controller import RobotController
 
 
-INFER_SCALE: float = 1
-DETECT_EVERY: int = 2
+INFER_SCALE: float = 1 # quality of the input for the ai: THIS A MULTIPLIER
+DETECT_EVERY: int = 5
 RECHECK_EVERY_N_DETECTIONS: int = 3
 ZOOM_QUEUE_MAXSIZE: int = 4
 CLEANUP_INTERVAL: int = 30

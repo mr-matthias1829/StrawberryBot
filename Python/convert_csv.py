@@ -1,6 +1,9 @@
 import pandas as pd
 import os
 
+# this script is used to convert the "Labels.csv" and images in /dataset into a useable state
+# to run: run this exact file. no other python files needed.
+
 CSV_FILE = "Labels.csv"
 
 IMAGES_DIR = "dataset/images"
