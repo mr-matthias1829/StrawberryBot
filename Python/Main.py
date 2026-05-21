@@ -11,7 +11,7 @@ import config
 from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 
 
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|buffer_size;1024000"
 
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 720
@@ -76,7 +76,10 @@ def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> No
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
 
         while True:
-            ok, frame = cap.read()
+            for _ in range(2):
+                cap.grab()
+            ok, frame = cap.retrieve()
+
             if not ok:
                 print("Dropped frame, retrying...")
                 continue
