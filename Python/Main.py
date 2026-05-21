@@ -10,6 +10,9 @@ import numpy as np
 import config
 from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 
+import os, sys
+print(f"isatty={sys.stdin.isatty()}, stdin fd={sys.stdin.fileno()}, pid={os.getpid()}", flush=True)
+
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|buffer_size;1024000"
 
@@ -47,14 +50,33 @@ def _open_laptop_camera() -> cv2.VideoCapture:
 
 def choose_camera_mode() -> bool:
     """Returns True = use reCamera, False = use laptop camera."""
-    while True:
-        choice = input("Camera: [r] reCamera  [l] Laptop  → ").strip().lower()
-        if choice == "r":
-            return True
-        if choice == "l":
-            return False
-        print("  Please type 'r' or 'l'.")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            print("Camera: [r] reCamera  [l] Laptop  → ", end="", flush=True)
+            while True:
+                choice = msvcrt.getwch().lower()
+                if choice == "r":
+                    print("r")
+                    return True
+                if choice == "l":
+                    print("l")
+                    return False
+                print("\n  Please type 'r' or 'l'.")
+                print("Camera: [r] reCamera  [l] Laptop  → ", end="", flush=True)
+        else:
+            with open("/dev/tty", "r") as tty:
+                while True:
+                    print("Camera: [r] reCamera  [l] Laptop  → ", end="", flush=True)
+                    choice = tty.readline().strip().lower()
+                    if choice == "r":
+                        return True
+                    if choice == "l":
+                        return False
+                    print("  Please type 'r' or 'l'.")
 
+    except Exception:
+        return True  # genuinely headless on either OS
 
 def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> None:
     fusion = FusionEngine()
