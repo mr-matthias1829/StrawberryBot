@@ -76,10 +76,7 @@ def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> No
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
 
         while True:
-            for _ in range(2):
-                cap.grab()
-            ok, frame = cap.retrieve()
-
+            ok, frame = cap.read()
             if not ok:
                 print("Dropped frame, retrying...")
                 continue
