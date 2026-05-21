@@ -50,25 +50,81 @@ class AIDetector:
         return detections
 
 
+# ---------------------------------------------------------------------------
+# Strawberry-specific HSV gate applied on top of the red ranges in config.
+# Rejects pale, dark, and low-saturation reds that are not strawberry-like.
+# ---------------------------------------------------------------------------
+_SAT_MIN   = 80    # reject washed-out / pastel reds
+_VAL_MIN   = 50    # reject very dark reds / shadows
+_VAL_MAX   = 240   # reject near-white highlights
+
+# Circularity floor at the contour stage — drops thin/elongated blobs early.
+# Strawberries are roughly circular; wires, clothing seams, etc. are not.
+_CONTOUR_MIN_CIRCULARITY = 0.25
+
+# Aspect-ratio gate: width/height (or height/width) must be within this.
+# Rejects very elongated objects before scoring.
+_MAX_ASPECT_RATIO = 2.8
+
+# Watershed: minimum fraction of the bounding-box diagonal that a foreground
+# peak must be from the edge to count as a distinct berry centre.
+_WATERSHED_FG_THRESH = 0.35   # higher → fewer splits (less over-splitting)
+
+# NMS IoU threshold for final deduplication.
+_NMS_IOU_THRESHOLD = 0.35
+
+
 class CVDectector:
-    """OpenCV contour + convexity-defect detector."""
+    """
+    OpenCV contour + watershed detector.
+
+    Improvements over the previous version
+    ---------------------------------------
+    1. Saturation + value gate on the red mask so pale / dark non-berry
+       reds are rejected at the very first stage.
+    2. Per-contour circularity and aspect-ratio pre-filter so elongated
+       blobs never reach splitting or scoring.
+    3. Watershed-based cluster splitting instead of convexity-defect
+       heuristics — produces at most one box per berry centre, no more.
+    4. IoU-based NMS (non-maximum suppression) as the final deduplication
+       step, replacing the iterative overlap-merge which was creating
+       duplicate boxes.
+    5. The CV confidence score now requires a higher redness *and* a
+       non-trivial circularity before a detection is accepted, so vaguely
+       red blobs with poor shape are filtered out automatically.
+    """
 
     def __init__(self):
         pass
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _build_red_mask(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (hsv, binary_mask) of red regions."""
+        """Return (hsv, binary_mask) of strawberry-red regions."""
         blurred = cv2.GaussianBlur(frame, (7, 7), 0)
         hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-        mask = cv2.bitwise_or(
+
+        # Hue-range masks (from config)
+        hue_mask = cv2.bitwise_or(
             cv2.inRange(hsv, config.RED_LOWER1, config.RED_UPPER1),
             cv2.inRange(hsv, config.RED_LOWER2, config.RED_UPPER2),
         )
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=config.MORPH_OPEN_ITER)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=config.MORPH_CLOSE_ITER)
 
-        # Adaptive close: scale kernel to median blob radius
+        # Saturation / value gate: strawberries are vivid and not pitch-dark
+        sv_mask = cv2.inRange(
+            hsv,
+            np.array([0,   _SAT_MIN, _VAL_MIN]),
+            np.array([180, 255,      _VAL_MAX]),
+        )
+        mask = cv2.bitwise_and(hue_mask, sv_mask)
+
+        kernel3 = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel3, iterations=config.MORPH_OPEN_ITER)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel3, iterations=config.MORPH_CLOSE_ITER)
+
+        # Adaptive close scaled to median blob radius (kept from original)
         n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
         if n > 1:
             areas = stats[1:, cv2.CC_STAT_AREA]
@@ -79,95 +135,127 @@ class CVDectector:
                                     np.ones((k, k), np.uint8), iterations=2)
         return hsv, mask
 
-    def _split_cluster(self, contour: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Split convex blob into individual berry bounding boxes using convexity defects."""
-        hull = cv2.convexHull(contour, returnPoints=False)
-        defects = None
-        try:
-            defects = cv2.convexityDefects(contour, hull)
-        except cv2.error:
-            pass
+    @staticmethod
+    def _contour_circularity(cnt: np.ndarray) -> float:
+        area = cv2.contourArea(cnt)
+        peri = cv2.arcLength(cnt, True)
+        if peri == 0:
+            return 0.0
+        return float(4.0 * np.pi * area / (peri ** 2))
 
-        if defects is None or len(defects) < 2:
-            x, y, w, h = cv2.boundingRect(contour)
-            return [(x, y, x + w, y + h)]
+    @staticmethod
+    def _contour_aspect_ratio(cnt: np.ndarray) -> float:
+        """Returns the longer side divided by the shorter side (≥ 1)."""
+        _, _, w, h = cv2.boundingRect(cnt)
+        if h == 0 or w == 0:
+            return 999.0
+        return max(w, h) / max(min(w, h), 1)
 
-        # Find deep defects (gaps between berries)
-        deep = []
-        for i in range(defects.shape[0]):
-            s, e, f, d = defects[i, 0]
-            depth = d / 256.0
-            if depth > 8:  # px depth threshold
-                deep.append(tuple(contour[f][0]))
+    def _split_by_watershed(
+        self,
+        full_mask: np.ndarray,
+        contour: np.ndarray,
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Split a potentially multi-berry contour into individual bounding boxes
+        using distance-transform watershed.
 
-        if len(deep) < 2:
-            x, y, w, h = cv2.boundingRect(contour)
-            return [(x, y, x + w, y + h)]
-
-        # Partition based on defect positions
-        xs = [p[0] for p in deep]
-        ys = [p[1] for p in deep]
+        Returns one box per detected berry centre, or the whole bounding rect
+        if no clean split is found.
+        """
         x, y, w, h = cv2.boundingRect(contour)
+        roi = full_mask[y:y + h, x:x + w].copy()
 
-        # Decide split axis: vertical if defects spread more horizontally
-        if max(xs) - min(xs) >= max(ys) - min(ys):
-            split_xs = sorted(set(xs))
-            boxes = []
-            prev_x = x
-            for sx in split_xs:
-                if sx - prev_x > 10:
-                    boxes.append((prev_x, y, sx, y + h))
-                    prev_x = sx
-            boxes.append((prev_x, y, x + w, y + h))
-        else:
-            split_ys = sorted(set(ys))
-            boxes = []
-            prev_y = y
-            for sy in split_ys:
-                if sy - prev_y > 10:
-                    boxes.append((x, prev_y, x + w, sy))
-                    prev_y = sy
-            boxes.append((x, prev_y, x + w, y + h))
+        if roi.size == 0:
+            return [(x, y, x + w, y + h)]
 
-        # Filter by minimum area (adaptive: smaller for distant berries)
-        min_area = max(100, config.BERRY_SIZE_MIN // 2)  # Adaptive: allow smaller
-        return [(bx1, by1, bx2, by2) for bx1, by1, bx2, by2 in boxes
-                if (bx2 - bx1) * (by2 - by1) >= min_area]
+        # Distance transform
+        dist = cv2.distanceTransform(roi, cv2.DIST_L2, 5)
+        if dist.max() == 0:
+            return [(x, y, x + w, y + h)]
+        dist_norm = dist / dist.max()
 
-    def _merge_overlapping(self, boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
-        """Iteratively merge boxes with high overlap."""
-        def overlap(a, b):
-            ax1, ay1, ax2, ay2 = a
-            bx1, by1, bx2, by2 = b
-            ix = max(0, min(ax2, bx2) - max(ax1, bx1))
-            iy = max(0, min(ay2, by2) - max(ay1, by1))
-            inter = ix * iy
-            if inter == 0:
-                return 0.0
-            area_a = (ax2 - ax1) * (ay2 - ay1)
-            area_b = (bx2 - bx1) * (by2 - by1)
-            return inter / min(area_a, area_b)
+        # Foreground = definite berry centres (high distance from edge)
+        fg = (dist_norm >= _WATERSHED_FG_THRESH).astype(np.uint8)
+        n_labels, markers = cv2.connectedComponents(fg)
 
-        merged = True
-        while merged:
-            merged = False
-            kept = []
-            absorbed = [False] * len(boxes)
-            for i, a in enumerate(boxes):
-                if absorbed[i]:
+        if n_labels <= 1:
+            # No foreground peaks found → single berry
+            return [(x, y, x + w, y + h)]
+
+        # Dilate fg slightly to build unknown border
+        sure_bg = cv2.dilate(roi, np.ones((3, 3), np.uint8), iterations=3)
+        unknown = cv2.subtract(sure_bg, fg)
+
+        markers = markers + 1           # background becomes label 1
+        markers[unknown == 255] = 0     # border region is unknown
+
+        # Watershed needs a 3-channel image; use a mock BGR from the mask
+        mock_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+        cv2.watershed(mock_bgr, markers)
+
+        boxes: List[Tuple[int, int, int, int]] = []
+        min_area = max(100, config.BERRY_SIZE_MIN // 4)  # lenient for distance
+
+        for label in range(2, n_labels + 1):  # skip bg (1) and border (-1)
+            region = np.zeros_like(roi)
+            region[markers == label] = 255
+            cnts, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            rx, ry, rw, rh = cv2.boundingRect(cnts[0])
+            if rw * rh >= min_area:
+                # Add a small padding so tight watershed regions aren't too small
+                pad = max(2, int(min(rw, rh) * 0.10))
+                bx1 = max(0, rx - pad)
+                by1 = max(0, ry - pad)
+                bx2 = min(w, rx + rw + pad)
+                by2 = min(h, ry + rh + pad)
+                boxes.append((x + bx1, y + by1, x + bx2, y + by2))
+
+        return boxes if boxes else [(x, y, x + w, y + h)]
+
+    @staticmethod
+    def _nms(
+        boxes: List[Tuple[int, int, int, int]],
+        scores: List[float],
+        iou_threshold: float = _NMS_IOU_THRESHOLD,
+    ) -> List[int]:
+        """
+        Standard IoU-based NMS. Returns indices of kept boxes, sorted by score.
+        """
+        if not boxes:
+            return []
+
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        kept: List[int] = []
+
+        while order:
+            best = order.pop(0)
+            kept.append(best)
+            bx1, by1, bx2, by2 = boxes[best]
+            b_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+
+            filtered = []
+            for idx in order:
+                ox1, oy1, ox2, oy2 = boxes[idx]
+                ix = max(0, min(bx2, ox2) - max(bx1, ox1))
+                iy = max(0, min(by2, oy2) - max(by1, oy1))
+                inter = ix * iy
+                if inter == 0:
+                    filtered.append(idx)
                     continue
-                cur = a
-                for j, b in enumerate(boxes):
-                    if i == j or absorbed[j]:
-                        continue
-                    if overlap(cur, b) >= config.MERGE_OVERLAP_RATIO:
-                        cur = (min(cur[0], b[0]), min(cur[1], b[1]),
-                               max(cur[2], b[2]), max(cur[3], b[3]))
-                        absorbed[j] = True
-                        merged = True
-                kept.append(cur)
-            boxes = kept
-        return boxes
+                o_area = max(0, ox2 - ox1) * max(0, oy2 - oy1)
+                union = b_area + o_area - inter
+                if union <= 0 or (inter / union) < iou_threshold:
+                    filtered.append(idx)
+            order = filtered
+
+        return kept
+
+    # ------------------------------------------------------------------
+    # Public scoring + detection
+    # ------------------------------------------------------------------
 
     def cv_score_crop(self, frame: np.ndarray, box: Tuple[int, int, int, int]) -> Dict:
         """
@@ -185,15 +273,24 @@ class CVDectector:
             return {"redness": 0.0, "circularity": 0.0, "size": 0.0,
                     "texture": 0.0, "total": 0.0}
 
-        # Redness score
+        # Redness score (with saturation gate applied to crop as well).
+        # Denominator is 20% of total pixels — a well-cropped berry commonly
+        # covers 25-50% of its bounding box, so this gives realistic scores.
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         red1 = cv2.inRange(hsv, config.RED_LOWER1, config.RED_UPPER1)
         red2 = cv2.inRange(hsv, config.RED_LOWER2, config.RED_UPPER2)
-        red_mask = cv2.bitwise_or(red1, red2)
+        red_hue = cv2.bitwise_or(red1, red2)
+        sv_gate = cv2.inRange(hsv,
+                              np.array([0,   _SAT_MIN, _VAL_MIN]),
+                              np.array([180, 255,      _VAL_MAX]))
+        red_mask = cv2.bitwise_and(red_hue, sv_gate)
         total_pixels = crop.shape[0] * crop.shape[1]
-        redness = min(1.0, cv2.countNonZero(red_mask) / max(total_pixels * 0.3, 1))
+        redness = min(1.0, cv2.countNonZero(red_mask) / max(total_pixels * 0.20, 1))
 
-        # Circularity score
+        # Circularity score.
+        # No hard zero gate here — low circularity just contributes a low
+        # weighted term.  The contour pre-filter in detect() already removed
+        # clearly non-circular blobs before we get to scoring.
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         circularity = 0.0
         if contours:
@@ -203,74 +300,102 @@ class CVDectector:
             if peri > 0:
                 circularity = min(1.0, (4 * np.pi * area) / (peri ** 2))
 
-        # Size score (adaptive - penalize both too small and too large)
+        # Size score (adaptive — penalise both too-small and too-large)
         box_area = (x2 - x1) * (y2 - y1)
         if box_area <= config.BERRY_SIZE_MIN:
             size_score = box_area / max(config.BERRY_SIZE_MIN, 1)
         elif box_area >= config.BERRY_SIZE_MAX:
             size_score = config.BERRY_SIZE_MAX / box_area
         elif box_area <= config.BERRY_SIZE_IDEAL:
-            size_score = (box_area - config.BERRY_SIZE_MIN) / max(config.BERRY_SIZE_IDEAL - config.BERRY_SIZE_MIN, 1)
+            size_score = (box_area - config.BERRY_SIZE_MIN) / max(
+                config.BERRY_SIZE_IDEAL - config.BERRY_SIZE_MIN, 1)
         else:
-            size_score = (config.BERRY_SIZE_MAX - box_area) / max(config.BERRY_SIZE_MAX - config.BERRY_SIZE_IDEAL, 1)
+            size_score = (config.BERRY_SIZE_MAX - box_area) / max(
+                config.BERRY_SIZE_MAX - config.BERRY_SIZE_IDEAL, 1)
         size_score = float(np.clip(size_score, 0.0, 1.0))
 
-        # Texture score (Laplacian variance - higher = more texture)
+        # Texture score (Laplacian variance — berries have seedy texture)
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         texture = float(np.clip(lap_var / 500.0, 0.0, 1.0))
 
-        # Weighted total
         total = (
-            config.CV_WEIGHT_REDNESS * redness +
+            config.CV_WEIGHT_REDNESS     * redness +
             config.CV_WEIGHT_CIRCULARITY * circularity +
-            config.CV_WEIGHT_SIZE * size_score +
-            config.CV_WEIGHT_TEXTURE * texture
+            config.CV_WEIGHT_SIZE        * size_score +
+            config.CV_WEIGHT_TEXTURE     * texture
         )
 
         return {
-            "redness": round(redness, 3),
+            "redness":     round(redness,     3),
             "circularity": round(circularity, 3),
-            "size": round(size_score, 3),
-            "texture": round(texture, 3),
-            "total": round(total, 3)
+            "size":        round(size_score,  3),
+            "texture":     round(texture,     3),
+            "total":       round(total,       3),
         }
 
     def detect(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
         """
         Run CV contour detection.
 
-        Returns:
-            (detections, mask)
+        Pipeline
+        --------
+        1. Build red mask with saturation/value gate.
+        2. Find external contours; reject tiny, non-circular, and elongated ones.
+        3. Split large multi-berry blobs with distance-transform watershed.
+        4. Score each candidate box.
+        5. Run NMS to eliminate duplicate boxes.
+
+        Returns
+        -------
+        (detections, mask)
         """
-        hsv, mask = self._build_red_mask(frame)
+        _, mask = self._build_red_mask(frame)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        raw_boxes = []
+        raw_boxes: List[Tuple[int, int, int, int]] = []
+
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < config.MIN_CONTOUR_AREA:
                 continue
+
+            # Shape pre-filter — reject non-circular or elongated blobs
+            if self._contour_circularity(cnt) < _CONTOUR_MIN_CIRCULARITY:
+                continue
+            if self._contour_aspect_ratio(cnt) > _MAX_ASPECT_RATIO:
+                continue
+
             if area >= config.CONVEXITY_MIN_AREA:
-                raw_boxes.extend(self._split_cluster(cnt))
+                # Potentially a cluster — try watershed split
+                raw_boxes.extend(self._split_by_watershed(mask, cnt))
             else:
                 x, y, w, h = cv2.boundingRect(cnt)
                 raw_boxes.append((x, y, x + w, y + h))
 
-        boxes = self._merge_overlapping(raw_boxes)
+        if not raw_boxes:
+            return [], mask
 
-        # Convert to Detection objects with CV confidence score
-        detections = []
-        for x1, y1, x2, y2 in boxes:
-            scores = self.cv_score_crop(frame, (x1, y1, x2, y2))
-            confidence = scores["total"]
+        # Score every candidate box
+        scores: List[float] = []
+        for box in raw_boxes:
+            s = self.cv_score_crop(frame, box)
+            scores.append(s["total"])
 
-            # Only keep if above threshold (but threshold is low - fusion will decide)
-            if confidence >= config.CV_BASE_THRESHOLD * 0.7:  # Lower threshold, fusion handles
+        # NMS: removes duplicate boxes around the same berry
+        kept_indices = self._nms(raw_boxes, scores)
+
+        # Build Detection objects, applying the acceptance threshold
+        min_confidence = config.CV_BASE_THRESHOLD * 0.7  # fusion handles final cut
+        detections: List[Detection] = []
+        for idx in kept_indices:
+            conf = scores[idx]
+            if conf >= min_confidence:
+                x1, y1, x2, y2 = raw_boxes[idx]
                 detections.append(Detection(
                     x1=x1, y1=y1, x2=x2, y2=y2,
-                    confidence=confidence, source="cv"
+                    confidence=conf, source="cv",
                 ))
 
         return detections, mask

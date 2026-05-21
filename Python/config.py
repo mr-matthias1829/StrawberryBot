@@ -10,81 +10,97 @@ MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav2", "weights"
 # =============================================================================
 # FUSION THRESHOLDS
 # =============================================================================
-YOLO_BASE_THRESHOLD = 0.5      # Minimum YOLO conf to consider
-CV_BASE_THRESHOLD = 0.6        # Minimum CV conf to consider
-CV_DIRECT_ACCEPT_THRESHOLD = 0.72  # CV-only accept gate before zoom fallback
-HIGH_AI_CONFIDENCE = 0.85      # If YOLO > this, trust even if CV says no
-LOW_AI_CONFIDENCE = 0.4        # If YOLO < this, trigger zoom recheck
+YOLO_BASE_THRESHOLD = 0.5       # Minimum YOLO conf to consider
 
-# Fusion weights when both agree
-YOLO_FUSION_WEIGHT = 0.5
-CV_FUSION_WEIGHT = 0.5
+# Lowered from 0.60 → 0.50: CV scores are more conservative now that the
+# redness denominator is tighter; more candidates should reach fusion.
+CV_BASE_THRESHOLD = 0.50
+
+# Lowered from 0.72 → 0.65: previous value was hard to reach with the old
+# scoring — a well-lit berry with good shape now reliably clears 0.65.
+CV_DIRECT_ACCEPT_THRESHOLD = 0.65
+
+HIGH_AI_CONFIDENCE = 0.85       # If YOLO > this, trust even without CV
+LOW_AI_CONFIDENCE  = 0.40       # If YOLO < this, trigger zoom recheck
+
+# Fusion weights when both detectors agree on the same berry
+YOLO_FUSION_WEIGHT = 0.55       # AI slightly preferred when both agree
+CV_FUSION_WEIGHT   = 0.45
 
 # =============================================================================
-# CV PIPELINE — CONTOUR + CONVEXITY DEFECT
+# CV PIPELINE — HSV COLOUR RANGES
 # =============================================================================
-RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]),  np.array([10,  255, 255])
-RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]),  np.array([179, 255, 255])
+# Lower bound sat 100, val 135 keeps pale / dark non-berry reds out.
+# If distant berries are being missed, try lowering sat to 80 and val to 100.
+RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]), np.array([10,  255, 255])
+RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]), np.array([179, 255, 255])
 
 # Morphology
-MORPH_OPEN_ITER = 3
+MORPH_OPEN_ITER  = 3
 MORPH_CLOSE_ITER = 5
 
 # Contour filtering
-MIN_CONTOUR_AREA = 200          # Very small — let fusion handle false positives
-CONVEXITY_MIN_AREA = 3000       # Area threshold for trying to split clusters
-MERGE_OVERLAP_RATIO = 0.45
+MIN_CONTOUR_AREA    = 150       # Slightly lower than 200 — distant berries are small
+CONVEXITY_MIN_AREA  = 3000      # Area at which watershed cluster-splitting kicks in
+MERGE_OVERLAP_RATIO = 0.45      # (legacy, kept for zoom-recheck path)
 
-# CV scoring weights (for cv_score_crop)
-CV_WEIGHT_REDNESS = 0.35
-CV_WEIGHT_CIRCULARITY = 0.25
-CV_WEIGHT_SIZE = 0.20
-CV_WEIGHT_TEXTURE = 0.15
-CV_WEIGHT_TEMPORAL = 0.05       # Not used in single-frame, placeholder
+# CV scoring weights — must sum to 1.0 (temporal is a placeholder; unused)
+# Redness bumped 0.35 → 0.40: most reliable single-frame strawberry signal.
+# Circularity dropped 0.25 → 0.20: small/distant berries have noisier contours.
+CV_WEIGHT_REDNESS     = 0.40
+CV_WEIGHT_CIRCULARITY = 0.20
+CV_WEIGHT_SIZE        = 0.20
+CV_WEIGHT_TEXTURE     = 0.15
+CV_WEIGHT_TEMPORAL    = 0.05    # Placeholder — not used in single-frame scoring
 
-# Size scoring parameters (adaptive — these are reference values)
-BERRY_SIZE_IDEAL = 5000         # px² — ideal berry size in frame
-BERRY_SIZE_MIN = 4             # px² — below this, size score decays
-BERRY_SIZE_MAX = 25000          # px² — above this, size score decays
+# Size scoring reference values (px² in the inference frame)
+BERRY_SIZE_IDEAL = 5000         # px² — ideal berry area
+BERRY_SIZE_MIN   = 4            # px² — below this, size score decays toward 0
+BERRY_SIZE_MAX   = 25000        # px² — above this, size score decays toward 0
 
 # =============================================================================
 # ZOOM RECHECK (fallback refinement)
 # =============================================================================
-MAX_RECHECKS = 2
+MAX_RECHECKS      = 2
 ZOOM_SCALE_FACTOR = 2.0
-RECHECK_AI_CONF = 0.65
-RECHECK_CV_CONF = 0.55
+RECHECK_AI_CONF   = 0.65
+RECHECK_CV_CONF   = 0.50        # Lowered from 0.55 — zoom crops can be tight/partial
 
 # =============================================================================
-# TEMPORAL MEMORY
+# TEMPORAL MEMORY / TRACKING
 # =============================================================================
-PERSISTENCE_REQUIRED = 2
-PERSISTENCE_REQUIRED_CV_ONLY = 3
-PERSISTENCE_DECAY = 0.7
-IOU_MATCH_THRESHOLD = 0.4
+PERSISTENCE_REQUIRED        = 2   # Frames needed to confirm (AI / fused)
+PERSISTENCE_REQUIRED_CV_ONLY = 3  # Frames needed to confirm (CV-only source)
+PERSISTENCE_DECAY           = 0.7
+IOU_MATCH_THRESHOLD         = 0.40  # Standard IoU gate (containment check is separate)
 
-# Possible-hit lane (kept separate from confirmed hits)
+# ---------------------------------------------------------------------------
+# Possible-hit lane
+# ---------------------------------------------------------------------------
+# Generic fallback (fused / unknown source)
 POSSIBLE_HIT_MIN_CONF = 0.50
 POSSIBLE_HIT_MIN_SEEN = 1
 
-# Source-aware possible-hit tuning: CV-only is easier to keep as possible,
-# AI-only is stricter and down-weighted due to known false positives.
-POSSIBLE_CV_ONLY_MIN_CONF = 0.6
+# CV-only possible: lowered from 0.60 → 0.50 to account for the more
+# conservative CV scoring after the redness denominator tightening.
+POSSIBLE_CV_ONLY_MIN_CONF = 0.50
 POSSIBLE_CV_ONLY_MIN_SEEN = 1
-POSSIBLE_AI_ONLY_MIN_CONF = 0.6
-POSSIBLE_AI_ONLY_MIN_SEEN = 1
-POSSIBLE_AI_CONF_WEIGHT = 0.5
 
-# If no confirmed detections exist, optionally steer toward strong possible hits.
+# AI-only possible: kept strict — AI false-positives are more common.
+POSSIBLE_AI_ONLY_MIN_CONF = 0.60
+POSSIBLE_AI_ONLY_MIN_SEEN = 1
+POSSIBLE_AI_CONF_WEIGHT   = 0.50   # Down-weight AI conf for possible classification
+
+# Possible → target fallback
 POSSIBLE_TARGET_FALLBACK_ENABLED = True
-POSSIBLE_TARGET_MIN_CONF = 0.60
+POSSIBLE_TARGET_MIN_CONF         = 0.50  # Lowered from 0.60 to match CV_ONLY floor
 
 # =============================================================================
 # DISPLAY
 # =============================================================================
 SHOW_DEBUG_WINDOWS = True
-COLOR_AI = (0, 255, 0)
-COLOR_CV = (255, 80, 0)      # Orange-blue from your script
-COLOR_FUSED = (0, 255, 255)
-COLOR_ZOOMED = (255, 255, 0)  # Cyan for zoom-rechecked boxes
+COLOR_AI       = (0, 255, 0)
+COLOR_CV       = (255, 80, 0)
+COLOR_FUSED    = (0, 255, 255)
+COLOR_ZOOMED   = (255, 255, 0)
 COLOR_POSSIBLE = (180, 100, 255)

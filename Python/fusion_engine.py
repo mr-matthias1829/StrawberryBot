@@ -19,6 +19,13 @@ RECHECK_EVERY_N_DETECTIONS: int = 3
 ZOOM_QUEUE_MAXSIZE: int = 4
 CLEANUP_INTERVAL: int = 30
 
+# When one box is largely *inside* another (e.g. a small CV box inside a large
+# AI box), standard IoU underestimates how much they agree.  We supplement IoU
+# with a containment score = intersection / area_of_the_smaller_box.
+# If either metric clears its threshold, the pair is treated as a match.
+CONTAINMENT_MATCH_THRESHOLD = 0.45   # fraction of the smaller box that must
+                                      # overlap the larger box for a match
+
 
 @dataclass
 class TrackedObject:
@@ -76,6 +83,27 @@ def _scale_det(det: Detection, scale: float) -> Detection:
         confidence=det.confidence,
         source=det.source,
     )
+
+
+def _containment(d1: Detection, d2: Detection) -> float:
+    """
+    Fraction of the *smaller* box covered by the intersection of d1 and d2.
+
+    This is 1.0 when the smaller box is entirely inside the larger one, and
+    falls off as they drift apart.  Use alongside standard IoU so that a tight
+    CV crop sitting fully inside a larger AI bounding box still registers as a
+    match even though their IoU is low.
+    """
+    ix1 = max(d1.x1, d2.x1)
+    iy1 = max(d1.y1, d2.y1)
+    ix2 = min(d1.x2, d2.x2)
+    iy2 = min(d1.y2, d2.y2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area1 = max(1, (d1.x2 - d1.x1) * (d1.y2 - d1.y1))
+    area2 = max(1, (d2.x2 - d2.x1) * (d2.y2 - d2.y1))
+    return inter / min(area1, area2)
 
 
 class DetectionWorker:
@@ -245,20 +273,40 @@ class FusionEngine:
         return src.startswith("ai") or "zoomed_ai" in src
 
     @staticmethod
-    def _match_detections(ai_dets: List[Detection], cv_dets: List[Detection]) -> Tuple[Dict[int, int], List[int], List[int]]:
+    def _match_detections(
+        ai_dets: List[Detection],
+        cv_dets: List[Detection],
+    ) -> Tuple[Dict[int, int], List[int], List[int]]:
+        """
+        Match AI detections to CV detections.
+
+        A pair is considered a match when EITHER:
+          • their standard IoU  >= config.IOU_MATCH_THRESHOLD, OR
+          • the smaller box is largely contained within the larger box
+            (containment score >= CONTAINMENT_MATCH_THRESHOLD).
+
+        The second criterion handles the common case where the AI box wraps
+        the whole berry while the CV box only covers the reddest portion —
+        standard IoU can be 0.2–0.3 in that situation even though both
+        detectors agree on the same berry.
+        """
         matches: Dict[int, int] = {}
         used_cv = set()
 
         for i, ai_det in enumerate(ai_dets):
-            best_iou = 0.0
+            best_score = 0.0
             best_j = -1
             for j, cv_det in enumerate(cv_dets):
                 if j in used_cv:
                     continue
-                score = iou(ai_det, cv_det)
-                if score > best_iou and score >= config.IOU_MATCH_THRESHOLD:
-                    best_iou = score
-                    best_j = j
+                iou_score = iou(ai_det, cv_det)
+                cont_score = _containment(ai_det, cv_det)
+                # Accept if either metric clears its threshold; rank by max
+                if iou_score >= config.IOU_MATCH_THRESHOLD or cont_score >= CONTAINMENT_MATCH_THRESHOLD:
+                    combined = max(iou_score, cont_score)
+                    if combined > best_score:
+                        best_score = combined
+                        best_j = j
             if best_j >= 0:
                 matches[i] = best_j
                 used_cv.add(best_j)
@@ -310,8 +358,6 @@ class FusionEngine:
                 confirmed.append(obj)
                 continue
 
-            # Decide possible membership based on the latest detector's own
-            # confidence (AI or CV) rather than the accumulated fused score.
             src = (obj.detection.source or "").lower()
             det_conf = float(obj.detection.confidence or 0.0)
 
@@ -323,12 +369,9 @@ class FusionEngine:
             elif self._is_ai_like(src):
                 min_seen = config.POSSIBLE_AI_ONLY_MIN_SEEN
                 min_conf = config.POSSIBLE_AI_ONLY_MIN_CONF
-                # AI confidence is down-weighted by a tunable factor for possible
-                # classification because AI false positives are more likely.
                 score = det_conf * config.POSSIBLE_AI_CONF_WEIGHT
 
             else:
-                # For fused / unknown sources, fall back to the tracked fused_confidence
                 min_seen = config.POSSIBLE_HIT_MIN_SEEN
                 min_conf = config.POSSIBLE_HIT_MIN_CONF
                 score = obj.fused_confidence
@@ -349,8 +392,14 @@ class FusionEngine:
             for obj_id, obj in self.tracked_objects.items():
                 if obj_id in used or not obj.is_active:
                     continue
-                score = iou(det, obj.detection)
-                if score > best_iou and score >= config.IOU_MATCH_THRESHOLD:
+                # Use the same containment-aware matching for tracking continuity
+                iou_score = iou(det, obj.detection)
+                cont_score = _containment(det, obj.detection)
+                score = max(iou_score, cont_score)
+                if score > best_iou and (
+                    iou_score >= config.IOU_MATCH_THRESHOLD
+                    or cont_score >= CONTAINMENT_MATCH_THRESHOLD
+                ):
                     best_iou = score
                     best_id = obj_id
 
@@ -408,7 +457,6 @@ class FusionEngine:
 
         for obj in possible:
             det = obj.detection
-            # Display a per-source possible score (AI may be down-weighted)
             src = (det.source or "").lower()
             det_conf = float(det.confidence or 0.0)
             if FusionEngine._is_ai_like(src):
@@ -478,7 +526,6 @@ class FusionEngine:
         using_possible_fallback = False
 
         if not target_pool and config.POSSIBLE_TARGET_FALLBACK_ENABLED:
-            # Use per-source possible scoring when deciding fallback targets
             def possible_score(p: TrackedObject) -> float:
                 src = (p.detection.source or "").lower()
                 det_conf = float(p.detection.confidence or 0.0)
@@ -504,7 +551,6 @@ class FusionEngine:
         target_center = None
         if target is not None:
             target_center = (target.center_x, target.center_y)
-            # Look up the tracked id from confirmed first, then possible if fallback used
             search_list = confirmed if not using_possible_fallback else confirmed + possible
             for obj in search_list:
                 if obj.detection == target.detection:
@@ -539,4 +585,3 @@ class FusionEngine:
 
     def shutdown(self) -> None:
         self._worker.stop()
-
