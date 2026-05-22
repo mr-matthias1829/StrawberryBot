@@ -13,15 +13,18 @@ from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 import os, sys
 print(f"isatty={sys.stdin.isatty()}, stdin fd={sys.stdin.fileno()}, pid={os.getpid()}", flush=True)
 
-
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|buffer_size;1024000"
 
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 720
 
+RTSP_ETHERNET = "rtsp://admin:admin@169.254.192.21:554/live"
+RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
-def _connect_camera(rtsp_url: str) -> cv2.VideoCapture:
-    print(f"Connecting to reCamera stream: {rtsp_url}")
+
+def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
+    """Probeer een RTSP stream te openen. Geeft None terug als het mislukt."""
+    print(f"Probeer {label}: {rtsp_url}")
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -29,32 +32,46 @@ def _connect_camera(rtsp_url: str) -> cv2.VideoCapture:
         for _ in range(30):
             ok, frame = cap.read()
             if ok and frame is not None:
-                print("reCamera stream connected.")
+                print(f"{label} verbonden!")
                 return cap
             time.sleep(0.1)
 
-    print("reCamera not available - falling back to laptop camera.")
+    print(f"{label} niet beschikbaar.")
     cap.release()
+    return None
+
+
+def _connect_camera() -> cv2.VideoCapture:
+    """
+    Verbindingsvolgorde:
+      1. reCamera via Ethernet (169.254.192.21)
+      2. reCamera via USB     (192.168.42.1)
+      3. Laptop webcam        (index 0)
+    """
+    cap = _try_rtsp(RTSP_ETHERNET, "reCamera Ethernet")
+    if cap is not None:
+        return cap
+
+    cap = _try_rtsp(RTSP_USB, "reCamera USB")
+    if cap is not None:
+        return cap
+
     return _open_laptop_camera()
 
 
 def _open_laptop_camera() -> cv2.VideoCapture:
+    print("Geen reCamera gevonden — laptop camera proberen...")
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     if not cap.isOpened():
-        raise RuntimeError("No camera available.")
-    print("Laptop camera connected.")
+        raise RuntimeError("Geen enkele camera beschikbaar.")
+    print("Laptop camera verbonden.")
     return cap
 
 
-def choose_camera_mode() -> bool:
-    return True
-
-def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> None:
+def run_webcam() -> None:
     fusion = FusionEngine()
-
-
 
     show_mask = config.SHOW_DEBUG_WINDOWS
     fps_timer = time.perf_counter()
@@ -62,10 +79,7 @@ def run_webcam(rtsp_url: str = "rtsp://admin:admin@192.168.42.1:554/live") -> No
     cap = None
 
     try:
-        if choose_camera_mode():
-            cap = _connect_camera(rtsp_url)
-        else:
-            cap = _open_laptop_camera()
+        cap = _connect_camera()
 
         print(f"\nInference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
@@ -159,4 +173,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--image":
         run_image(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
-        run_webcam(sys.argv[1] if len(sys.argv) > 1 else "rtsp://admin:admin@192.168.42.1:554/live")
+        run_webcam()
