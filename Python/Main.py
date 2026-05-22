@@ -22,6 +22,8 @@ RTSP_ETHERNET = "rtsp://admin:admin@169.254.192.21:554/live"
 RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
 
+# ── at the top of _connect_camera / helpers ──────────────────────────────────
+
 def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
     """Probeer een RTSP stream te openen. Geeft None terug als het mislukt."""
     print(f"Probeer {label}: {rtsp_url}")
@@ -41,22 +43,16 @@ def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
     return None
 
 
-def _connect_camera() -> cv2.VideoCapture:
-    """
-    Verbindingsvolgorde:
-      1. reCamera via Ethernet (169.254.192.21)
-      2. reCamera via USB     (192.168.42.1)
-      3. Laptop webcam        (index 0)
-    """
+def _connect_camera() -> tuple[cv2.VideoCapture, str]:   # ← now returns a label too
     cap = _try_rtsp(RTSP_ETHERNET, "reCamera Ethernet")
     if cap is not None:
-        return cap
+        return cap, "Ethernet"
 
     cap = _try_rtsp(RTSP_USB, "reCamera USB")
     if cap is not None:
-        return cap
+        return cap, "USB"
 
-    return _open_laptop_camera()
+    return _open_laptop_camera(), "Laptop"
 
 
 def _open_laptop_camera() -> cv2.VideoCapture:
@@ -70,6 +66,44 @@ def _open_laptop_camera() -> cv2.VideoCapture:
     return cap
 
 
+# ── helper to draw the camera-mode badge ─────────────────────────────────────
+
+def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
+    """Draw a small camera-mode label in the top-right corner (in-place)."""
+    label   = f"CAM: {mode}"
+    font    = cv2.FONT_HERSHEY_SIMPLEX
+    scale   = 0.55
+    thick   = 1
+    padding = 6
+
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thick)
+    h, w = frame.shape[:2]
+
+    x1 = w - tw - padding * 2 - 2
+    y1 = 2
+    x2 = w - 2
+    y2 = th + baseline + padding * 2
+
+    # semi-transparent dark background
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (20, 20, 20), cv2.FILLED)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+
+    # coloured dot  (green = Ethernet, yellow = USB, cyan = Laptop)
+    colours = {"Ethernet": (80, 220, 80), "USB": (60, 220, 220), "Laptop": (220, 220, 60)}
+    dot_colour = colours.get(mode, (200, 200, 200))
+    dot_x = x1 + padding + 5
+    dot_y = y1 + (y2 - y1) // 2
+    cv2.circle(frame, (dot_x, dot_y), 4, dot_colour, cv2.FILLED)
+
+    # text
+    tx = dot_x + 10
+    ty = y1 + padding + th
+    cv2.putText(frame, label, (tx, ty), font, scale, (230, 230, 230), thick, cv2.LINE_AA)
+
+
+# ── updated run_webcam ────────────────────────────────────────────────────────
+
 def run_webcam() -> None:
     fusion = FusionEngine()
 
@@ -79,9 +113,10 @@ def run_webcam() -> None:
     cap = None
 
     try:
-        cap = _connect_camera()
+        cap, cam_mode = _connect_camera()          # ← unpack label
 
-        print(f"\nInference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
+        print(f"\nCamera mode: {cam_mode}")
+        print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
 
         while True:
@@ -91,6 +126,11 @@ def run_webcam() -> None:
                 continue
 
             annotated, _, debug, mask = fusion.process_frame(frame)
+
+            # ── badge ──────────────────────────────────────────────────────
+            display = cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+            _draw_camera_badge(display, cam_mode)
+            # ──────────────────────────────────────────────────────────────
 
             fps_count += 1
             now = time.perf_counter()
@@ -105,8 +145,7 @@ def run_webcam() -> None:
                 fps_count = 0
                 fps_timer = now
 
-            cv2.imshow("Strawberry Detection",
-                       cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT)))
+            cv2.imshow("Strawberry Detection", display)   # ← use pre-built display frame
 
             if show_mask and mask is not None:
                 cv2.imshow("CV Mask",
@@ -125,7 +164,6 @@ def run_webcam() -> None:
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()
-
 
 def run_image(image_path: Optional[str] = None) -> None:
     if image_path is None:
