@@ -15,4 +15,7 @@ model.train(
     patience=5   # stop if no improvement for X epochs
 )
 
+metrics = model.val()
+print(metrics.box.map)      # mAP50-95
+print(metrics.box.map50)    # mAP50
 
