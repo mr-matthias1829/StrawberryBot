@@ -1,6 +1,6 @@
 path: dataset_aug
 train: images/train
-val:   images/val
+val:   images/val cv1
 
 nc: 1
 names:

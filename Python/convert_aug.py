@@ -15,15 +15,15 @@ IMAGES_DIR  = "dataset/images"
 LABELS_DIR  = "dataset/labels"
 OUT_TRAIN_IMAGES = "dataset_aug/images/train"
 OUT_TRAIN_LABELS = "dataset_aug/labels/train"
-OUT_VAL_IMAGES   = "dataset_aug/images/val"
-OUT_VAL_LABELS   = "dataset_aug/labels/val"
+OUT_VAL_IMAGES   = "dataset_aug/images/val cv1"
+OUT_VAL_LABELS   = "dataset_aug/labels/val cv1"
 
 SYNTHETIC_NEGATIVES_TRAIN = 30
 SYNTHETIC_NEGATIVES_VAL   = 5
 
 # Background-swap: how many random backgrounds to composite per image
 BG_SWAP_TRAIN = 3   # dark / gradient / noisy variants each
-BG_SWAP_VAL   = 1   # one random bg for val
+BG_SWAP_VAL   = 1   # one random bg for val cv1
 
 AUGMENTATIONS = {
     "flip_h":     True,
@@ -389,7 +389,7 @@ def generate_synthetic_negative(img_size: int = 640) -> np.ndarray:
 
 
 def generate_all_negatives(n_train, n_val, img_size=640):
-    print(f"Generating {n_train} train + {n_val} val synthetic negatives...")
+    print(f"Generating {n_train} train + {n_val} val cv1 synthetic negatives...")
     for i in range(n_train):
         save(f"synthetic_neg_{i:04d}",
              generate_synthetic_negative(img_size), [], train=True)
@@ -409,7 +409,7 @@ def augment_dataset() -> None:
 
     print(f"Found {len(image_files)} images - augmenting...")
     print(f"Output train: {os.path.abspath(OUT_TRAIN_IMAGES)}")
-    print(f"Output val:   {os.path.abspath(OUT_VAL_IMAGES)}")
+    print(f"Output val cv1:   {os.path.abspath(OUT_VAL_IMAGES)}")
 
     ZOOM_IN_FRAC   = 0.5
     ZOOM_OUT_FRAC  = 0.35
@@ -435,7 +435,7 @@ def augment_dataset() -> None:
         h, w = img.shape[:2]
         mask = extract_foreground_mask(img) if AUGMENTATIONS.get("bg_swap") else None
 
-        # -- Copy original -> val ------------------------------------------
+        # -- Copy original -> val cv1 ------------------------------------------
         save(stem, img, labels, train=False)
 
         # -- Flips -> train ------------------------------------------------
@@ -478,7 +478,7 @@ def augment_dataset() -> None:
                  aug_zoom_out(img, ZOOM_OUT2_FRAC),
                  zoom_out_labels(labels, ZOOM_OUT2_FRAC), train=True)
 
-        # -- Background swap -> train + val --------------------------------
+        # -- Background swap -> train + val cv1 --------------------------------
         if AUGMENTATIONS.get("bg_swap") and mask is not None:
             # Train: one of each bg type for variety
             for i, bg_fn in enumerate(_TRAIN_BG_FNS):
@@ -499,7 +499,7 @@ def augment_dataset() -> None:
 
     train_total = len(os.listdir(OUT_TRAIN_IMAGES))
     val_total   = len(os.listdir(OUT_VAL_IMAGES))
-    print(f"Done! {len(image_files)} originals -> {train_total} train / {val_total} val")
+    print(f"Done! {len(image_files)} originals -> {train_total} train / {val_total} val cv1")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 BASE_DIR = os.path.dirname(__file__)
-MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav2", "weights", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav2.5", "weights", "best.pt")
 
 # =============================================================================
 # FUSION THRESHOLDS
@@ -30,8 +30,8 @@ CV_FUSION_WEIGHT   = 0.45
 # =============================================================================
 # CV PIPELINE — HSV COLOUR RANGES
 # =============================================================================
-# Lower bound sat 100, val 135 keeps pale / dark non-berry reds out.
-# If distant berries are being missed, try lowering sat to 80 and val to 100.
+# Lower bound sat 100, val cv1 135 keeps pale / dark non-berry reds out.
+# If distant berries are being missed, try lowering sat to 80 and val cv1 to 100.
 RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]), np.array([10,  255, 255])
 RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]), np.array([179, 255, 255])
 

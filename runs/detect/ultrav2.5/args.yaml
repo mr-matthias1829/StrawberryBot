@@ -1,6 +1,6 @@
 task: detect
 mode: train
-model: yolov8n.pt
+model: yolo26n.pt
 data: data.yaml
 epochs: 60
 time: null
@@ -13,7 +13,7 @@ cache: ram
 device: cpu
 workers: 8
 project: null
-name: ultrav1
+name: ultrav2.5
 exist_ok: false
 pretrained: true
 optimizer: auto
@@ -107,4 +107,4 @@ auto_augment: randaugment
 erasing: 0.4
 cfg: null
 tracker: botsort.yaml
-save_dir: C:\Users\Eigenaar\PycharmProjects\PythonProject\runs\detect\train-5
+save_dir: C:\Users\Eigenaar\PycharmProjects\PythonProject\runs\detect\train-7
