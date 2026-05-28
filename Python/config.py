@@ -44,13 +44,20 @@ MIN_CONTOUR_AREA    = 150       # Slightly lower than 200 — distant berries ar
 CONVEXITY_MIN_AREA  = 3000      # Area at which watershed cluster-splitting kicks in
 MERGE_OVERLAP_RATIO = 0.45      # (legacy, kept for zoom-recheck path)
 
-# CV scoring weights — must sum to 1.0 (temporal is a placeholder; unused)
-# Redness bumped 0.35 → 0.40: most reliable single-frame strawberry signal.
-# Circularity dropped 0.25 → 0.20: small/distant berries have noisier contours.
+# CV scoring weights — REDNESS + CIRCULARITY + SIZE + TEXTURE must sum to 1.0.
+# TEMPORAL is a placeholder kept for future use; it is NOT included in scoring.
+#
+# Redness:     0.40 — most reliable single-frame strawberry signal.
+# Circularity: 0.40 — shape quality; low values already pre-filtered at contour
+#                     stage so this mainly rewards well-formed berries.
+# Size:        0.15 — penalises implausibly tiny or huge blobs.
+# Texture:     0.05 — Laplacian variance is a weak tiebreaker ONLY. Keeping it
+#                     low because it also rewards grass, fabric, and hair; a high
+#                     weight here produces false positives on textured backgrounds.
 CV_WEIGHT_REDNESS     = 0.40
-CV_WEIGHT_CIRCULARITY = 0.20
-CV_WEIGHT_SIZE        = 0.20
-CV_WEIGHT_TEXTURE     = 0.15
+CV_WEIGHT_CIRCULARITY = 0.40
+CV_WEIGHT_SIZE        = 0.15
+CV_WEIGHT_TEXTURE     = 0.05
 CV_WEIGHT_TEMPORAL    = 0.05    # Placeholder — not used in single-frame scoring
 
 # Size scoring reference values (px² in the inference frame)

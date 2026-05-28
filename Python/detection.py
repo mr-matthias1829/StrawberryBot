@@ -60,11 +60,11 @@ _VAL_MAX   = 240   # reject near-white highlights
 
 # Circularity floor at the contour stage — drops thin/elongated blobs early.
 # Strawberries are roughly circular; wires, clothing seams, etc. are not.
-_CONTOUR_MIN_CIRCULARITY = 0.25
+_CONTOUR_MIN_CIRCULARITY = 0.55
 
 # Aspect-ratio gate: width/height (or height/width) must be within this.
 # Rejects very elongated objects before scoring.
-_MAX_ASPECT_RATIO = 2.8
+_MAX_ASPECT_RATIO = 1.6
 
 # Watershed: minimum fraction of the bounding-box diagonal that a foreground
 # peak must be from the edge to count as a distinct berry centre.
@@ -300,6 +300,12 @@ class CVDectector:
             if peri > 0:
                 circularity = min(1.0, (4 * np.pi * area) / (peri ** 2))
 
+            # HARD GATE: If it fails the roundness requirement,
+            # it's a poster block or a background artifact. Nuke it entirely.
+            if circularity < 0.20:
+                return {"redness": 0, "circularity": 0, "size": 0,
+                        "texture": 0, "total": 0.0}
+
         # Size score (adaptive — penalise both too-small and too-large)
         box_area = (x2 - x1) * (y2 - y1)
         if box_area <= config.BERRY_SIZE_MIN:
@@ -387,7 +393,7 @@ class CVDectector:
         kept_indices = self._nms(raw_boxes, scores)
 
         # Build Detection objects, applying the acceptance threshold
-        min_confidence = config.CV_BASE_THRESHOLD * 0.7  # fusion handles final cut
+        min_confidence = config.CV_BASE_THRESHOLD
         detections: List[Detection] = []
         for idx in kept_indices:
             conf = scores[idx]
