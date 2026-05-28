@@ -76,7 +76,17 @@ class RobotController:
         self.current_target = closest
         return closest
 
-    def generate_movement(self, gripper_x: int, gripper_y: int) -> str:
+    def generate_dx(self, gripper_x: int) -> int:
+        if self.current_target is None:
+            return 0
+        return self.current_target.center_x - gripper_x
+
+    def generate_dy(self, gripper_y: int) -> int:
+        if self.current_target is None:
+            return 0
+        return self.current_target.center_y - gripper_y
+
+    def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
 
         if self.current_target is None:
             return "NO TARGET"

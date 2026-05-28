@@ -543,9 +543,13 @@ class FusionEngine:
             using_possible_fallback = bool(target_pool)
 
         target = self.robot.choose_target(target_pool, gripper_x, gripper_y)
-        movement = self.robot.generate_movement(gripper_x, gripper_y)
+        movement = self.robot.generate_movementstring(gripper_x, gripper_y)
+
+        dx = self.robot.generate_dx(gripper_x)
+        dy = self.robot.generate_dy(gripper_y)
+
         mode = "possible" if using_possible_fallback else "confirmed"
-        print(f"[ROBOT][{mode}] {movement}")
+        print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy} ")
 
         target_id = None
         target_center = None

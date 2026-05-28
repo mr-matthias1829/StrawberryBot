@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 BASE_DIR = os.path.dirname(__file__)
-MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav2", "weights", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav3", "weights", "best.pt")
 
 # =============================================================================
 # FUSION THRESHOLDS
@@ -24,8 +24,8 @@ HIGH_AI_CONFIDENCE = 0.85       # If YOLO > this, trust even without CV
 LOW_AI_CONFIDENCE  = 0.40       # If YOLO < this, trigger zoom recheck
 
 # Fusion weights when both detectors agree on the same berry
-YOLO_FUSION_WEIGHT = 0.55       # AI slightly preferred when both agree
-CV_FUSION_WEIGHT   = 0.45
+YOLO_FUSION_WEIGHT = 0.65       # AI slightly preferred when both agree
+CV_FUSION_WEIGHT   = 0.35
 
 # =============================================================================
 # CV PIPELINE — HSV COLOUR RANGES

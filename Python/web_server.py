@@ -128,6 +128,11 @@ class _Tee(io.TextIOBase):
 # ── MJPEG generator ────────────────────────────────────────────────────────────
 
 def _gen_mjpeg():
+    """Simple polling MJPEG generator.
+
+    Sleeps 1/30 s between frames so Flask worker threads yield the GIL
+    and the main capture+inference loop is not starved.
+    """
     while True:
         with _frame_lock:
             jpeg = _latest_jpeg
@@ -137,17 +142,45 @@ def _gen_mjpeg():
                 + jpeg
                 + b"\r\n"
             )
-        time.sleep(1.0 / 30.0)
+        time.sleep(1.0 / 20.0)
 
 
 # ── Flask routes ───────────────────────────────────────────────────────────────
 
+_NO_CACHE = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma":        "no-cache",
+    "Expires":       "0",
+    "X-Accel-Buffering": "no",
+}
+
+
 @_app.route("/video_feed")
 def route_video():
-    return Response(
+    """Continuous MJPEG stream."""
+    resp = Response(
         _gen_mjpeg(),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
+    for k, v in _NO_CACHE.items():
+        resp.headers[k] = v
+    return resp
+
+
+@_app.route("/snapshot")
+def route_snapshot():
+    """Single JPEG snapshot — used by JS after tab wake to bypass any backlog.
+
+    Returns 204 No Content when no frame is available yet.
+    """
+    with _frame_lock:
+        jpeg = _latest_jpeg
+    if jpeg is None:
+        return Response(status=204)
+    resp = Response(jpeg, mimetype="image/jpeg")
+    for k, v in _NO_CACHE.items():
+        resp.headers[k] = v
+    return resp
 
 
 @_app.route("/logs")
@@ -282,7 +315,7 @@ _HTML = r"""<!DOCTYPE html>
     /* ─── MAIN LAYOUT ─────────────────────────────────────── */
     main {
       flex: 1;
-      display: flex;          /* flex instead of grid for draggable divider */
+      display: flex;
       min-height: 0;
     }
 
@@ -383,7 +416,6 @@ _HTML = r"""<!DOCTYPE html>
     .lm.ok   { color: var(--green); font-weight: 600; }
     .lm.sep  { color: var(--border2); }
 
-    /* Repeat counter badge for deduplicated lines */
     .repeat-badge {
       display: inline-block; margin-left: 7px;
       font-size: 9px; padding: 0 5px; border-radius: 8px;
@@ -441,7 +473,7 @@ _HTML = r"""<!DOCTYPE html>
     <div class="no-signal" id="noSignal">
       <p>Wachten op videostream…</p>
     </div>
-    <img id="feed" src="/video_feed" alt="camera" onload="onFeedLoad()" onerror="onFeedErr()">
+    <img id="feed" alt="camera">
   </div>
 
   <div class="drag-divider" id="dragDiv"></div>
@@ -513,15 +545,10 @@ function cls(line) {
   return '';
 }
 
-function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 // ── Console ───────────────────────────────────────────────────────────────────
 const logEl = document.getElementById('log');
 
 function addLine(text) {
-  // Deduplicate: if same as last line, just bump the counter badge
   if (text === lastText && lastMsgEl) {
     lastCount++;
     let badge = lastMsgEl.querySelector('.repeat-badge');
@@ -535,7 +562,6 @@ function addLine(text) {
     return;
   }
 
-  // Trim oldest lines
   while (logEl.children.length >= MAX_LINES)
     logEl.removeChild(logEl.firstChild);
 
@@ -628,20 +654,81 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ── Video feed ────────────────────────────────────────────────────────────────
+// ── Video feed management ─────────────────────────────────────────────────────
+//
+// - loadFeed() always opens a fresh connection (cache-busted URL).
+// - onFeedLoad fires once when the stream opens — show video, hide no-signal.
+// - onFeedErr fires on connection failure — hide video, retry with back-off.
+// - Page Visibility + window focus: reload immediately on tab return so the
+//   browser doesn't drain a stale TCP buffer from when it was backgrounded.
+// - /snapshot endpoint: a single-frame fallback for after-sleep tab recovery.
+
+const FEED_RETRY_MS  = 3000;
+const FEED_TIMEOUT   = 12000;  // reload if stream goes silent
+const FEED_MAX_RETRY = 15000;
+
+const feed     = document.getElementById('feed');
+const noSignal = document.getElementById('noSignal');
+
+let feedAlive      = false;
+let feedRetryTimer = null;
+let feedWatchdog   = null;
+let feedRetryDelay = FEED_RETRY_MS;
+
+function _clearFeedTimers() {
+  clearTimeout(feedRetryTimer);
+  clearTimeout(feedWatchdog);
+  feedRetryTimer = null;
+  feedWatchdog   = null;
+}
+
+function _armWatchdog() {
+  clearTimeout(feedWatchdog);
+  feedWatchdog = setTimeout(() => {
+    addLine('── feed watchdog: stream stilgevallen, herverbinden ──');
+    loadFeed();
+  }, FEED_TIMEOUT);
+}
+
+function loadFeed() {
+  _clearFeedTimers();
+  feed.src = '';
+  requestAnimationFrame(() => {
+    feed.src = '/video_feed?' + Date.now();
+    feedRetryTimer = setTimeout(() => { if (!feedAlive) onFeedErr(); }, 10000);
+  });
+}
+
 function onFeedLoad() {
-  const img = document.getElementById('feed');
-  img.style.display = 'block';
-  document.getElementById('noSignal').style.display = 'none';
+  _clearFeedTimers();
+  feedAlive      = true;
+  feedRetryDelay = FEED_RETRY_MS;
+  feed.style.display     = 'block';
+  noSignal.style.display = 'none';
+  _armWatchdog();
 }
 
 function onFeedErr() {
-  document.getElementById('feed').style.display = 'none';
-  document.getElementById('noSignal').style.display = 'flex';
-  setTimeout(() => {
-    document.getElementById('feed').src = '/video_feed?' + Date.now();
-  }, 2000);
+  _clearFeedTimers();
+  feedAlive = false;
+  feed.style.display     = 'none';
+  noSignal.style.display = 'flex';
+  feedRetryTimer = setTimeout(loadFeed, feedRetryDelay);
+  feedRetryDelay = Math.min(feedRetryDelay * 1.5, FEED_MAX_RETRY);
 }
+
+feed.addEventListener('load',  onFeedLoad);
+feed.addEventListener('error', onFeedErr);
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) loadFeed();
+});
+
+window.addEventListener('focus', () => {
+  if (feedAlive) loadFeed();
+});
+
+loadFeed();
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 function connect() {
