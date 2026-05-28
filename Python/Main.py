@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 import config
+import web_server
 from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 
 import os, sys
@@ -22,7 +23,7 @@ RTSP_ETHERNET = "rtsp://admin:admin@169.254.192.21:554/live"
 RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
 
-# ── at the top of _connect_camera / helpers ──────────────────────────────────
+# ── camera helpers ─────────────────────────────────────────────────────────────
 
 def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
     """Probeer een RTSP stream te openen. Geeft None terug als het mislukt."""
@@ -43,7 +44,7 @@ def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
     return None
 
 
-def _connect_camera() -> tuple[cv2.VideoCapture, str]:   # ← now returns a label too
+def _connect_camera() -> tuple[cv2.VideoCapture, str]:
     cap = _try_rtsp(RTSP_ETHERNET, "reCamera Ethernet")
     if cap is not None:
         return cap, "Ethernet"
@@ -66,7 +67,7 @@ def _open_laptop_camera() -> cv2.VideoCapture:
     return cap
 
 
-# ── helper to draw the camera-mode badge ─────────────────────────────────────
+# ── camera badge ───────────────────────────────────────────────────────────────
 
 def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
     """Draw a small camera-mode label in the top-right corner (in-place)."""
@@ -84,27 +85,26 @@ def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
     x2 = w - 2
     y2 = th + baseline + padding * 2
 
-    # semi-transparent dark background
     overlay = frame.copy()
     cv2.rectangle(overlay, (x1, y1), (x2, y2), (20, 20, 20), cv2.FILLED)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
-    # coloured dot  (green = Ethernet, yellow = USB, cyan = Laptop)
     colours = {"Ethernet": (80, 220, 80), "USB": (60, 220, 220), "Laptop": (220, 220, 60)}
     dot_colour = colours.get(mode, (200, 200, 200))
     dot_x = x1 + padding + 5
     dot_y = y1 + (y2 - y1) // 2
     cv2.circle(frame, (dot_x, dot_y), 4, dot_colour, cv2.FILLED)
 
-    # text
     tx = dot_x + 10
     ty = y1 + padding + th
     cv2.putText(frame, label, (tx, ty), font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
 
-# ── updated run_webcam ────────────────────────────────────────────────────────
+# ── run_webcam ─────────────────────────────────────────────────────────────────
 
 def run_webcam() -> None:
+    web_server.start()
+
     fusion = FusionEngine()
 
     show_mask = config.SHOW_DEBUG_WINDOWS
@@ -113,7 +113,7 @@ def run_webcam() -> None:
     cap = None
 
     try:
-        cap, cam_mode = _connect_camera()          # ← unpack label
+        cap, cam_mode = _connect_camera()
 
         print(f"\nCamera mode: {cam_mode}")
         print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
@@ -127,10 +127,10 @@ def run_webcam() -> None:
 
             annotated, _, debug, mask = fusion.process_frame(frame)
 
-            # ── badge ──────────────────────────────────────────────────────
             display = cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
             _draw_camera_badge(display, cam_mode)
-            # ──────────────────────────────────────────────────────────────
+
+            web_server.push_frame(display)
 
             fps_count += 1
             now = time.perf_counter()
@@ -145,7 +145,7 @@ def run_webcam() -> None:
                 fps_count = 0
                 fps_timer = now
 
-            cv2.imshow("Strawberry Detection", display)   # ← use pre-built display frame
+            cv2.imshow("Strawberry Detection", display)
 
             if show_mask and mask is not None:
                 cv2.imshow("CV Mask",
@@ -164,6 +164,7 @@ def run_webcam() -> None:
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()
+
 
 def run_image(image_path: Optional[str] = None) -> None:
     if image_path is None:
