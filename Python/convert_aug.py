@@ -15,15 +15,18 @@ IMAGES_DIR  = "dataset/images"
 LABELS_DIR  = "dataset/labels"
 OUT_TRAIN_IMAGES = "dataset_aug/images/train"
 OUT_TRAIN_LABELS = "dataset_aug/labels/train"
-OUT_VAL_IMAGES   = "dataset_aug/images/val cv1"
-OUT_VAL_LABELS   = "dataset_aug/labels/val cv1"
+OUT_VAL_IMAGES   = "dataset_aug/images/val"
+OUT_VAL_LABELS   = "dataset_aug/labels/val"
 
 SYNTHETIC_NEGATIVES_TRAIN = 30
 SYNTHETIC_NEGATIVES_VAL   = 5
 
+RED_NEGATIVES_SOLID = 8   # plain red fill, different shades
+RED_NEGATIVES_MIXED = 5   # image split into 2-4 red shade blocks
+
 # Background-swap: how many random backgrounds to composite per image
 BG_SWAP_TRAIN = 3   # dark / gradient / noisy variants each
-BG_SWAP_VAL   = 1   # one random bg for val cv1
+BG_SWAP_VAL   = 1   # one random bg for val
 
 AUGMENTATIONS = {
     "flip_h":     True,
@@ -202,6 +205,29 @@ def _solid_color_bg(h, w, rng):
     return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 _BG_FNS = [_dark_bg, _gradient_bg, _noisy_bg, _wood_bg, _solid_color_bg]
+
+def _solid_red_bg(h, w, rng):
+    """Solid red fill — teaches model that red alone ≠ strawberry."""
+    r = int(rng.uniform(120, 255))
+    g = int(rng.uniform(0,   60))
+    b = int(rng.uniform(0,   50))
+    bg = np.full((h, w, 3), (b, g, r), dtype=np.uint8)
+    noise = rng.integers(-15, 16, (h, w, 3), dtype=np.int16)
+    return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+def _mixed_red_bg(h, w, rng):
+    """Image split into 2-4 horizontal bands, each a different red shade."""
+    bg = np.zeros((h, w, 3), dtype=np.uint8)
+    n  = int(rng.integers(2, 5))
+    cuts = sorted(rng.integers(h // 5, 4 * h // 5, n - 1).tolist())
+    cuts = [0] + cuts + [h]
+    for i in range(len(cuts) - 1):
+        r = int(rng.uniform(100, 255))
+        g = int(rng.uniform(0,    70))
+        b = int(rng.uniform(0,    60))
+        bg[cuts[i]:cuts[i+1], :] = (b, g, r)
+    noise = rng.integers(-10, 11, (h, w, 3), dtype=np.int16)
+    return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 def random_background(h, w, rng=None, exclude=None):
     """Return a random background image of shape (h, w, 3)."""
@@ -389,7 +415,7 @@ def generate_synthetic_negative(img_size: int = 640) -> np.ndarray:
 
 
 def generate_all_negatives(n_train, n_val, img_size=640):
-    print(f"Generating {n_train} train + {n_val} val cv1 synthetic negatives...")
+    print(f"Generating {n_train} train + {n_val} val synthetic negatives...")
     for i in range(n_train):
         save(f"synthetic_neg_{i:04d}",
              generate_synthetic_negative(img_size), [], train=True)
@@ -398,6 +424,19 @@ def generate_all_negatives(n_train, n_val, img_size=640):
              generate_synthetic_negative(img_size), [], train=False)
     print(f"  Done — {n_train + n_val} negatives written.")
 
+def generate_red_negatives(n_solid, n_mixed, img_size=640):
+    print(f"Generating {n_solid} solid-red + {n_mixed} mixed-red negatives...")
+    rng = np.random.default_rng()
+    for i in range(n_solid):
+        save(f"red_solid_{i:03d}", _solid_red_bg(img_size, img_size, rng), [], train=True)
+    for i in range(n_mixed):
+        save(f"red_mixed_{i:03d}", _mixed_red_bg(img_size, img_size, rng), [], train=True)
+    # a couple for val too
+    for i in range(max(1, n_solid // 3)):
+        save(f"red_solid_val_{i:03d}", _solid_red_bg(img_size, img_size, rng), [], train=False)
+    for i in range(max(1, n_mixed // 3)):
+        save(f"red_mixed_val_{i:03d}", _mixed_red_bg(img_size, img_size, rng), [], train=False)
+    print(f"  Done.")
 
 # =============================================================================
 # MAIN
@@ -409,7 +448,7 @@ def augment_dataset() -> None:
 
     print(f"Found {len(image_files)} images - augmenting...")
     print(f"Output train: {os.path.abspath(OUT_TRAIN_IMAGES)}")
-    print(f"Output val cv1:   {os.path.abspath(OUT_VAL_IMAGES)}")
+    print(f"Output val:   {os.path.abspath(OUT_VAL_IMAGES)}")
 
     ZOOM_IN_FRAC   = 0.5
     ZOOM_OUT_FRAC  = 0.35
@@ -435,7 +474,7 @@ def augment_dataset() -> None:
         h, w = img.shape[:2]
         mask = extract_foreground_mask(img) if AUGMENTATIONS.get("bg_swap") else None
 
-        # -- Copy original -> val cv1 ------------------------------------------
+        # -- Copy original -> val ------------------------------------------
         save(stem, img, labels, train=False)
 
         # -- Flips -> train ------------------------------------------------
@@ -478,7 +517,7 @@ def augment_dataset() -> None:
                  aug_zoom_out(img, ZOOM_OUT2_FRAC),
                  zoom_out_labels(labels, ZOOM_OUT2_FRAC), train=True)
 
-        # -- Background swap -> train + val cv1 --------------------------------
+        # -- Background swap -> train + val --------------------------------
         if AUGMENTATIONS.get("bg_swap") and mask is not None:
             # Train: one of each bg type for variety
             for i, bg_fn in enumerate(_TRAIN_BG_FNS):
@@ -496,10 +535,11 @@ def augment_dataset() -> None:
     neg_size = first.shape[0] if first is not None else 640
     generate_all_negatives(SYNTHETIC_NEGATIVES_TRAIN, SYNTHETIC_NEGATIVES_VAL,
                            img_size=neg_size)
+    generate_red_negatives(RED_NEGATIVES_SOLID, RED_NEGATIVES_MIXED, img_size=neg_size)
 
     train_total = len(os.listdir(OUT_TRAIN_IMAGES))
     val_total   = len(os.listdir(OUT_VAL_IMAGES))
-    print(f"Done! {len(image_files)} originals -> {train_total} train / {val_total} val cv1")
+    print(f"Done! {len(image_files)} originals -> {train_total} train / {val_total} val")
 
 
 if __name__ == "__main__":
