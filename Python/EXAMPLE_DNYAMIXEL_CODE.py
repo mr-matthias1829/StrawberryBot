@@ -48,10 +48,10 @@ def main():
         # ------------------------------------------------------------------
         # CREATE SERVOS
         # ------------------------------------------------------------------
-
+#13 5 3 4 //8
         shoulder = JointServo(
             ctrl,
-            servo_id=1,
+            servo_id=13,
             min_pos=350,
             max_pos=700,
             speed=120,
@@ -60,7 +60,7 @@ def main():
 
         elbow = JointServo(
             ctrl,
-            servo_id=2,
+            servo_id=5,
             min_pos=250,
             max_pos=800,
             speed=100,
