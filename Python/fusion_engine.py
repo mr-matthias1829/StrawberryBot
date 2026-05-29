@@ -551,7 +551,7 @@ class FusionEngine:
         dy = self.robot.generate_dy(gripper_y)
 
         mode = "possible" if using_possible_fallback else "confirmed"
-        print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy} ")
+        print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy}, {self.robot.generate_depthstring()}")
 
         target_id = None
         target_center = None

@@ -10,8 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
-import motor
-motor.init()
+import time
+
+import platform
+ON_PI = platform.system() == "Linux"
+if ON_PI:
+    import motor
+    motor.init()
 
 import sys
 try:
