@@ -17,7 +17,7 @@ import socket
 import sys
 import threading
 import time
-from typing import List, Optional
+from typing import List, Protocol, cast
 
 import cv2
 import numpy as np
@@ -42,7 +42,13 @@ _start_lock = threading.Lock()
 # The ServoController instance — set via set_servo_controller().
 # None until the caller provides one; the /servo_speed endpoint
 # gracefully returns 503 if it has not been set yet.
-_servo_ctrl = None
+class _ServoControllerProto(Protocol):
+    speed_scale: float
+
+    def set_speed_scale(self, scale: float) -> None: ...
+
+
+_servo_ctrl: _ServoControllerProto | None = None
 _servo_ctrl_lock = threading.Lock()
 
 
@@ -50,7 +56,8 @@ _servo_ctrl_lock = threading.Lock()
 
 def push_frame(bgr: np.ndarray) -> None:
     global _latest_jpeg
-    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 72])
+    # Use slightly lower JPEG quality to reduce bandwidth and encoding time
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 60])
     if ok:
         with _frame_lock:
             _latest_jpeg = buf.tobytes()
@@ -103,7 +110,7 @@ def start(host: str = "0.0.0.0", port: int = 8080) -> None:
             return
         _started = True
 
-    sys.stdout = _Tee(sys.stdout)
+    sys.stdout = _Tee(cast(io.TextIOBase, sys.stdout))
 
     t = threading.Thread(
         target=lambda: _app.run(
@@ -238,8 +245,10 @@ def route_servo_speed():
     if ctrl is None:
         return jsonify({"error": "No servo controller registered"}), 503
 
+    ctrl_t = cast(_ServoControllerProto, ctrl)
+
     if request.method == "GET":
-        return jsonify({"scale": ctrl.speed_scale})
+        return jsonify({"scale": ctrl_t.speed_scale})
 
     data = request.get_json(silent=True) or {}
     try:
@@ -247,9 +256,9 @@ def route_servo_speed():
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "Expected JSON body: {\"scale\": 0.0..1.0}"}), 400
 
-    ctrl.set_speed_scale(scale)
+    ctrl_t.set_speed_scale(scale)
     print(f"Servo speed scale set to {scale:.0%}")
-    return jsonify({"scale": ctrl.speed_scale})
+    return jsonify({"scale": ctrl_t.speed_scale})
 
 
 @_app.route("/favicon.ico")
@@ -425,7 +434,7 @@ _HTML = r"""<!DOCTYPE html>
 
     #feed { max-width: 100%; max-height: 100%; object-fit: contain; display: none; z-index: 1; }
 
-    .no-signal { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--muted); z-index: 1; }
+    .no-signal { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--muted); z-index: 3; pointer-events: none; }
     .no-signal-icon { font-size: 56px; opacity: .15; animation: breathe 3s ease-in-out infinite; }
     @keyframes breathe { 0%,100%{opacity:.15} 50%{opacity:.25} }
     .no-signal p { font-size: 11px; letter-spacing: .5px; }
@@ -833,8 +842,9 @@ function _armWatchdog() {
 
 function loadFeed() {
   _clearFeedTimers();
-  feed.src = '';
   requestAnimationFrame(() => {
+    // Avoid clearing feed.src first — blanking it can create a visible
+    // black flash in some browsers while the new stream connects.
     feed.src = '/video_feed?' + Date.now();
     feedRetryTimer = setTimeout(() => { if (!feedAlive) onFeedErr(); }, 10000);
   });
@@ -845,6 +855,7 @@ function onFeedLoad() {
   feedAlive      = true;
   feedRetryDelay = FEED_RETRY_MS;
   feed.style.display     = 'block';
+  feed.style.opacity     = '1';
   noSignal.style.display = 'none';
   _armWatchdog();
 }
@@ -852,7 +863,10 @@ function onFeedLoad() {
 function onFeedErr() {
   _clearFeedTimers();
   feedAlive = false;
-  feed.style.display     = 'none';
+  // Keep showing the last frame (if available) but dim it so the user
+  // notices the stream is offline without a sudden black flash.
+  feed.style.display     = 'block';
+  feed.style.opacity     = '0.18';
   noSignal.style.display = 'flex';
   feedRetryTimer = setTimeout(loadFeed, feedRetryDelay);
   feedRetryDelay = Math.min(feedRetryDelay * 1.5, FEED_MAX_RETRY);

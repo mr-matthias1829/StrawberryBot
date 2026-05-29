@@ -42,6 +42,7 @@ def main():
         # 0.25 = 25% speed
         # 1.0  = full speed
         #
+        # for production, this is to make sure nothing breaks because min/max might be incorrect for example
         ctrl.set_speed_scale(0.35)
 
         # ------------------------------------------------------------------

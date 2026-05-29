@@ -439,7 +439,9 @@ class FusionEngine:
         target_center: Optional[Tuple[int, int]],
         movement_text: str,
     ) -> np.ndarray:
-        out = frame.copy()
+        # Draw in-place to avoid an extra full-frame copy on every processed frame.
+        # The caller does not reuse the unannotated frame after this point.
+        out = frame
 
         for det in ai_dets:
             cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_AI, 1)

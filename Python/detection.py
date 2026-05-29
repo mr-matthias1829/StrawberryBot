@@ -73,6 +73,11 @@ _WATERSHED_FG_THRESH = 0.35   # higher → fewer splits (less over-splitting)
 # NMS IoU threshold for final deduplication.
 _NMS_IOU_THRESHOLD = 0.35
 
+# Reuse tiny kernels / thresholds instead of recreating them every frame.
+_KERNEL3 = np.ones((3, 3), np.uint8)
+_SV_LOWER = np.array([0, _SAT_MIN, _VAL_MIN])
+_SV_UPPER = np.array([180, 255, _VAL_MAX])
+
 
 class CVDectector:
     """
@@ -113,16 +118,11 @@ class CVDectector:
         )
 
         # Saturation / value gate: strawberries are vivid and not pitch-dark
-        sv_mask = cv2.inRange(
-            hsv,
-            np.array([0,   _SAT_MIN, _VAL_MIN]),
-            np.array([180, 255,      _VAL_MAX]),
-        )
+        sv_mask = cv2.inRange(hsv, _SV_LOWER, _SV_UPPER)
         mask = cv2.bitwise_and(hue_mask, sv_mask)
 
-        kernel3 = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel3, iterations=config.MORPH_OPEN_ITER)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel3, iterations=config.MORPH_CLOSE_ITER)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  _KERNEL3, iterations=config.MORPH_OPEN_ITER)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL3, iterations=config.MORPH_CLOSE_ITER)
 
         # Adaptive close scaled to median blob radius (kept from original)
         n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -131,8 +131,7 @@ class CVDectector:
             median_r = float(np.sqrt(np.median(areas) / np.pi))
             k = int(np.clip(median_r * 0.20, 3, 31))
             k = k if k % 2 == 1 else k + 1
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                                    np.ones((k, k), np.uint8), iterations=2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8), iterations=2)
         return hsv, mask
 
     @staticmethod
@@ -280,9 +279,7 @@ class CVDectector:
         red1 = cv2.inRange(hsv, config.RED_LOWER1, config.RED_UPPER1)
         red2 = cv2.inRange(hsv, config.RED_LOWER2, config.RED_UPPER2)
         red_hue = cv2.bitwise_or(red1, red2)
-        sv_gate = cv2.inRange(hsv,
-                              np.array([0,   _SAT_MIN, _VAL_MIN]),
-                              np.array([180, 255,      _VAL_MAX]))
+        sv_gate = cv2.inRange(hsv, _SV_LOWER, _SV_UPPER)
         red_mask = cv2.bitwise_and(red_hue, sv_gate)
         total_pixels = crop.shape[0] * crop.shape[1]
         redness = min(1.0, cv2.countNonZero(red_mask) / max(total_pixels * 0.20, 1))
