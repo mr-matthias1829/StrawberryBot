@@ -2,9 +2,11 @@
 
 Publieke API
 -----------
-start(host, port)   – start Flask in een daemon-thread (eenmalig)
-push_frame(bgr)     – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
-push_log(line)      – stuur een logregel naar alle SSE-clients
+start(host, port)              – start Flask in een daemon-thread (eenmalig)
+push_frame(bgr)                – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
+push_log(line)                 – stuur een logregel naar alle SSE-clients
+set_servo_controller(ctrl)     – koppel de ServoController zodat het dashboard
+                                 de speed_scale kan aansturen
 """
 from __future__ import annotations
 
@@ -15,11 +17,11 @@ import socket
 import sys
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
-from flask import Flask, Response
+from flask import Flask, Response, request, jsonify
 
 # Suppress werkzeug HTTP access logs (127.0.0.1 - - [...] lines)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -36,6 +38,12 @@ _subs:         List[queue.Queue] = []
 
 _started    = False
 _start_lock = threading.Lock()
+
+# The ServoController instance — set via set_servo_controller().
+# None until the caller provides one; the /servo_speed endpoint
+# gracefully returns 503 if it has not been set yet.
+_servo_ctrl = None
+_servo_ctrl_lock = threading.Lock()
 
 
 # ── publieke API ───────────────────────────────────────────────────────────────
@@ -58,6 +66,22 @@ def push_log(line: str) -> None:
                 q.put_nowait(line)
             except queue.Full:
                 pass
+
+
+def set_servo_controller(ctrl) -> None:
+    """
+    Register the ServoController with the web server.
+
+    Must be called before start() (or shortly after) so that the dashboard
+    slider can actually change speed_scale on the real controller.
+
+    Parameters
+    ----------
+    ctrl : ServoController   The live controller instance from dynamixel.py.
+    """
+    global _servo_ctrl
+    with _servo_ctrl_lock:
+        _servo_ctrl = ctrl
 
 
 def _local_ip() -> str:
@@ -128,11 +152,6 @@ class _Tee(io.TextIOBase):
 # ── MJPEG generator ────────────────────────────────────────────────────────────
 
 def _gen_mjpeg():
-    """Simple polling MJPEG generator.
-
-    Sleeps 1/30 s between frames so Flask worker threads yield the GIL
-    and the main capture+inference loop is not starved.
-    """
     while True:
         with _frame_lock:
             jpeg = _latest_jpeg
@@ -157,7 +176,6 @@ _NO_CACHE = {
 
 @_app.route("/video_feed")
 def route_video():
-    """Continuous MJPEG stream."""
     resp = Response(
         _gen_mjpeg(),
         mimetype="multipart/x-mixed-replace; boundary=frame",
@@ -169,10 +187,6 @@ def route_video():
 
 @_app.route("/snapshot")
 def route_snapshot():
-    """Single JPEG snapshot — used by JS after tab wake to bypass any backlog.
-
-    Returns 204 No Content when no frame is available yet.
-    """
     with _frame_lock:
         jpeg = _latest_jpeg
     if jpeg is None:
@@ -207,6 +221,35 @@ def route_logs():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@_app.route("/servo_speed", methods=["GET", "POST"])
+def route_servo_speed():
+    """
+    GET  → returns {"scale": 0.0..1.0} (current speed_scale)
+    POST → body {"scale": 0.0..1.0}    (set new speed_scale)
+
+    Called by the dashboard slider. If no ServoController has been registered
+    via set_servo_controller(), returns 503.
+    """
+    with _servo_ctrl_lock:
+        ctrl = _servo_ctrl
+
+    if ctrl is None:
+        return jsonify({"error": "No servo controller registered"}), 503
+
+    if request.method == "GET":
+        return jsonify({"scale": ctrl.speed_scale})
+
+    data = request.get_json(silent=True) or {}
+    try:
+        scale = float(data["scale"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Expected JSON body: {\"scale\": 0.0..1.0}"}), 400
+
+    ctrl.set_speed_scale(scale)
+    print(f"Servo speed scale set to {scale:.0%}")
+    return jsonify({"scale": ctrl.speed_scale})
 
 
 @_app.route("/favicon.ico")
@@ -247,6 +290,7 @@ _HTML = r"""<!DOCTYPE html>
       --green-lo:  rgba(45,219,114,.12);
       --yellow:    #f5c842;
       --blue:      #3da9f5;
+      --orange:    #ff8c42;
       --text:      #c8d6e8;
       --muted:     #5a7080;
       --mono:      'IBM Plex Mono', 'Fira Code', monospace;
@@ -295,6 +339,55 @@ _HTML = r"""<!DOCTYPE html>
     .dot.on { background: var(--green); box-shadow: 0 0 7px var(--green); animation: pulse 2s ease-in-out infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
 
+    /* ─── SERVO SPEED CONTROL ────────────────────────────── */
+    .servo-control {
+      display: flex; align-items: center; gap: 10px;
+      padding: 5px 12px;
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+      flex-shrink: 0;
+    }
+    .servo-control label {
+      font-size: 9px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .8px; white-space: nowrap;
+    }
+
+    /* Custom slider */
+    #speedSlider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 130px; height: 4px;
+      border-radius: 2px;
+      outline: none; cursor: pointer;
+      background: var(--border2);
+    }
+    #speedSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--orange);
+      box-shadow: 0 0 6px rgba(255,140,66,.5);
+      cursor: pointer; transition: transform .1s;
+    }
+    #speedSlider::-webkit-slider-thumb:active { transform: scale(1.3); }
+    #speedSlider::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%; border: none;
+      background: var(--orange); cursor: pointer;
+    }
+
+    #speedVal {
+      font-family: var(--sans); font-size: 15px; font-weight: 700;
+      color: var(--orange); min-width: 36px; text-align: right;
+    }
+    #speedVal.zero { color: var(--muted); }
+    #speedVal.full { color: var(--green); }
+
+    .servo-badge {
+      font-size: 9px; padding: 1px 7px; border-radius: 10px;
+      background: var(--border); color: var(--muted);
+      white-space: nowrap; transition: all .3s;
+    }
+    .servo-badge.active { background: rgba(255,140,66,.15); border-color: var(--orange); color: var(--orange); }
+    .servo-badge.locked { background: var(--green-lo); color: var(--green); }
+
     .stats { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
 
     .stat {
@@ -313,17 +406,11 @@ _HTML = r"""<!DOCTYPE html>
     #s-cam  { font-size: 11px; font-family: var(--mono); }
 
     /* ─── MAIN LAYOUT ─────────────────────────────────────── */
-    main {
-      flex: 1;
-      display: flex;
-      min-height: 0;
-    }
+    main { flex: 1; display: flex; min-height: 0; }
 
     /* ─── VIDEO PANEL ─────────────────────────────────────── */
     .video-panel {
-      flex: 1;
-      min-width: 0;
-      position: relative;
+      flex: 1; min-width: 0; position: relative;
       background: var(--bg);
       display: flex; align-items: center; justify-content: center;
       overflow: hidden;
@@ -350,44 +437,27 @@ _HTML = r"""<!DOCTYPE html>
 
     /* ─── DRAG DIVIDER ────────────────────────────────────── */
     .drag-divider {
-      width: 5px;
-      flex-shrink: 0;
-      background: var(--border);
-      cursor: col-resize;
-      position: relative;
-      transition: background .15s;
-      z-index: 10;
+      width: 5px; flex-shrink: 0; background: var(--border);
+      cursor: col-resize; position: relative; transition: background .15s; z-index: 10;
     }
-    .drag-divider:hover,
-    .drag-divider.dragging { background: var(--accent); }
-
+    .drag-divider:hover, .drag-divider.dragging { background: var(--accent); }
     .drag-divider::after {
-      content: '';
-      position: absolute;
-      top: 50%; left: 50%;
+      content: ''; position: absolute; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
-      width: 1px; height: 40px;
-      background: rgba(255,255,255,.1);
-      border-radius: 1px;
+      width: 1px; height: 40px; background: rgba(255,255,255,.1); border-radius: 1px;
     }
 
     /* ─── CONSOLE PANEL ───────────────────────────────────── */
     .console-panel {
-      width: var(--console-w);
-      min-width: 180px;
-      max-width: 70vw;
-      flex-shrink: 0;
-      display: flex; flex-direction: column;
-      background: var(--surface);
-      min-height: 0;
+      width: var(--console-w); min-width: 180px; max-width: 70vw;
+      flex-shrink: 0; display: flex; flex-direction: column;
+      background: var(--surface); min-height: 0;
     }
-
     .console-bar {
       display: flex; align-items: center; justify-content: space-between;
       padding: 0 10px; height: 34px;
       border-bottom: 1px solid var(--border); flex-shrink: 0;
     }
-
     .console-title { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
     .btns { display: flex; gap: 5px; }
 
@@ -399,10 +469,7 @@ _HTML = r"""<!DOCTYPE html>
     button:hover  { background: var(--border2); color: var(--text); }
     button.active { border-color: var(--green); color: var(--green); background: var(--green-lo); }
 
-    #log {
-      flex: 1; overflow-y: auto;
-      padding: 6px 4px 6px 10px; min-height: 0;
-    }
+    #log { flex: 1; overflow-y: auto; padding: 6px 4px 6px 10px; min-height: 0; }
     #log::-webkit-scrollbar { width: 3px; }
     #log::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
@@ -415,6 +482,7 @@ _HTML = r"""<!DOCTYPE html>
     .lm.info { color: var(--blue); }
     .lm.ok   { color: var(--green); font-weight: 600; }
     .lm.sep  { color: var(--border2); }
+    .lm.servo { color: var(--orange); }
 
     .repeat-badge {
       display: inline-block; margin-left: 7px;
@@ -439,6 +507,7 @@ _HTML = r"""<!DOCTYPE html>
       .drag-divider { width: 100%; height: 5px; cursor: row-resize; }
       .console-panel { width: 100% !important; min-width: unset; }
       .stats { display: none; }
+      .servo-control { display: none; }
     }
   </style>
 </head>
@@ -446,14 +515,24 @@ _HTML = r"""<!DOCTYPE html>
 
 <header>
   <div class="brand">
-    <div class="berry-icon"></div>
-    <h1> <span>Strawberry</span> Detector</h1>
+    <div class="berry-icon">🍓</div>
+    <h1><span>Strawberry</span> Detector</h1>
   </div>
   <div class="hdivider"></div>
   <div class="live-pill">
     <div class="dot" id="liveDot"></div>
     <span id="liveText">Verbinden…</span>
   </div>
+  <div class="hdivider"></div>
+
+  <!-- ── Servo speed control ── -->
+  <div class="servo-control">
+    <label>Servo Speed</label>
+    <input type="range" id="speedSlider" min="0" max="100" value="0" step="1">
+    <span id="speedVal" class="zero">0%</span>
+    <span class="servo-badge" id="servoBadge">PAUSED</span>
+  </div>
+
   <div class="stats">
     <div class="stat"><span class="stat-lbl">FPS</span><span class="stat-val" id="s-fps">—</span></div>
     <div class="stat"><span class="stat-lbl">AI</span><span class="stat-val" id="s-ai">—</span></div>
@@ -471,6 +550,7 @@ _HTML = r"""<!DOCTYPE html>
     <span class="corner-label tr" id="resLabel"></span>
     <span class="corner-label bl" id="timeLabel"></span>
     <div class="no-signal" id="noSignal">
+      <div class="no-signal-icon">📷</div>
       <p>Wachten op videostream…</p>
     </div>
     <img id="feed" alt="camera">
@@ -536,12 +616,13 @@ function parseStats(line) {
 
 // ── Line classifier ───────────────────────────────────────────────────────────
 function cls(line) {
-  if (/FPS:/i.test(line))                                return 'fps';
-  if (/verbonden!|connected|verbonden\s*$/i.test(line))  return 'ok';
-  if (/error|failed|geen.*camera|not avail/i.test(line)) return 'err';
-  if (/warn/i.test(line))                                return 'warn';
-  if (/Dashboard:|http:\/\//i.test(line))                return 'info';
-  if (/^──/.test(line.trim()))                           return 'sep';
+  if (/FPS:/i.test(line))                                  return 'fps';
+  if (/verbonden!|connected|verbonden\s*$/i.test(line))    return 'ok';
+  if (/error|failed|geen.*camera|not avail/i.test(line))   return 'err';
+  if (/warn/i.test(line))                                  return 'warn';
+  if (/Dashboard:|http:\/\//i.test(line))                  return 'info';
+  if (/servo speed scale/i.test(line))                     return 'servo';
+  if (/^──/.test(line.trim()))                             return 'sep';
   return '';
 }
 
@@ -610,9 +691,77 @@ logEl.addEventListener('scroll', () => {
   }
 });
 
+// ── Servo speed slider ────────────────────────────────────────────────────────
+//
+// The slider maps 0–100 (integer %) to 0.0–1.0 sent to POST /servo_speed.
+// Debounced: only sends after 120 ms of no movement to avoid flooding the Pi.
+// On page load, GETs the current value from the server so a refresh doesn't
+// silently reset the scale.
+
+const slider   = document.getElementById('speedSlider');
+const speedVal = document.getElementById('speedVal');
+const badge    = document.getElementById('servoBadge');
+
+let sliderTimer = null;
+
+function updateSliderUI(pct) {
+  speedVal.textContent = pct + '%';
+  speedVal.className = pct === 0 ? 'zero' : pct === 100 ? 'full' : '';
+  if (pct === 0) {
+    badge.textContent = 'PAUSED';
+    badge.className   = 'servo-badge';
+  } else if (pct === 100) {
+    badge.textContent = 'FULL';
+    badge.className   = 'servo-badge locked';
+  } else {
+    badge.textContent = pct + '%';
+    badge.className   = 'servo-badge active';
+  }
+  // Colour the slider track fill
+  slider.style.background = `linear-gradient(to right, var(--orange) ${pct}%, var(--border2) ${pct}%)`;
+}
+
+async function sendSpeedScale(scale) {
+  try {
+    const r = await fetch('/servo_speed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scale }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      addLine('⚠ Servo speed error: ' + (j.error || r.status));
+    }
+  } catch (e) {
+    addLine('⚠ Servo speed request failed: ' + e.message);
+  }
+}
+
+slider.addEventListener('input', () => {
+  const pct = parseInt(slider.value, 10);
+  updateSliderUI(pct);
+  clearTimeout(sliderTimer);
+  sliderTimer = setTimeout(() => sendSpeedScale(pct / 100), 120);
+});
+
+// On load: fetch current scale from server
+async function fetchCurrentScale() {
+  try {
+    const r = await fetch('/servo_speed');
+    if (r.ok) {
+      const j = await r.json();
+      const pct = Math.round((j.scale || 0) * 100);
+      slider.value = pct;
+      updateSliderUI(pct);
+    }
+  } catch (_) { /* server not ready yet, stay at 0 */ }
+}
+fetchCurrentScale();
+updateSliderUI(0); // set initial gradient before fetch returns
+
 // ── Drag-to-resize ────────────────────────────────────────────────────────────
-const dragDiv     = document.getElementById('dragDiv');
-const consolePnl  = document.getElementById('consolePanel');
+const dragDiv    = document.getElementById('dragDiv');
+const consolePnl = document.getElementById('consolePanel');
 
 dragDiv.addEventListener('mousedown', e => {
   e.preventDefault();
@@ -654,17 +803,9 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ── Video feed management ─────────────────────────────────────────────────────
-//
-// - loadFeed() always opens a fresh connection (cache-busted URL).
-// - onFeedLoad fires once when the stream opens — show video, hide no-signal.
-// - onFeedErr fires on connection failure — hide video, retry with back-off.
-// - Page Visibility + window focus: reload immediately on tab return so the
-//   browser doesn't drain a stale TCP buffer from when it was backgrounded.
-// - /snapshot endpoint: a single-frame fallback for after-sleep tab recovery.
-
+// ── Video feed ────────────────────────────────────────────────────────────────
 const FEED_RETRY_MS  = 3000;
-const FEED_TIMEOUT   = 12000;  // reload if stream goes silent
+const FEED_TIMEOUT   = 12000;
 const FEED_MAX_RETRY = 15000;
 
 const feed     = document.getElementById('feed');
@@ -720,13 +861,8 @@ function onFeedErr() {
 feed.addEventListener('load',  onFeedLoad);
 feed.addEventListener('error', onFeedErr);
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) loadFeed();
-});
-
-window.addEventListener('focus', () => {
-  if (feedAlive) loadFeed();
-});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadFeed(); });
+window.addEventListener('focus', () => { if (feedAlive) loadFeed(); });
 
 loadFeed();
 
