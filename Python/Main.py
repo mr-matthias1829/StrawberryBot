@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
+import motor
+motor.init()
+
 import sys
 try:
     isatty = sys.stdin.isatty()
@@ -378,3 +381,32 @@ if __name__ == "__main__":
         run_image(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
         run_webcam()
+
+
+
+def _motor_startup_test():
+    """Quick sanity check — moves ID 13 left/right, then gripper close/open."""
+    print("\n── Motor startup test ──")
+    try:
+        from gripper import Gripper
+
+        motor.enable_torque(13)
+
+        result = motor.turn_left(servo_id=13)
+        print(f"  ID 13 left:  {result['status']}")
+
+        result = motor.turn_right(servo_id=13)
+        print(f"  ID 13 right: {result['status']}")
+
+        motor.disable_torque(13)
+
+        g = Gripper()
+        g.grip()
+        g.open()
+
+    except Exception as e:
+        print(f"  ⚠️  Motor test failed (continuing anyway): {e}")
+
+    print("── Motor test done ──\n")
+
+_motor_startup_test()
