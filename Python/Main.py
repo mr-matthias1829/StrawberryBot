@@ -156,18 +156,24 @@ def _inference_worker(st: _WorkerState) -> None:
             frame = None
             with cast(threading.Lock, st.lock):
                 if st.frame is not None:
-                    frame    = st.frame
+                    frame = st.frame
                     st.frame = None
+
             if frame is None:
                 time.sleep(0.005)
                 continue
+
             try:
+                t0 = time.perf_counter()
                 annotated, confirmed, debug, mask = engine.process_frame(frame)
+                process_ms = (time.perf_counter() - t0) * 1000.0
             except Exception as e:
                 print(f"[inference] process_frame error: {e}")
                 continue
+
             with cast(threading.Lock, st.lock):
-                st.result = (annotated, confirmed, debug, mask)
+                st.result = (annotated, confirmed, debug, mask, process_ms)
+
     finally:
         try:
             engine.shutdown()
@@ -182,18 +188,20 @@ def _inference_worker(st: _WorkerState) -> None:
 def run_webcam() -> None:
     web_server.start()
 
-    show_mask      = config.SHOW_DEBUG_WINDOWS
-    fps_timer      = time.perf_counter()
-    fps_count      = 0
-    cap            = None
-    headless       = False
+    show_mask       = config.SHOW_DEBUG_WINDOWS
+    fps_timer       = time.perf_counter()
+    fps_count       = 0
+    cap             = None
+    headless        = False
     read_fail_count = 0
     READ_FAIL_MAX   = 30
 
-    state  = _WorkerState(lock=threading.Lock())
+    state = _WorkerState(lock=threading.Lock())
     worker = threading.Thread(
-        target=_inference_worker, args=(state,),
-        daemon=True, name="inference-worker",
+        target=_inference_worker,
+        args=(state,),
+        daemon=True,
+        name="inference-worker",
     )
     worker.start()
 
@@ -203,12 +211,19 @@ def run_webcam() -> None:
         print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
 
+        last_read_ms = 0.0
+        last_proc_ms = 0.0
+
         while True:
+            t_read = time.perf_counter()
             ok, frame = cap.read()
+            last_read_ms = (time.perf_counter() - t_read) * 1000.0
+
             if not ok or frame is None:
                 read_fail_count += 1
                 print(f"Dropped frame ({read_fail_count})")
                 time.sleep(0.05)
+
                 if read_fail_count >= READ_FAIL_MAX:
                     print("Too many failures — reconnecting...")
                     try:
@@ -233,10 +248,11 @@ def run_webcam() -> None:
             res = None
             with cast(threading.Lock, state.lock):
                 res = state.result
+
             if res is None:
                 continue
 
-            annotated, _, debug, mask = res
+            annotated, _, debug, mask, last_proc_ms = res
             if annotated is None:
                 continue
 
@@ -260,6 +276,8 @@ def run_webcam() -> None:
             if now - fps_timer >= 1.0:
                 print(
                     f"FPS: {fps_count:2d} | "
+                    f"Read: {last_read_ms:6.1f} ms | "
+                    f"Proc: {last_proc_ms:6.1f} ms | "
                     f"AI: {debug['ai_count']} CV: {debug['cv_count']} "
                     f"Fused: {debug['fused_count']} "
                     f"Hits: {debug['confirmed_count']} "
@@ -272,8 +290,10 @@ def run_webcam() -> None:
                 try:
                     cv2.imshow("Strawberry Detection", display)
                     if show_mask and mask is not None:
-                        cv2.imshow("CV Mask",
-                                   cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)))
+                        cv2.imshow(
+                            "CV Mask",
+                            cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)),
+                        )
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
                         break
@@ -298,7 +318,6 @@ def run_webcam() -> None:
             lift.shutdown()
             turntable.shutdown()
             motor.shutdown()
-
 
 # =============================================================================
 # run_image
