@@ -15,12 +15,11 @@ Architecture
 
 Mechanical note
 ---------------
-Servo 3 and servo 4 are mounted back-to-back (axes pointing away from
-each other). To move the lift in the same physical direction, they must
-spin in OPPOSITE directions:
+Servo 3 and servo 4 are mounted so that both must spin in the SAME
+direction to move the lift:
 
-    Lift UP   → servo 3 CCW  + servo 4 CW
-    Lift DOWN → servo 3 CW   + servo 4 CCW
+    Lift UP   → servo 3 CCW  + servo 4 CCW
+    Lift DOWN → servo 3 CW   + servo 4 CW
 
 AX-12A wheel-mode register layout (MOVING_SPEED reg 32)
 --------------------------------------------------------
@@ -205,22 +204,22 @@ def stop() -> None:
 def move_up(speed: int = SPEED_MEDIUM) -> dict:
     """
     Move lift UP.
-    Servo 3 spins CCW, servo 4 spins CW (mirrored mount).
+    Both servos spin CCW.
     Non-blocking.
     """
     speed = max(0, min(1023, speed))
-    _post_words(_DIR_CCW | speed, _DIR_CW | speed)
+    _post_words(_DIR_CCW | speed, _DIR_CCW | speed)
     return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
 
 
 def move_down(speed: int = SPEED_MEDIUM) -> dict:
     """
     Move lift DOWN.
-    Servo 3 spins CW, servo 4 spins CCW (mirrored mount).
+    Both servos spin CW.
     Non-blocking.
     """
     speed = max(0, min(1023, speed))
-    _post_words(_DIR_CW | speed, _DIR_CCW | speed)
+    _post_words(_DIR_CW | speed, _DIR_CW | speed)
     return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
 
 
