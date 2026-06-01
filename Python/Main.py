@@ -1,14 +1,7 @@
 """Entry points for the strawberry fusion detector."""
 
 import os
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "rtsp_transport;udp|"
-    "fflags;nobuffer|"
-    "flags;low_delay|"
-    "analyzeduration;1000000|"
-    "probesize;1000000"
-)
-
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;udp|buffer_size;1024000|fflags;nobuffer|flags;low_delay")
 import time
 import platform
 import sys
