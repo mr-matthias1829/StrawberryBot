@@ -1,0 +1,251 @@
+"""
+lift.py
+=======
+Controls the lift mechanism using two AX-12A servos (ID 3 and ID 4) in
+wheel / continuous-rotation mode so the robot arm can move up or down to
+track a strawberry on the Y-axis.
+
+Architecture
+------------
+- Does NOT open serial/GPIO — motor.py owns those resources.
+- Call motor.init() then lift.init() once at startup.
+- update(dy) is the only call needed per frame from RobotController.
+- All serial writes run on a background thread so they never block
+  the vision/inference pipeline.
+
+Mechanical note
+---------------
+Servo 3 and servo 4 are mounted back-to-back (axes pointing away from
+each other). To move the lift in the same physical direction, they must
+spin in OPPOSITE directions:
+
+    Lift UP   → servo 3 CCW  + servo 4 CW
+    Lift DOWN → servo 3 CW   + servo 4 CCW
+
+AX-12A wheel-mode register layout (MOVING_SPEED reg 32)
+--------------------------------------------------------
+    Bits 0-9  →  speed magnitude  (0 = stop)
+    Bit  10   →  0 = CCW  /  1 = CW  (bit set = clockwise)
+
+Wheel mode is activated by setting both angle-limit registers to 0.
+
+Coordinate convention (matches robot_controller.py)
+----------------------------------------------------
+    dy > 0  →  target is BELOW  gripper  →  lift DOWN
+    dy < 0  →  target is ABOVE  gripper  →  lift UP
+    |dy| <= DEAD_ZONE  →  aligned, stop
+"""
+
+import threading
+import time
+
+import motor
+
+# =============================================================================
+# TUNING
+# =============================================================================
+
+SERVO_ID_A = 3          # first  lift servo
+SERVO_ID_B = 4          # second lift servo (mechanically mirrored)
+
+DEAD_ZONE = 25          # px — mirrors Y_THRESHOLD in robot_controller.py
+
+# Speed tiers (0–1023)
+SPEED_SLOW   = 150
+SPEED_MEDIUM = 300
+SPEED_FAST   = 500
+
+THRESHOLD_SLOW   = 50   # |dy| ≤ this → SLOW
+THRESHOLD_MEDIUM = 150  # |dy| ≤ this → MEDIUM, above → FAST
+
+# AX-12A registers
+_REG_CW_LIMIT  = 6
+_REG_CCW_LIMIT = 8
+_REG_TORQUE_EN = 24
+_REG_SPEED     = 32
+
+# Direction bits
+_DIR_CCW = 0            # counter-clockwise
+_DIR_CW  = 1 << 10      # clockwise
+
+# =============================================================================
+# STATE
+# =============================================================================
+
+_initialized:    bool = False
+_pending_word_a: int  = -1   # speed word for servo 3  (-1 = nothing pending)
+_pending_word_b: int  = -1   # speed word for servo 4
+_last_word_a:    int  = -1
+_last_word_b:    int  = -1
+_lock       = threading.Lock()
+_event      = threading.Event()
+_stop_flag  = False
+_thread: threading.Thread = None  # type: ignore[assignment]
+
+
+# =============================================================================
+# BACKGROUND WRITER THREAD
+# =============================================================================
+
+def _writer() -> None:
+    global _last_word_a, _last_word_b
+    while not _stop_flag:
+        fired = _event.wait(timeout=0.1)
+        if not fired:
+            continue
+        _event.clear()
+
+        with _lock:
+            word_a = _pending_word_a
+            word_b = _pending_word_b
+
+        # Servo A
+        if word_a >= 0 and word_a != _last_word_a:
+            try:
+                motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
+                _last_word_a = word_a
+            except Exception as e:
+                print(f"[lift] serial error (servo {SERVO_ID_A}): {e}")
+
+        # Servo B
+        if word_b >= 0 and word_b != _last_word_b:
+            try:
+                motor._write_word(SERVO_ID_B, _REG_SPEED, word_b)
+                _last_word_b = word_b
+            except Exception as e:
+                print(f"[lift] serial error (servo {SERVO_ID_B}): {e}")
+
+
+# =============================================================================
+# LIFECYCLE
+# =============================================================================
+
+def init() -> None:
+    """Switch both servos to wheel mode and start background writer. Idempotent."""
+    global _initialized, _stop_flag, _thread
+
+    if _initialized:
+        return
+
+    _stop_flag = False
+
+    for sid in (SERVO_ID_A, SERVO_ID_B):
+        motor._write_word(sid, _REG_TORQUE_EN, 0)
+        time.sleep(0.05)
+        motor._write_word(sid, _REG_CW_LIMIT,  0)
+        time.sleep(0.02)
+        motor._write_word(sid, _REG_CCW_LIMIT, 0)
+        time.sleep(0.02)
+        motor._write_word(sid, _REG_TORQUE_EN, 1)
+        time.sleep(0.05)
+        motor._write_word(sid, _REG_SPEED, 0)
+
+    _thread = threading.Thread(target=_writer, daemon=True, name="lift-writer")
+    _thread.start()
+
+    _initialized = True
+    print(f"✅ Lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
+
+
+def shutdown() -> None:
+    """Stop motors and disable torque. Called automatically via motor.shutdown()."""
+    global _initialized, _stop_flag
+
+    if not _initialized:
+        return
+
+    _stop_flag = True
+    _event.set()
+    if _thread is not None:
+        _thread.join(timeout=1.0)
+
+    for sid in (SERVO_ID_A, SERVO_ID_B):
+        try:
+            motor._write_word(sid, _REG_SPEED,    0)
+            motor._write_word(sid, _REG_TORQUE_EN, 0)
+        except Exception:
+            pass
+
+    _initialized = False
+    print("🛑 Lift shut down.")
+
+
+# =============================================================================
+# INTERNAL HELPERS
+# =============================================================================
+
+def _post_words(word_a: int, word_b: int) -> None:
+    """Post speed words for both servos to the background writer (non-blocking)."""
+    with _lock:
+        global _pending_word_a, _pending_word_b
+        _pending_word_a = word_a
+        _pending_word_b = word_b
+    _event.set()
+
+
+def _speed_from_dy(dy_abs: int) -> int:
+    if dy_abs <= DEAD_ZONE:
+        return 0
+    if dy_abs <= THRESHOLD_SLOW:
+        return SPEED_SLOW
+    if dy_abs <= THRESHOLD_MEDIUM:
+        return SPEED_MEDIUM
+    return SPEED_FAST
+
+
+# =============================================================================
+# PUBLIC API
+# =============================================================================
+
+def stop() -> None:
+    """Post a stop command to both servos (non-blocking)."""
+    _post_words(0, 0)
+
+
+def move_up(speed: int = SPEED_MEDIUM) -> dict:
+    """
+    Move lift UP.
+    Servo 3 spins CCW, servo 4 spins CW (mirrored mount).
+    Non-blocking.
+    """
+    speed = max(0, min(1023, speed))
+    _post_words(_DIR_CCW | speed, _DIR_CW | speed)
+    return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
+
+
+def move_down(speed: int = SPEED_MEDIUM) -> dict:
+    """
+    Move lift DOWN.
+    Servo 3 spins CW, servo 4 spins CCW (mirrored mount).
+    Non-blocking.
+    """
+    speed = max(0, min(1023, speed))
+    _post_words(_DIR_CW | speed, _DIR_CCW | speed)
+    return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
+
+
+def update(dy: int) -> str:
+    """
+    Main per-frame entry point. Posts the appropriate speed words and returns
+    a log string. Never blocks — serial writes are handled in background thread.
+
+    Args:
+        dy: target_y - gripper_y  (from RobotController.generate_dy)
+            dy > 0 → target is below  → move DOWN
+            dy < 0 → target is above  → move UP
+    """
+    if not _initialized:
+        return f"LIFT SIMULATED (dy={dy:+d})"
+
+    speed = _speed_from_dy(abs(dy))
+
+    if dy > DEAD_ZONE:
+        move_down(speed)
+        return f"LIFT DOWN (dy={dy:+d}, speed={speed})"
+
+    if dy < -DEAD_ZONE:
+        move_up(speed)
+        return f"LIFT UP   (dy={dy:+d}, speed={speed})"
+
+    stop()
+    return f"LIFT STOP (dy={dy:+d}, aligned)"

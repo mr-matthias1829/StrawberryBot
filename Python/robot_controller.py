@@ -2,7 +2,7 @@
 robot_controller.py
 ===================
 Selects the best strawberry target and produces movement commands.
-Also dispatches hardware commands to the servo submodules (turntable, etc.).
+Also dispatches hardware commands to the servo submodules (turntable, lift, etc.).
 
 Hardware calls are fire-and-forget: each submodule owns a background thread
 so no serial write ever blocks the vision pipeline.
@@ -25,13 +25,13 @@ try:
 except ImportError:
     _HAS_TURNTABLE = False
 
-# Future submodules — uncomment when ready:
-# try:
-#     import tower as _tower
-#     _HAS_TOWER = True
-# except ImportError:
-#     _HAS_TOWER = False
+try:
+    import lift as _lift
+    _HAS_LIFT = True
+except ImportError:
+    _HAS_LIFT = False
 
+# Future submodules — uncomment when ready:
 # try:
 #     import arm as _arm
 #     _HAS_ARM = True
@@ -238,8 +238,10 @@ class RobotController:
         if self.current_target is None:
             if _HAS_TURNTABLE:
                 _turntable.stop()
+            if _HAS_LIFT:
+                _lift.stop()
             if do_log:
-                print("[HW] turntable=STOP (no target)")
+                print("[HW] turntable=STOP  lift=STOP  (no target)")
             return
 
         dx = self.generate_dx(gripper_x)
@@ -249,23 +251,20 @@ class RobotController:
         if _HAS_TURNTABLE:
             tt_msg = _turntable.update(dx)
         else:
-            # Simulation: resolve what would happen without hardware
-            if   dx >  _turntable_dead_zone(): tt_msg = f"TURNTABLE SIMULATED RIGHT (dx={dx:+d})"
-            elif dx < -_turntable_dead_zone(): tt_msg = f"TURNTABLE SIMULATED LEFT  (dx={dx:+d})"
-            else:                              tt_msg = f"TURNTABLE SIMULATED STOP  (dx={dx:+d})"
+            if   dx >  X_THRESHOLD: tt_msg = f"TURNTABLE SIMULATED RIGHT (dx={dx:+d})"
+            elif dx < -X_THRESHOLD: tt_msg = f"TURNTABLE SIMULATED LEFT  (dx={dx:+d})"
+            else:                   tt_msg = f"TURNTABLE SIMULATED STOP  (dx={dx:+d})"
 
-        # ── Future: tower (Y axis) ────────────────────────────────────────────
-        # tower_msg = _tower.update(dy) if _HAS_TOWER else f"TOWER SIM (dy={dy:+d})"
+        # ── Lift (Y axis) ─────────────────────────────────────────────────────
+        if _HAS_LIFT:
+            lift_msg = _lift.update(dy)
+        else:
+            if   dy >  Y_THRESHOLD: lift_msg = f"LIFT SIMULATED DOWN (dy={dy:+d})"
+            elif dy < -Y_THRESHOLD: lift_msg = f"LIFT SIMULATED UP   (dy={dy:+d})"
+            else:                   lift_msg = f"LIFT SIMULATED STOP (dy={dy:+d})"
 
         # ── Future: arm (depth / Z axis) ──────────────────────────────────────
         # arm_msg = _arm.update(self.current_target.depth_score) if _HAS_ARM else "ARM SIM"
 
         if do_log:
-            print(f"[HW] {tt_msg}")
-
-
-def _turntable_dead_zone() -> int:
-    """Return turntable dead zone even when the module isn't imported."""
-    if _HAS_TURNTABLE:
-        return _turntable.DEAD_ZONE
-    return X_THRESHOLD
+            print(f"[HW] {tt_msg} | {lift_msg}")

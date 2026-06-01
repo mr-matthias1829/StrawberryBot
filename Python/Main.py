@@ -26,6 +26,9 @@ if ON_PI:
     import turntable
     turntable.init()
 
+    import lift
+    lift.init()
+
 # =============================================================================
 # Stdin diagnostics (harmless on all platforms)
 # =============================================================================
@@ -292,6 +295,7 @@ def run_webcam() -> None:
             cap.release()
         cv2.destroyAllWindows()
         if ON_PI:
+            lift.shutdown()
             turntable.shutdown()
             motor.shutdown()
 
