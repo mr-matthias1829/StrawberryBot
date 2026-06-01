@@ -1,98 +1,171 @@
-# Basic TCA9548A multiplexer setup for Raspberry Pi
-# Designed to be easy to expand later.
-#
-# Install first:
-# pip3 install adafruit-blinka
-# pip3 install adafruit-circuitpython-tca9548a
+"""
+AS5600 Angle Sensor Manager
+Uses:
+    - TCA9548A multiplexer
+    - Direct AS5600 register reads
+    - No AS5600 library required
+
+Dependencies:
+    pip install adafruit-blinka
+    pip install adafruit-circuitpython-tca9548a
+    pip install smbus2
+"""
 
 import board
 import adafruit_tca9548a
+from smbus2 import SMBus
+
+# AS5600 I2C address
+AS5600_ADDR = 0x36
+
+# AS5600 angle registers
+RAW_ANGLE_MSB = 0x0C
+RAW_ANGLE_LSB = 0x0D
 
 
-class MultiplexerManager:
-    def __init__(self, address=0x70):
-        """
-        Create the I2C bus and multiplexer object.
-        Default TCA9548A address = 0x70
-        """
+class AngleSensorManager:
 
-        # Main Raspberry Pi I2C bus
+    def __init__(self, multiplexer_address=0x70):
         self.i2c = board.I2C()
 
-        # Multiplexer object
         self.tca = adafruit_tca9548a.TCA9548A(
             self.i2c,
-            address=address
+            address=multiplexer_address
         )
 
-        print(f"[INFO] Multiplexer initialized at address {hex(address)}")
+        # Raspberry Pi I2C bus
+        self.bus = SMBus(1)
 
-    def get_channel(self, channel: int):
-        """
-        Get a multiplexer channel.
+        print(
+            f"[INFO] Multiplexer initialized at "
+            f"{hex(multiplexer_address)}"
+        )
 
-        Example:
-            channel0 = mux.get_channel(0)
-        """
-
-        if channel < 0 or channel > 7:
-            raise ValueError("Channel must be between 0 and 7")
-
-        return self.tca[channel]
-
-    def scan_channel(self, channel: int):
-        """
-        Scan a single channel for connected I2C devices.
-        """
-
-        ch = self.get_channel(channel)
-
-        if ch.try_lock():
-            try:
-                addresses = ch.scan()
-
-                # Remove multiplexer address from results
-                addresses = [
-                    addr for addr in addresses
-                    if addr != 0x70
-                ]
-
-                return addresses
-
-            finally:
-                ch.unlock()
-
-        return []
+    # -------------------------------------------------
+    # Debug utility
+    # -------------------------------------------------
 
     def scan_all_channels(self):
-        """
-        Scan all 8 channels and print results.
-        """
-
         print("\n--- TCA9548A CHANNEL SCAN ---")
 
         for channel in range(8):
-            devices = self.scan_channel(channel)
 
-            if devices:
-                hex_devices = [hex(d) for d in devices]
-                print(f"Channel {channel}: {hex_devices}")
-            else:
-                print(f"Channel {channel}: No devices found")
+            ch = self.tca[channel]
+
+            if ch.try_lock():
+                try:
+                    devices = [
+                        hex(addr)
+                        for addr in ch.scan()
+                        if addr != 0x70
+                    ]
+
+                    print(
+                        f"Channel {channel}: "
+                        f"{devices}"
+                    )
+
+                finally:
+                    ch.unlock()
 
         print("-----------------------------\n")
 
+    # -------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------
 
-# Example usage
+    def _select_channel(self, channel):
+        """
+        Select multiplexer channel.
+        """
+
+        if channel < 0 or channel > 7:
+            raise ValueError(
+                "Channel must be between 0 and 7"
+            )
+
+        # TCA9548A channel select register
+        self.bus.write_byte(
+            0x70,
+            1 << channel
+        )
+
+    def _read_raw_angle(self, channel):
+        """
+        Read raw 12-bit AS5600 angle.
+
+        Returns:
+            int (0-4095)
+        """
+
+        self._select_channel(channel)
+
+        high = self.bus.read_byte_data(
+            AS5600_ADDR,
+            RAW_ANGLE_MSB
+        )
+
+        low = self.bus.read_byte_data(
+            AS5600_ADDR,
+            RAW_ANGLE_LSB
+        )
+
+        raw = ((high << 8) | low) & 0x0FFF
+
+        return raw
+
+    def _raw_to_degrees(self, raw):
+        return raw * 360.0 / 4096.0
+
+    # -------------------------------------------------
+    # Public API
+    # -------------------------------------------------
+
+    def read_sensor_1(self):
+        raw = self._read_raw_angle(0)
+
+        return {
+            "raw": raw,
+            "degrees": self._raw_to_degrees(raw)
+        }
+
+    def read_sensor_2(self):
+        raw = self._read_raw_angle(1)
+
+        return {
+            "raw": raw,
+            "degrees": self._raw_to_degrees(raw)
+        }
+
+    def read_both_sensors(self):
+        return {
+            "sensor1": self.read_sensor_1(),
+            "sensor2": self.read_sensor_2()
+        }
+
+
+# -------------------------------------------------
+# Example
+# -------------------------------------------------
+
 if __name__ == "__main__":
 
-    mux = MultiplexerManager()
+    sensors = AngleSensorManager()
 
-    # Scan all channels
-    mux.scan_all_channels()
+    sensors.scan_all_channels()
 
-    # Example:
-    # sensor_channel = mux.get_channel(0)
-    #
-    # Later:
-    # sensor = YourSensorLibrary(sensor_channel)
+    while True:
+
+        data = sensors.read_both_sensors()
+
+        print(
+            f"S1: {data['sensor1']['degrees']:.2f}° "
+            f"({data['sensor1']['raw']})"
+        )
+
+        print(
+            f"S2: {data['sensor2']['degrees']:.2f}° "
+            f"({data['sensor2']['raw']})"
+        )
+
+        print("-" * 40)
