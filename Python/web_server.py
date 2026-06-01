@@ -5,8 +5,6 @@ Publieke API
 start(host, port)              – start Flask in een daemon-thread (eenmalig)
 push_frame(bgr)                – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
 push_log(line)                 – stuur een logregel naar alle SSE-clients
-set_servo_controller(ctrl)     – koppel de ServoController zodat het dashboard
-                                 de speed_scale kan aansturen
 """
 from __future__ import annotations
 
@@ -39,18 +37,6 @@ _subs:         List[queue.Queue] = []
 _started    = False
 _start_lock = threading.Lock()
 
-# The ServoController instance — set via set_servo_controller().
-# None until the caller provides one; the /servo_speed endpoint
-# gracefully returns 503 if it has not been set yet.
-class _ServoControllerProto(Protocol):
-    speed_scale: float
-
-    def set_speed_scale(self, scale: float) -> None: ...
-
-
-_servo_ctrl: _ServoControllerProto | None = None
-_servo_ctrl_lock = threading.Lock()
-
 
 # ── publieke API ───────────────────────────────────────────────────────────────
 
@@ -73,22 +59,6 @@ def push_log(line: str) -> None:
                 q.put_nowait(line)
             except queue.Full:
                 pass
-
-
-def set_servo_controller(ctrl) -> None:
-    """
-    Register the ServoController with the web server.
-
-    Must be called before start() (or shortly after) so that the dashboard
-    slider can actually change speed_scale on the real controller.
-
-    Parameters
-    ----------
-    ctrl : ServoController   The live controller instance from dynamixel.py.
-    """
-    global _servo_ctrl
-    with _servo_ctrl_lock:
-        _servo_ctrl = ctrl
 
 
 def _local_ip() -> str:
@@ -230,37 +200,6 @@ def route_logs():
     )
 
 
-@_app.route("/servo_speed", methods=["GET", "POST"])
-def route_servo_speed():
-    """
-    GET  → returns {"scale": 0.0..1.0} (current speed_scale)
-    POST → body {"scale": 0.0..1.0}    (set new speed_scale)
-
-    Called by the dashboard slider. If no ServoController has been registered
-    via set_servo_controller(), returns 503.
-    """
-    with _servo_ctrl_lock:
-        ctrl = _servo_ctrl
-
-    if ctrl is None:
-        return jsonify({"error": "No servo controller registered"}), 503
-
-    ctrl_t = cast(_ServoControllerProto, ctrl)
-
-    if request.method == "GET":
-        return jsonify({"scale": ctrl_t.speed_scale})
-
-    data = request.get_json(silent=True) or {}
-    try:
-        scale = float(data["scale"])
-    except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "Expected JSON body: {\"scale\": 0.0..1.0}"}), 400
-
-    ctrl_t.set_speed_scale(scale)
-    print(f"Servo speed scale set to {scale:.0%}")
-    return jsonify({"scale": ctrl_t.speed_scale})
-
-
 @_app.route("/favicon.ico")
 def route_favicon():
     svg = (
@@ -348,18 +287,6 @@ _HTML = r"""<!DOCTYPE html>
     .dot.on { background: var(--green); box-shadow: 0 0 7px var(--green); animation: pulse 2s ease-in-out infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-    /* ─── SERVO SPEED CONTROL ────────────────────────────── */
-    .servo-control {
-      display: flex; align-items: center; gap: 10px;
-      padding: 5px 12px;
-      background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
-      flex-shrink: 0;
-    }
-    .servo-control label {
-      font-size: 9px; color: var(--muted); text-transform: uppercase;
-      letter-spacing: .8px; white-space: nowrap;
-    }
-
     /* Custom slider */
     #speedSlider {
       -webkit-appearance: none;
@@ -388,14 +315,6 @@ _HTML = r"""<!DOCTYPE html>
     }
     #speedVal.zero { color: var(--muted); }
     #speedVal.full { color: var(--green); }
-
-    .servo-badge {
-      font-size: 9px; padding: 1px 7px; border-radius: 10px;
-      background: var(--border); color: var(--muted);
-      white-space: nowrap; transition: all .3s;
-    }
-    .servo-badge.active { background: rgba(255,140,66,.15); border-color: var(--orange); color: var(--orange); }
-    .servo-badge.locked { background: var(--green-lo); color: var(--green); }
 
     .stats { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
 
@@ -491,7 +410,6 @@ _HTML = r"""<!DOCTYPE html>
     .lm.info { color: var(--blue); }
     .lm.ok   { color: var(--green); font-weight: 600; }
     .lm.sep  { color: var(--border2); }
-    .lm.servo { color: var(--orange); }
 
     .repeat-badge {
       display: inline-block; margin-left: 7px;
@@ -516,31 +434,18 @@ _HTML = r"""<!DOCTYPE html>
       .drag-divider { width: 100%; height: 5px; cursor: row-resize; }
       .console-panel { width: 100% !important; min-width: unset; }
       .stats { display: none; }
-      .servo-control { display: none; }
     }
   </style>
 </head>
 <body>
 
 <header>
-  <div class="brand">
-    <div class="berry-icon">🍓</div>
-    <h1><span>Strawberry</span> Detector</h1>
-  </div>
   <div class="hdivider"></div>
   <div class="live-pill">
     <div class="dot" id="liveDot"></div>
     <span id="liveText">Verbinden…</span>
   </div>
   <div class="hdivider"></div>
-
-  <!-- ── Servo speed control ── -->
-  <div class="servo-control">
-    <label>Servo Speed</label>
-    <input type="range" id="speedSlider" min="0" max="100" value="0" step="1">
-    <span id="speedVal" class="zero">0%</span>
-    <span class="servo-badge" id="servoBadge">PAUSED</span>
-  </div>
 
   <div class="stats">
     <div class="stat"><span class="stat-lbl">FPS</span><span class="stat-val" id="s-fps">—</span></div>
@@ -630,7 +535,6 @@ function cls(line) {
   if (/error|failed|geen.*camera|not avail/i.test(line))   return 'err';
   if (/warn/i.test(line))                                  return 'warn';
   if (/Dashboard:|http:\/\//i.test(line))                  return 'info';
-  if (/servo speed scale/i.test(line))                     return 'servo';
   if (/^──/.test(line.trim()))                             return 'sep';
   return '';
 }
@@ -700,73 +604,6 @@ logEl.addEventListener('scroll', () => {
   }
 });
 
-// ── Servo speed slider ────────────────────────────────────────────────────────
-//
-// The slider maps 0–100 (integer %) to 0.0–1.0 sent to POST /servo_speed.
-// Debounced: only sends after 120 ms of no movement to avoid flooding the Pi.
-// On page load, GETs the current value from the server so a refresh doesn't
-// silently reset the scale.
-
-const slider   = document.getElementById('speedSlider');
-const speedVal = document.getElementById('speedVal');
-const badge    = document.getElementById('servoBadge');
-
-let sliderTimer = null;
-
-function updateSliderUI(pct) {
-  speedVal.textContent = pct + '%';
-  speedVal.className = pct === 0 ? 'zero' : pct === 100 ? 'full' : '';
-  if (pct === 0) {
-    badge.textContent = 'PAUSED';
-    badge.className   = 'servo-badge';
-  } else if (pct === 100) {
-    badge.textContent = 'FULL';
-    badge.className   = 'servo-badge locked';
-  } else {
-    badge.textContent = pct + '%';
-    badge.className   = 'servo-badge active';
-  }
-  // Colour the slider track fill
-  slider.style.background = `linear-gradient(to right, var(--orange) ${pct}%, var(--border2) ${pct}%)`;
-}
-
-async function sendSpeedScale(scale) {
-  try {
-    const r = await fetch('/servo_speed', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scale }),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      addLine('⚠ Servo speed error: ' + (j.error || r.status));
-    }
-  } catch (e) {
-    addLine('⚠ Servo speed request failed: ' + e.message);
-  }
-}
-
-slider.addEventListener('input', () => {
-  const pct = parseInt(slider.value, 10);
-  updateSliderUI(pct);
-  clearTimeout(sliderTimer);
-  sliderTimer = setTimeout(() => sendSpeedScale(pct / 100), 120);
-});
-
-// On load: fetch current scale from server
-async function fetchCurrentScale() {
-  try {
-    const r = await fetch('/servo_speed');
-    if (r.ok) {
-      const j = await r.json();
-      const pct = Math.round((j.scale || 0) * 100);
-      slider.value = pct;
-      updateSliderUI(pct);
-    }
-  } catch (_) { /* server not ready yet, stay at 0 */ }
-}
-fetchCurrentScale();
-updateSliderUI(0); // set initial gradient before fetch returns
 
 // ── Drag-to-resize ────────────────────────────────────────────────────────────
 const dragDiv    = document.getElementById('dragDiv');
