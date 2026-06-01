@@ -1,56 +1,63 @@
+"""
+robot_controller.py
+===================
+Selects the best strawberry target and produces movement commands.
+Also dispatches hardware commands to the servo submodules (turntable, etc.).
+
+Hardware calls are fire-and-forget: each submodule owns a background thread
+so no serial write ever blocks the vision pipeline.
+"""
+
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from detection import Detection
-
 import config
 
+# ---------------------------------------------------------------------------
+# Hardware submodule imports — all guarded so the code runs fine on a dev
+# machine that has no Pi / no serial port.
+# ---------------------------------------------------------------------------
+try:
+    import turntable as _turntable
+    _HAS_TURNTABLE = True
+except ImportError:
+    _HAS_TURNTABLE = False
 
-X_THRESHOLD     = 25
-Y_THRESHOLD     = 25
-PRIORITIZE_Y    = True
+# Future submodules — uncomment when ready:
+# try:
+#     import tower as _tower
+#     _HAS_TOWER = True
+# except ImportError:
+#     _HAS_TOWER = False
 
-# ── Lock hysteresis ────────────────────────────────────────────────────────────
-# A new candidate must beat the current target by this many pixels (baseline).
-# The effective threshold is multiplied by the current target's depth_score,
-# so a close/confident target is harder to steal than a distant/uncertain one.
-LOCK_HYSTERESIS_BASE  = 40    # pixels — baseline steal threshold
-LOCK_HYSTERESIS_DEPTH = 30    # extra pixels added at full depth_score (1.0)
-#   effective = LOCK_HYSTERESIS_BASE + LOCK_HYSTERESIS_DEPTH * current_depth_score
+# try:
+#     import arm as _arm
+#     _HAS_ARM = True
+# except ImportError:
+#     _HAS_ARM = False
 
-# ── Ghost-lock grace period ────────────────────────────────────────────────────
-# If the locked target is not found in the current frame, hold the lock for up
-# to this many consecutive misses before releasing.  Prevents thrashing on
-# single-frame detection gaps.
-LOCK_GHOST_FRAMES = 2
 
-# ── Candidate scoring weights ──────────────────────────────────────────────────
-# Initial target selection (and lock-steal evaluation) ranks candidates by a
-# combined score rather than raw pixel distance alone.
-#   score = distance_norm * WEIGHT_DIST + (1 - depth_score) * WEIGHT_DEPTH
-# Both terms are "lower is better", so the candidate with the lowest score wins.
-WEIGHT_DIST  = 0.5   # how much pixel distance matters
-WEIGHT_DEPTH = 0.5   # how much depth (proximity) matters
+# =============================================================================
+# CONFIG
+# =============================================================================
 
-# ── Depth units ───────────────────────────────────────────────────────────────
-# depth_units is a relative distance value where 1.0 means the berry appears at
-# exactly the ideal (picking) size.  Values > 1.0 mean farther away; < 1.0 mean
-# closer than ideal.
-#
-# Formula:  depth_units = sqrt(BERRY_SIZE_IDEAL / apparent_area)
-#
-#
-# Clipped to [DEPTH_UNITS_MIN, DEPTH_UNITS_MAX] so extreme noise doesn't
-# produce absurd values.
-DEPTH_UNITS_MIN = 0.2
-DEPTH_UNITS_MAX = 1000
+X_THRESHOLD     = 25    # px — horizontal dead zone
+Y_THRESHOLD     = 25    # px — vertical   dead zone
+PRIORITIZE_Y    = True  # move arm up/down before turntable when both are off
+LOCK_HYSTERESIS = 100   # px — new target must beat current by this to steal lock
 
-# =========================
-# DEPTH ESTIMATION CONFIG
-# =========================
-DEPTH_CONF_WEIGHT = 0.35   # how much detection confidence softens the score (0 = ignore)
+DEPTH_CONF_WEIGHT = 0.2  # how much detection confidence softens depth score
 
+# How often to print the hardware log line (every N detection cycles).
+# Set to 1 to log every detection, higher to reduce terminal spam.
+HW_LOG_EVERY = 5
+
+
+# =============================================================================
+# DATA
+# =============================================================================
 
 @dataclass
 class RobotTarget:
@@ -58,115 +65,80 @@ class RobotTarget:
     center_x:    int
     center_y:    int
     distance:    float
-    depth_score: float = 0.0   # 0–1, 1 = at ideal picking distance
-    depth_units: float = 1.0   # relative distance, 1.0 = ideal picking distance
+    depth_score: float = 0.0   # 0.0 = far, 1.0 = at ideal picking distance
 
+
+# =============================================================================
+# CONTROLLER
+# =============================================================================
 
 class RobotController:
-    """Select target strawberries and produce simple movement commands."""
+    """Select target strawberries and drive hardware submodules."""
 
     def __init__(self) -> None:
         self.current_target: Optional[RobotTarget] = None
-        self._ghost_frames: int = 0   # consecutive frames the target was not found
+        self._hw_log_counter: int = 0
 
-    # ── geometry helpers ───────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------------------
 
     @staticmethod
     def get_box_center(det: Detection) -> Tuple[int, int]:
         return (det.x1 + det.x2) // 2, (det.y1 + det.y2) // 2
 
     @staticmethod
-    def _distance_to(gripper_x: int, gripper_y: int, x: int, y: int) -> float:
-        return math.hypot(x - gripper_x, y - gripper_y)
+    def _distance_to(gx: int, gy: int, x: int, y: int) -> float:
+        return math.hypot(x - gx, y - gy)
 
-    # ── depth estimation ───────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Depth estimation
+    # ------------------------------------------------------------------
 
     @staticmethod
     def estimate_depth(det: Detection) -> float:
         """
-        Estimate relative depth from apparent bounding-box size.
-
-        Returns depth_score in [0.0, 1.0]:
-            1.0  →  berry is close (at or above ideal size)
-            0.0  →  berry is far away (much smaller than ideal)
-
-        Asymmetric curve:
-            - Smaller than ideal → score drops toward 0 (far)
-            - Larger than ideal  → score stays near 1.0 (very close)
+        Estimate relative depth from bounding-box area.
+        Returns score in [0.0, 1.0]:  1.0 = close, 0.0 = far.
+        Asymmetric curve: too-small penalised more than too-large.
         """
         area  = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
         ideal = max(1, config.BERRY_SIZE_IDEAL)
-        ratio = area / ideal  # <1 = far, >1 = close
+        ratio = area / ideal
 
         if ratio >= 1.0:
-            raw_score = math.exp(-((ratio - 1.0) ** 2) / (2 * 1.5 ** 2))
+            raw = math.exp(-((ratio - 1.0) ** 2) / (2 * 1.5 ** 2))
         else:
-            raw_score = math.exp(-((ratio - 1.0) ** 2) / (2 * 0.35 ** 2))
+            raw = math.exp(-((ratio - 1.0) ** 2) / (2 * 0.35 ** 2))
 
         conf  = float(det.confidence or 0.0)
-        score = raw_score * (1.0 - DEPTH_CONF_WEIGHT) + raw_score * conf * DEPTH_CONF_WEIGHT
+        score = raw * (1.0 - DEPTH_CONF_WEIGHT) + raw * conf * DEPTH_CONF_WEIGHT
         return round(min(1.0, max(0.0, score)), 3)
 
     @staticmethod
-    def estimate_depth_units(det: Detection) -> float:
-        """
-        Return a relative distance value where 1.0 = berry at ideal picking size.
-
-        depth_units = sqrt(BERRY_SIZE_IDEAL / apparent_area)
-
-        Properties
-        ----------
-        - Physically linear with real distance (area ∝ 1/d², so sqrt inverts it).
-        - 20→60 unit real-world range gives a 3× swing
-        - Clipped to [DEPTH_UNITS_MIN, DEPTH_UNITS_MAX] to suppress noise.
-        - Values are always positive; lower = closer.
-        """
-        area  = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
-        ideal = max(1, config.BERRY_SIZE_IDEAL)
-        units = math.sqrt(ideal / area)
-        return round(min(DEPTH_UNITS_MAX, max(DEPTH_UNITS_MIN, units)), 3)
-
-    @staticmethod
-    def depth_label(depth_score: float) -> str:
-        """Human-readable depth bucket for logging."""
-        if depth_score >= 0.80:
-            return "CLOSE"
-        if depth_score >= 0.50:
-            return "MEDIUM"
-        if depth_score >= 0.25:
-            return "FAR"
+    def depth_label(score: float) -> str:
+        if score >= 0.80: return "CLOSE"
+        if score >= 0.50: return "MEDIUM"
+        if score >= 0.25: return "FAR"
         return "VERY FAR"
 
-    # ── candidate scoring ──────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Target selection
+    # ------------------------------------------------------------------
 
-    def _candidate_score(
-        self,
-        dist: float,
-        depth_score: float,
-        max_dist: float,
-    ) -> float:
-        """
-        Combined score for candidate ranking — lower is better.
-
-        Normalises pixel distance to [0, 1] using the furthest candidate in
-        this frame as the reference, then blends with (1 - depth_score).
-        """
-        dist_norm = dist / max(max_dist, 1.0)
-        return dist_norm * WEIGHT_DIST + (1.0 - depth_score) * WEIGHT_DEPTH
-
-    # ── lock management ────────────────────────────────────────────────────────
+    @staticmethod
+    def _simple_iou(a: Detection, b: Detection) -> float:
+        ix1 = max(a.x1, b.x1); iy1 = max(a.y1, b.y1)
+        ix2 = min(a.x2, b.x2); iy2 = min(a.y2, b.y2)
+        inter  = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area_a = (a.x2 - a.x1) * (a.y2 - a.y1)
+        area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
+        union  = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     def _target_still_exists(self, detections: List[Detection]) -> bool:
-        """
-        Try to match the current target against new detections.
-
-        Returns True (and updates the target in-place) if found.
-        If not found, increments the ghost-frame counter and returns True
-        while still within the grace period, so the lock is held temporarily.
-        """
         if self.current_target is None:
             return False
-
         target = self.current_target.detection
         for det in detections:
             if self._simple_iou(target, det) > 0.3:
@@ -176,32 +148,8 @@ class RobotController:
                 self.current_target.center_y    = cy
                 self.current_target.distance    = 0.0
                 self.current_target.depth_score = self.estimate_depth(det)
-                self.current_target.depth_units = self.estimate_depth_units(det)
-                self._ghost_frames = 0
                 return True
-
-        # Not found — apply ghost-lock grace period
-        self._ghost_frames += 1
-        if self._ghost_frames <= LOCK_GHOST_FRAMES:
-            return True   # hold the lock without updating position
-
-        # Grace period expired — release
-        self._ghost_frames = 0
         return False
-
-    @staticmethod
-    def _simple_iou(a: Detection, b: Detection) -> float:
-        x_a   = max(a.x1, b.x1)
-        y_a   = max(a.y1, b.y1)
-        x_b   = min(a.x2, b.x2)
-        y_b   = min(a.y2, b.y2)
-        inter  = max(0, x_b - x_a) * max(0, y_b - y_a)
-        area_a = (a.x2 - a.x1) * (a.y2 - a.y1)
-        area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
-        union  = area_a + area_b - inter
-        return inter / union if union > 0 else 0.0
-
-    # ── public API ─────────────────────────────────────────────────────────────
 
     def choose_target(
         self,
@@ -209,96 +157,115 @@ class RobotController:
         gripper_x: int,
         gripper_y: int,
     ) -> Optional[RobotTarget]:
-
         if not detections:
             self.current_target = None
-            self._ghost_frames  = 0
             return None
 
-        # Build candidates with full metrics
-        candidates: List[RobotTarget] = []
+        # Find closest candidate
+        closest: Optional[RobotTarget] = None
         for det in detections:
             cx, cy = self.get_box_center(det)
             dist   = self._distance_to(gripper_x, gripper_y, cx, cy)
             depth  = self.estimate_depth(det)
-            units  = self.estimate_depth_units(det)
-            candidates.append(RobotTarget(det, cx, cy, dist, depth, units))
+            cand   = RobotTarget(det, cx, cy, dist, depth)
+            if closest is None or dist < closest.distance:
+                closest = cand
 
-        # max_dist reference includes all candidates so normalisation is stable
-        max_dist = max(c.distance for c in candidates)
-
-        # Find the best candidate by combined score
-        best = min(
-            candidates,
-            key=lambda c: self._candidate_score(c.distance, c.depth_score, max_dist),
-        )
-
-        # Update current target's metrics (or apply ghost-lock) before comparing
-        target_alive = self._target_still_exists(detections)
-
-        if target_alive:
-            # Re-score the (now freshly updated) current target on the same
-            # max_dist scale so the comparison is apples-to-apples.
-            cur = self.current_target
-            cur_dist = self._distance_to(gripper_x, gripper_y, cur.center_x, cur.center_y)
-            cur_score  = self._candidate_score(cur_dist, cur.depth_score, max_dist)
-            best_score = self._candidate_score(best.distance, best.depth_score, max_dist)
-
-            # Hysteresis: expressed as a score-space margin so depth differences
-            # are properly accounted for.  Deeper/closer lock → larger margin.
-            # LOCK_HYSTERESIS_BASE / max_dist normalises pixels → score space.
-            margin = (
-                (LOCK_HYSTERESIS_BASE + LOCK_HYSTERESIS_DEPTH * cur.depth_score)
-                / max(max_dist, 1.0)
-            ) * WEIGHT_DIST   # only the distance component is in comparable units
-
-            if best_score < cur_score - margin:
-                self._ghost_frames  = 0
-                self.current_target = best
-
+        # Keep locked target unless a much-closer one exists
+        if self._target_still_exists(detections):
+            cur_dist = self._distance_to(
+                gripper_x, gripper_y,
+                self.current_target.center_x,
+                self.current_target.center_y,
+            )
+            if closest.distance < cur_dist - LOCK_HYSTERESIS:
+                self.current_target = closest
             return self.current_target
 
-        # No existing target — take the best combined-score candidate
-        self._ghost_frames  = 0
-        self.current_target = best
+        self.current_target = closest
         return self.current_target
 
+    # ------------------------------------------------------------------
+    # Offset generators
+    # ------------------------------------------------------------------
+
     def generate_dx(self, gripper_x: int) -> int:
-        if self.current_target is None:
-            return 0
-        return self.current_target.center_x - gripper_x
+        return 0 if self.current_target is None else self.current_target.center_x - gripper_x
 
     def generate_dy(self, gripper_y: int) -> int:
-        if self.current_target is None:
-            return 0
-        return self.current_target.center_y - gripper_y
+        return 0 if self.current_target is None else self.current_target.center_y - gripper_y
+
+    # ------------------------------------------------------------------
+    # HUD strings
+    # ------------------------------------------------------------------
 
     def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
         if self.current_target is None:
             return "NO TARGET"
-
-        tx = self.current_target.center_x
-        ty = self.current_target.center_y
-
-        dx = tx - gripper_x
-        dy = ty - gripper_y
-
-        if PRIORITIZE_Y:
-            if abs(dy) > Y_THRESHOLD:
-                return "ARM GO DOWN" if dy > 0 else "ARM GO UP"
+        dx = self.current_target.center_x - gripper_x
+        dy = self.current_target.center_y - gripper_y
+        if PRIORITIZE_Y and abs(dy) > Y_THRESHOLD:
+            return "ARM GO DOWN" if dy > 0 else "ARM GO UP"
         if abs(dx) > X_THRESHOLD:
             return "MOVE RIGHT" if dx > 0 else "MOVE LEFT"
-
         return "TARGET LOCKED"
 
     def generate_depthstring(self) -> str:
-        """One-liner depth summary for the current target, ready to log."""
         if self.current_target is None:
             return "DEPTH: no target"
         t    = self.current_target
         area = (t.detection.x2 - t.detection.x1) * (t.detection.y2 - t.detection.y1)
         return (
             f"DEPTH: {self.depth_label(t.depth_score)} "
-            f"(dist={t.depth_units:.2f}, "
-            f"area={area}px²)"
+            f"(score={t.depth_score:.2f}, area={area}px²)"
         )
+
+    # ------------------------------------------------------------------
+    # Hardware dispatch  ← called once per detection cycle, never per raw frame
+    # ------------------------------------------------------------------
+
+    def drive_hardware(self, gripper_x: int, gripper_y: int) -> None:
+        """
+        Fire-and-forget hardware commands for the current frame.
+        All serial writes happen in each submodule's background thread —
+        this method returns immediately and never blocks the pipeline.
+
+        Log output is throttled to every HW_LOG_EVERY detection cycles.
+        """
+        self._hw_log_counter += 1
+        do_log = (self._hw_log_counter % HW_LOG_EVERY == 0)
+
+        if self.current_target is None:
+            if _HAS_TURNTABLE:
+                _turntable.stop()
+            if do_log:
+                print("[HW] turntable=STOP (no target)")
+            return
+
+        dx = self.generate_dx(gripper_x)
+        dy = self.generate_dy(gripper_y)
+
+        # ── Turntable (X axis) ────────────────────────────────────────────────
+        if _HAS_TURNTABLE:
+            tt_msg = _turntable.update(dx)
+        else:
+            # Simulation: resolve what would happen without hardware
+            if   dx >  _turntable_dead_zone(): tt_msg = f"TURNTABLE SIMULATED RIGHT (dx={dx:+d})"
+            elif dx < -_turntable_dead_zone(): tt_msg = f"TURNTABLE SIMULATED LEFT  (dx={dx:+d})"
+            else:                              tt_msg = f"TURNTABLE SIMULATED STOP  (dx={dx:+d})"
+
+        # ── Future: tower (Y axis) ────────────────────────────────────────────
+        # tower_msg = _tower.update(dy) if _HAS_TOWER else f"TOWER SIM (dy={dy:+d})"
+
+        # ── Future: arm (depth / Z axis) ──────────────────────────────────────
+        # arm_msg = _arm.update(self.current_target.depth_score) if _HAS_ARM else "ARM SIM"
+
+        if do_log:
+            print(f"[HW] {tt_msg}")
+
+
+def _turntable_dead_zone() -> int:
+    """Return turntable dead zone even when the module isn't imported."""
+    if _HAS_TURNTABLE:
+        return _turntable.DEAD_ZONE
+    return X_THRESHOLD
