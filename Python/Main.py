@@ -172,20 +172,56 @@ class _WorkerState:
 # =============================================================================
 
 def _find_available_camera_source() -> tuple[str, str]:
-    """Probes URLs to find out which camera source is online."""
-    for url, label in [(RTSP_ETHERNET, "reCamera Ethernet"), (RTSP_USB, "reCamera USB")]:
+    """
+    Cycles through Ethernet, USB, and Laptop cameras in sequence.
+    Loops back to the beginning infinitely until a working source is found.
+    """
+    # The exact sequence of options
+    options = [
+        (RTSP_ETHERNET, "reCamera Ethernet"),
+        (RTSP_USB, "reCamera USB"),
+        ("0", "Laptop")
+    ]
+
+    idx = 0
+    while True:
+        # Wrap around the 3 options indefinitely using modulo arithmetic
+        url, label = options[idx % len(options)]
+        idx += 1
+
         print(f"Probing {label}...")
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+
+        if url == "0":
+            cap = cv2.VideoCapture(0)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        else:
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         if cap.isOpened():
-            ok, _ = cap.read()
-            cap.release()
-            if ok:
-                print(f"Found active stream on {label}")
+            # Give the stream a brief moment to deliver an actual video frame
+            max_checks = 1 if url == "0" else 20
+            frame_received = False
+
+            for _ in range(max_checks):
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    frame_received = True
+                    break
+                time.sleep(0.1)
+
+            if frame_received:
+                print(f"--> Success! Found working camera: {label}")
+                cap.release()  # Clean up so the Capture thread can instantly grab it
                 return url, label
-    print("No reCamera discovered. Falling back to laptop camera environment.")
-    return "0", "Laptop"
 
+        # Clean up the failed attempt before trying the next option in the sequence
+        cap.release()
+        print(f"{label} not available. Moving to next option...")
+        time.sleep(0.5)
 
+        
 # =============================================================================
 # Camera badge
 # =============================================================================
