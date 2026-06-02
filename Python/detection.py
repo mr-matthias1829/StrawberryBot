@@ -36,8 +36,8 @@ class AIDetector:
         best_detections = []
         highest_avg_conf = -1.0
 
-        # Run inference 3 times
-        for _ in range(3):
+        # Run inference X times
+        for _ in range(1):
             # verbose=False keeps our console clean during the thrashing
             results = self.model(frame, conf=conf_threshold, verbose=False)
             current_pass_detections = []
