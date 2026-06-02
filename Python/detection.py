@@ -22,32 +22,50 @@ class Detection:
 
 
 class AIDetector:
-    """YOLO-based detector."""
+    """YOLO-based detector with triple-check inference logic."""
 
     def __init__(self, model_path: str = config.MODEL_PATH):
         self.model = YOLO(model_path)
-        print(f"Loaded AI model")
+        print(f"Loaded AI model with triple-pass filter")
 
     def detect(self, frame: np.ndarray, conf_threshold: float = None) -> List[Detection]:
-        """Run YOLO detection. Returns list of Detection objects."""
+        """Runs YOLO detection 3 times and takes the pass with the highest confidence."""
         if conf_threshold is None:
             conf_threshold = config.YOLO_BASE_THRESHOLD
 
-        results = self.model(frame, conf=conf_threshold, verbose=False)
-        detections = []
+        best_detections = []
+        highest_avg_conf = -1.0
 
-        for r in results:
-            if r.boxes is None:
-                continue
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                conf = float(box.conf[0])
-                detections.append(Detection(
-                    x1=x1, y1=y1, x2=x2, y2=y2,
-                    confidence=conf, source="ai"
-                ))
+        # Run inference 3 times
+        for _ in range(3):
+            # verbose=False keeps our console clean during the thrashing
+            results = self.model(frame, conf=conf_threshold, verbose=False)
+            current_pass_detections = []
+            total_conf = 0.0
 
-        return detections
+            for r in results:
+                if r.boxes is None:
+                    continue
+                for box in r.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    conf = float(box.conf[0])
+
+                    current_pass_detections.append(Detection(
+                        x1=x1, y1=y1, x2=x2, y2=y2,
+                        confidence=conf, source="ai"
+                    ))
+                    total_conf += conf
+
+            # Calculate the average confidence for this frame pass to pick the winner.
+            # If no berries are found, average confidence is 0.0.
+            avg_conf = (total_conf / len(current_pass_detections)) if current_pass_detections else 0.0
+
+            # If this pass outperformed previous passes, lock it in.
+            if avg_conf > highest_avg_conf or (not best_detections and current_pass_detections):
+                highest_avg_conf = avg_conf
+                best_detections = current_pass_detections
+
+        return best_detections
 
 
 # ---------------------------------------------------------------------------
