@@ -216,7 +216,7 @@ def run_webcam() -> None:
         while True:
             t_read = time.perf_counter()
 
-            for _ in range(5):
+            for _ in range(60):
                 cap.grab()
 
             ok, frame = cap.retrieve()
