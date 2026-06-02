@@ -2,7 +2,7 @@
 robot_controller.py
 ===================
 Selects the best strawberry target and produces movement commands.
-Also dispatches hardware commands to the servo submodules (turntable, lift, etc.).
+Also dispatches hardware commands to the servo submodules (turntable, lift, gripper, etc.).
 
 Hardware calls are fire-and-forget: each submodule owns a background thread
 so no serial write ever blocks the vision pipeline.
@@ -30,6 +30,12 @@ try:
     _HAS_LIFT = True
 except ImportError:
     _HAS_LIFT = False
+
+try:
+    import gripper as _gripper
+    _HAS_GRIPPER = True
+except ImportError:
+    _HAS_GRIPPER = False
 
 # Future submodules — uncomment when ready:
 # try:
@@ -78,6 +84,10 @@ class RobotController:
     def __init__(self) -> None:
         self.current_target: Optional[RobotTarget] = None
         self._hw_log_counter: int = 0
+
+        # Gripper state tracking
+        self._gripper_containment_frames: int = 0  # frames the target was fully in gripper bbox
+        self._last_target_id: Optional[int] = None  # to detect target changes
 
     # ------------------------------------------------------------------
     # Geometry
@@ -186,6 +196,136 @@ class RobotController:
         return self.current_target
 
     # ------------------------------------------------------------------
+    # Gripper bounding box helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_gripper_bbox(gripper_x: int, gripper_y: int) -> Tuple[int, int, int, int]:
+        """
+        Get the gripper bounding box (x1, y1, x2, y2) centered on the gripper point.
+        Box size is controlled by config.GRIPPER_BB_WIDTH and GRIPPER_BB_HEIGHT.
+        """
+        half_w = config.GRIPPER_BB_WIDTH // 2
+        half_h = config.GRIPPER_BB_HEIGHT // 2
+        return (
+            gripper_x - half_w,
+            gripper_y - half_h,
+            gripper_x + half_w,
+            gripper_y + half_h,
+        )
+
+    @staticmethod
+    def is_detection_fully_contained(det: Detection, bbox: Tuple[int, int, int, int]) -> bool:
+        """
+        Check if a detection is fully contained within a bounding box.
+
+        Args:
+            det: Detection object with x1, y1, x2, y2
+            bbox: Tuple (x1, y1, x2, y2) of the containing box
+
+        Returns:
+            True if detection is fully inside bbox
+        """
+        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = bbox
+        return (
+            det.x1 >= bbox_x1
+            and det.y1 >= bbox_y1
+            and det.x2 <= bbox_x2
+            and det.y2 <= bbox_y2
+        )
+
+    def update_gripper_containment(self, gripper_x: int, gripper_y: int) -> None:
+
+        def object_fill_ratio(self) -> float:
+            """
+            Percentage van de gripper-box dat wordt gevuld door de target.
+            0.0 = heel klein/ver weg
+            1.0 = vult complete gripper-box
+            """
+            if self.current_target is None:
+                return 0.0
+
+            det = self.current_target.detection
+
+            target_area = (
+                    (det.x2 - det.x1)
+                    * (det.y2 - det.y1)
+            )
+
+            gripper_area = (
+                    config.GRIPPER_BB_WIDTH
+                    * config.GRIPPER_BB_HEIGHT
+            )
+
+            return target_area / max(1, gripper_area)
+
+        def ready_to_grab(
+                self,
+                gripper_x: int,
+                gripper_y: int,
+        ) -> bool:
+            """
+            Alleen grijpen wanneer:
+
+            - target gecentreerd is
+            - target volledig in gripper-box zit
+            - target groot genoeg is
+            """
+
+            if self.current_target is None:
+                return False
+
+            det = self.current_target.detection
+
+            bbox = self.get_gripper_bbox(
+                gripper_x,
+                gripper_y,
+            )
+
+            contained = self.is_detection_fully_contained(
+                det,
+                bbox,
+            )
+
+            ratio = self.object_fill_ratio()
+
+            dx = self.generate_dx(gripper_x)
+            dy = self.generate_dy(gripper_y)
+
+            centered = (
+                    abs(dx) <= config.GRAB_CENTER_TOLERANCE_X
+                    and
+                    abs(dy) <= config.GRAB_CENTER_TOLERANCE_Y
+            )
+
+            return (
+                    contained
+                    and centered
+                    and ratio >= config.MIN_GRAB_AREA_RATIO
+            )
+        """
+        Update how many frames the current target has been fully in the gripper bbox.
+        If target changes, reset counter.
+        """
+        if self.current_target is None:
+            self._gripper_containment_frames = 0
+            self._last_target_id = None
+            return
+
+        # Reset if target changed
+        target_id = id(self.current_target.detection)
+        if target_id != self._last_target_id:
+            self._gripper_containment_frames = 0
+            self._last_target_id = target_id
+
+        # Check if target is fully in gripper bbox
+        bbox = self.get_gripper_bbox(gripper_x, gripper_y)
+        if self.is_detection_fully_contained(self.current_target.detection, bbox):
+            self._gripper_containment_frames += 1
+        else:
+            self._gripper_containment_frames = 0
+
+    # ------------------------------------------------------------------
     # Offset generators
     # ------------------------------------------------------------------
 
@@ -220,11 +360,31 @@ class RobotController:
             f"(score={t.depth_score:.2f}, area={area}px²)"
         )
 
+    def generate_gripperstring(self) -> str:
+        """Generate a status string about the gripper and containment."""
+        if not _HAS_GRIPPER:
+            return "GRIPPER: SIMULATED"
+
+        state = _gripper.get_state()
+
+        if self.current_target is None:
+            return f"GRIPPER: {state} (no target)"
+
+        containment = self._gripper_containment_frames
+        required = config.GRIPPER_CONTAINMENT_FRAMES
+
+        if containment >= required:
+            return f"GRIPPER: {state} (READY: {containment}/{required} ✓)"
+        else:
+            return f"GRIPPER: {state} ({containment}/{required} frames)"
+
     # ------------------------------------------------------------------
     # Hardware dispatch  ← called once per detection cycle, never per raw frame
     # ------------------------------------------------------------------
 
     def drive_hardware(self, gripper_x: int, gripper_y: int) -> None:
+        self.gripper_width = 500
+        self.gripper_height = 500
         """
         Fire-and-forget hardware commands for the current frame.
         All serial writes happen in each submodule's background thread —
@@ -263,8 +423,64 @@ class RobotController:
             elif dy < -Y_THRESHOLD: lift_msg = f"LIFT SIMULATED UP   (dy={dy:+d})"
             else:                   lift_msg = f"LIFT SIMULATED STOP (dy={dy:+d})"
 
+        # ── Gripper (Z axis / depth) ──────────────────────────────────────────
+        # ── Gripper (Z axis / depth) ──────────────────────────────────────────
+        if _HAS_GRIPPER:
+
+            self.update_gripper_containment(
+                gripper_x,
+                gripper_y,
+            )
+
+            gripper_msg = self.generate_gripperstring()
+
+            if config.GRIPPER_AUTO_GRIP_ENABLED:
+
+                required = config.GRIPPER_CONTAINMENT_FRAMES
+
+                if (
+                        self._gripper_containment_frames >= required
+                        and self.ready_to_grab(
+                    gripper_x,
+                    gripper_y,
+                )
+                ):
+
+                    ratio = self.object_fill_ratio()
+
+                    print(
+                        f"[GRAB CHECK] "
+                        f"ratio={ratio:.2f} "
+                        f"frames={self._gripper_containment_frames}"
+                    )
+
+                    ratio = self.object_fill_ratio()
+
+                    print(
+                        f"[GRAB CHECK] "
+                        f"ratio={ratio:.2f} "
+                        f"frames={self._gripper_containment_frames}"
+                    )
+
+                    result = _gripper.grip()
+
+                    if result["status"] == "ok":
+                        gripper_msg = "GRIPPER: GRIPPING ▼"
+
+                    elif result["status"] == "ignored":
+                        pass
+
+                    elif result["status"] == "busy":
+                        gripper_msg = (
+                            "GRIPPER: BUSY "
+                            "(prev command finishing)"
+                        )
+
+        else:
+            gripper_msg = self.generate_gripperstring()
+
         # ── Future: arm (depth / Z axis) ──────────────────────────────────────
         # arm_msg = _arm.update(self.current_target.depth_score) if _HAS_ARM else "ARM SIM"
 
         if do_log:
-            print(f"[HW] {tt_msg} | {lift_msg}")
+            print(f"[HW] {tt_msg} | {lift_msg} | {gripper_msg}")

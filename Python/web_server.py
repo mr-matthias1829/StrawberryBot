@@ -455,6 +455,7 @@ _HTML = r"""<!DOCTYPE html>
     <div class="stat"><span class="stat-lbl">Hits</span><span class="stat-val" id="s-hits">—</span></div>
     <div class="stat"><span class="stat-lbl">Poss.</span><span class="stat-val" id="s-poss">—</span></div>
     <div class="stat"><span class="stat-lbl">Cam</span><span class="stat-val" id="s-cam">—</span></div>
+    <div class="stat" style="min-width: auto;"><span id="s-gripper">🤖 —</span></div>
   </div>
 </header>
 

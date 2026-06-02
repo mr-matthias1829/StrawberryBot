@@ -383,64 +383,234 @@ class FusionEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
+    @staticmethod
     def draw_annotations(
-        frame: np.ndarray,
-        ai_dets: List[Detection],
-        cv_dets: List[Detection],
-        confirmed: List[TrackedObject],
-        possible:  List[TrackedObject],
-        frame_count: int,
-        gripper_x: int,
-        gripper_y: int,
-        target_id: Optional[int],
-        target_center: Optional[Tuple[int, int]],
-        movement_text: str,
+            frame: np.ndarray,
+            ai_dets: List[Detection],
+            cv_dets: List[Detection],
+            confirmed: List[TrackedObject],
+            possible: List[TrackedObject],
+            frame_count: int,
+            gripper_x: int,
+            gripper_y: int,
+            target_id: Optional[int],
+            target_center: Optional[Tuple[int, int]],
+            movement_text: str,
     ) -> np.ndarray:
-        out = frame  # in-place — caller does not reuse original after this
 
+        out = frame
+
+        # ------------------------------------------------------------------
+        # AI detections
+        # ------------------------------------------------------------------
         for det in ai_dets:
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_AI, 1)
-            cv2.putText(out, f"AI:{det.confidence:.2f}", (det.x1, det.y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_AI, 1)
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_AI,
+                1,
+            )
 
+            cv2.putText(
+                out,
+                f"AI:{det.confidence:.2f}",
+                (det.x1, det.y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                config.COLOR_AI,
+                1,
+            )
+
+        # ------------------------------------------------------------------
+        # CV detections
+        # ------------------------------------------------------------------
         for det in cv_dets:
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_CV, 1)
-            cv2.putText(out, f"CV:{det.confidence:.2f}", (det.x1, det.y2 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_CV, 1)
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_CV,
+                1,
+            )
 
+            cv2.putText(
+                out,
+                f"CV:{det.confidence:.2f}",
+                (det.x1, det.y2 - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                config.COLOR_CV,
+                1,
+            )
+
+        # ------------------------------------------------------------------
+        # Confirmed targets
+        # ------------------------------------------------------------------
         for obj in confirmed:
-            det   = obj.detection
-            color = (0, 165, 255) if obj.id == target_id else config.COLOR_FUSED
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)
-            cv2.putText(out, f"#{obj.id} {det.confidence:.2f}", (det.x1, det.y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            det = obj.detection
 
+            color = (
+                (0, 165, 255)
+                if obj.id == target_id
+                else config.COLOR_FUSED
+            )
+
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                color,
+                2,
+            )
+
+            cv2.putText(
+                out,
+                f"#{obj.id} {det.confidence:.2f}",
+                (det.x1, det.y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+            )
+
+        # ------------------------------------------------------------------
+        # Possible targets
+        # ------------------------------------------------------------------
         for obj in possible:
-            det      = obj.detection
-            src      = (det.source or "").lower()
+            det = obj.detection
+
+            src = (det.source or "").lower()
             det_conf = float(det.confidence or 0.0)
+
             if FusionEngine._is_ai_like(src):
                 display_score = det_conf * config.POSSIBLE_AI_CONF_WEIGHT
             elif FusionEngine._is_cv_like(src):
                 display_score = det_conf
             else:
                 display_score = obj.fused_confidence
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_POSSIBLE, 1)
-            cv2.putText(out, f"P#{obj.id} {display_score:.2f}", (det.x1, det.y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_POSSIBLE, 1)
 
-        cv2.circle(out, (gripper_x, gripper_y), 8, (255, 0, 255), -1)
-        cv2.putText(out, "GRIPPER", (gripper_x + 10, gripper_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+            cv2.rectangle(
+                out,
+                (det.x1, det.y1),
+                (det.x2, det.y2),
+                config.COLOR_POSSIBLE,
+                1,
+            )
+
+            cv2.putText(
+                out,
+                f"P#{obj.id} {display_score:.2f}",
+                (det.x1, det.y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                config.COLOR_POSSIBLE,
+                1,
+            )
+
+        # ------------------------------------------------------------------
+        # Gripper bounding box
+        # ------------------------------------------------------------------
+
+        # check gripper state (if available)
+        gripping = False
+
+        try:
+            import gripper as _gripper
+            state = _gripper.get_state().lower()
+            gripping = "grip" in state  # covers "gripping", "grip", etc.
+        except Exception:
+            pass
+
+        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = (
+            RobotController.get_gripper_bbox(
+                gripper_x,
+                gripper_y,
+            )
+        )
+
+        contained = False
 
         if target_center is not None:
-            cv2.line(out, (gripper_x, gripper_y), target_center, (0, 165, 255), 2)
+            for obj in confirmed + possible:
+                if obj.id == target_id:
+                    contained = RobotController.is_detection_fully_contained(
+                        obj.detection,
+                        (bbox_x1, bbox_y1, bbox_x2, bbox_y2),
+                    )
+                    break
 
-        cv2.putText(out,
-                    f"Frame {frame_count} | Hits: {len(confirmed)} | Possible: {len(possible)}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(out, f"Robot: {movement_text}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+        if gripping:
+            gripper_color = (0, 0, 255)  # 🔴 GRABBING
+        elif contained:
+            gripper_color = (0, 255, 0)  # 🟢 READY
+        else:
+            gripper_color = (255, 0, 255)  # 🟣 NOT READY
+
+        cv2.rectangle(
+            out,
+            (bbox_x1, bbox_y1),
+            (bbox_x2, bbox_y2),
+            gripper_color,
+            2,
+        )
+
+        # ------------------------------------------------------------------
+        # Gripper center point
+        # ------------------------------------------------------------------
+        cv2.circle(
+            out,
+            (gripper_x, gripper_y),
+            8,
+            gripper_color,
+            -1,
+        )
+
+        cv2.putText(
+            out,
+            "GRIPPER",
+            (gripper_x + 10, gripper_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            gripper_color,
+            2,
+        )
+
+        # ------------------------------------------------------------------
+        # Line to target
+        # ------------------------------------------------------------------
+        if target_center is not None:
+            cv2.line(
+                out,
+                (gripper_x, gripper_y),
+                target_center,
+                (0, 165, 255),
+                2,
+            )
+
+        # ------------------------------------------------------------------
+        # HUD
+        # ------------------------------------------------------------------
+        cv2.putText(
+            out,
+            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
+        cv2.putText(
+            out,
+            f"Robot: {movement_text}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 165, 255),
+            2,
+        )
+
         return out
 
     # ------------------------------------------------------------------

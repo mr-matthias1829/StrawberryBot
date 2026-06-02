@@ -31,6 +31,9 @@ if ON_PI:
     import lift
     lift.init()
 
+    import gripper
+    gripper.init()
+
 # =============================================================================
 # Stdin diagnostics (harmless on all platforms)
 # =============================================================================
@@ -379,6 +382,7 @@ def run_webcam() -> None:
             capture_wrapper.release()
         cv2.destroyAllWindows()
         if ON_PI:
+            gripper.shutdown()
             lift.shutdown()
             turntable.shutdown()
             motor.shutdown()

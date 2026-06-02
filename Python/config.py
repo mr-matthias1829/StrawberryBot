@@ -111,3 +111,27 @@ COLOR_CV       = (255, 80, 0)
 COLOR_FUSED    = (0, 255, 255)
 COLOR_ZOOMED   = (255, 255, 0)
 COLOR_POSSIBLE = (180, 100, 255)
+
+# =============================================================================
+# GRIPPER
+# =============================================================================
+# Bounding box around the gripper point (in camera coordinates)
+# Size of the box: [-WIDTH/2, +WIDTH/2] on X-axis, [-HEIGHT/2, +HEIGHT/2] on Y-axis
+GRIPPER_BB_WIDTH  = 500   # px — horizontal extent
+GRIPPER_BB_HEIGHT = 500   # px — vertical extent
+
+# How many consecutive frames a strawberry must be fully contained within
+# the gripper bounding box before we auto-grip it
+GRIPPER_CONTAINMENT_FRAMES = 3  # frames required for auto-grip
+
+# Auto-grip enabled (if False, gripper stays manual-only)
+GRIPPER_AUTO_GRIP_ENABLED = True
+
+# =============================================================================
+# GRIP DECISION
+# =============================================================================
+
+MIN_GRAB_AREA_RATIO = 0.0
+
+GRAB_CENTER_TOLERANCE_X = 15
+GRAB_CENTER_TOLERANCE_Y = 15
