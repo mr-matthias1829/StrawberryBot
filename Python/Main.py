@@ -215,7 +215,13 @@ def run_webcam() -> None:
 
         while True:
             t_read = time.perf_counter()
-            ok, frame = cap.read()
+
+            for _ in range(5):
+                cap.grab()
+
+            ok, frame = cap.retrieve()
+
+
             last_read_ms = (time.perf_counter() - t_read) * 1000.0
 
             if not ok or frame is None:
