@@ -7,8 +7,8 @@ model = YOLO("yolov8n.pt")   # tiny starter model
 
 model.train(
     data="data.yaml",
-    epochs=60, # around this point the model seems to hit the peak, more epochs doesn't improve it by much more
-    imgsz=640,
+    epochs=75, # around this point the model seems to hit the peak, more epochs doesn't improve it by much more
+    imgsz=960,
     batch=16,
     cache="ram",   # loads entire dataset into RAM once, no disk reads after epoch 1
     workers=8,     # parallel data loading threads
