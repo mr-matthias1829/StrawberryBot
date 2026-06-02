@@ -3,7 +3,7 @@
 import os
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|fflags;discardcorrupt|analyzeduration;100|probesize;32"
 )
 import time
 import platform
@@ -296,8 +296,11 @@ def run_webcam() -> None:
             with cast(threading.Lock, state.lock):
                 res = state.result
 
-            if res is None:
-                continue
+            #if res is None:
+            #    continue
+
+            with cast(threading.Lock, state.lock):
+                state.frame = frame
 
             annotated, _, debug, mask, last_proc_ms = res
             if annotated is None:
