@@ -1,0 +1,43 @@
+@startuml
+title Strawberry Detection - Hardware Control Sequence
+autonumber
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign center
+
+actor MainLoop as Main
+participant "FusionEngine" as FE
+participant "RobotController" as RC
+participant "turntable.py" as TT
+participant "lift.py" as LIFT
+participant "gripper.py" as GRIP
+participant "motor.py" as MOTOR
+
+Main -> FE: process_frame(frame)
+FE -> RC: choose_target(detections, gripper_x, gripper_y)
+FE -> RC: generate_dx()/generate_dy()
+FE -> RC: drive_hardware(gripper_x, gripper_y)
+
+alt target missing
+	RC -> TT: stop()
+	RC -> LIFT: stop()
+	opt gripper status only
+		RC -> GRIP: get_state()
+	end
+else target present
+	RC -> TT: update(dx)
+	TT -> TT: compute speed + direction
+	TT -> MOTOR: _write_word(speed register)
+
+	RC -> LIFT: update(dy)
+	LIFT -> LIFT: compute speed + direction
+	LIFT -> MOTOR: _write_word(speed register x2)
+
+	opt auto-grip condition met
+		RC -> GRIP: grip()
+		GRIP -> GRIP: background worker executes command
+		GRIP -> MOTOR: _write_word(grip speed)
+	end
+end
+
+@enduml
+

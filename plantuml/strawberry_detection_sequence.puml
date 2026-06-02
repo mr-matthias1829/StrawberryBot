@@ -1,0 +1,83 @@
+@startuml
+title Strawberry Detection Sequence
+autonumber
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign center
+
+actor Operator
+participant "Main.run_webcam()" as Main
+participant "Capture" as Capture
+participant "Inference worker" as IW
+participant "FusionEngine" as FE
+participant "DetectionWorker" as DW
+participant "AIDetector" as AI
+participant "CVDectector" as CV
+participant "RobotController" as RC
+participant "web_server" as WS
+participant "OpenCV GUI" as GUI
+
+Operator -> Main: start application
+Main -> WS: start()
+Main -> Capture: initialize camera source
+Main -> IW: start background thread
+
+loop each incoming camera frame
+	Capture -> Capture: grab()/retrieve()
+	Capture --> Main: latest frame available
+	Main -> IW: post frame to worker state
+	IW -> FE: process_frame(frame)
+
+	FE -> FE: resize frame
+	FE -> DW: push_frame(frame, small)
+
+	alt detection cycle
+		FE -> DW: read_frame() + read_zoom()
+		DW -> AI: detect(small frame)
+		activate AI
+		AI --> DW: AI detections
+		deactivate AI
+
+		DW -> CV: detect(small frame)
+		activate CV
+		CV -> CV: build red mask
+		CV -> CV: contour filtering
+		CV -> CV: watershed split + scoring + NMS
+		CV --> DW: CV detections + mask
+		deactivate CV
+
+		DW --> FE: ai_dets, cv_dets, mask
+
+		FE -> FE: match AI/CV detections
+		alt matched AI/CV pair
+			FE -> FE: fuse confidences
+		else unmatched detection
+			FE -> FE: accept, reject, or request zoom
+			opt zoom recheck requested
+				FE -> DW: push_zoom(frame, box, source)
+				DW -> AI: detect(zoomed ROI)
+				AI --> DW: zoomed AI result
+				DW -> CV: detect(zoomed ROI)
+				CV --> DW: zoomed CV result
+				DW --> FE: zoomed detection
+			end
+		end
+
+		FE -> FE: update tracking
+		FE -> FE: classify confirmed vs possible hits
+		FE -> RC: choose_target()/drive_hardware()
+		FE --> IW: annotated frame + debug + mask
+	else skipped detection frame
+		FE --> IW: last annotated frame
+	end
+
+	IW --> Main: result ready
+	Main -> WS: push_frame(display)
+	alt GUI available
+		Main -> GUI: imshow("Strawberry Detection")
+	else headless environment
+		Main -> Main: continue without GUI
+	end
+end
+
+@enduml
+

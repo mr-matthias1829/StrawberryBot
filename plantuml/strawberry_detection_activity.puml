@@ -1,0 +1,52 @@
+@startuml
+title Strawberry Detection - Activity Diagram
+start
+
+:Launch app;
+:Start web server;
+:Find camera source;
+:Start capture thread;
+:Start inference worker;
+
+repeat
+  :Read latest frame;
+  if (Frame available?) then (yes)
+    :Post frame to worker;
+    :FusionEngine.process_frame();
+    :Resize frame for inference;
+    :Push frame into DetectionWorker;
+
+    if (Detection frame?) then (yes)
+      :Read AI detections;
+      :Read CV detections and mask;
+      :Match AI and CV boxes;
+      if (Matched detections exist?) then (yes)
+        :Fuse confidence scores;
+      else (no)
+        :Handle unmatched detections;
+        if (Needs zoom recheck?) then (yes)
+          :Push zoom job;
+          :Re-run AI/CV on ROI;
+          :Use zoom result if accepted;
+        else (no)
+          :Use direct accept / reject logic;
+        endif
+      endif
+
+      :Update tracking;
+      :Classify confirmed / possible hits;
+      :Select target;
+      :Generate robot movement;
+      :Drive hardware;
+      :Annotate frame;
+      :Push frame to web server / GUI;
+    else (no)
+      :Reuse last annotated frame;
+    endif
+  else (no)
+    :Wait briefly;
+  endif
+repeat while (running?) is (yes)
+
+stop
+@enduml

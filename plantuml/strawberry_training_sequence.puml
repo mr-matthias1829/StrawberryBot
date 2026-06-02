@@ -1,0 +1,43 @@
+@startuml
+title Strawberry Training / Data Preparation Sequence
+autonumber
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign center
+
+actor Developer
+participant "convert_csv.py" as CSV
+participant "convert_aug.py" as AUG
+participant "AiTrain.py" as TRAIN
+participant "Labels.csv" as LABELS
+participant "dataset/" as DATASET
+participant "dataset_aug/" as AUGSET
+participant "Ultralytics YOLO" as YOLO
+participant "PyTorch / CUDA" as TORCH
+
+Developer -> CSV: run conversion script
+CSV -> LABELS: read annotations
+CSV -> DATASET: read source images
+CSV -> DATASET: write YOLO .txt labels
+CSV --> Developer: conversion complete
+
+Developer -> AUG: run augmentation script
+AUG -> DATASET: read images + labels
+AUG -> AUGSET: create train/val folders
+AUG -> AUG: generate flips / crops / color shifts
+AUG -> AUG: create synthetic negatives
+AUG -> AUGSET: write augmented images + labels
+AUG --> Developer: augmentation complete
+
+Developer -> TRAIN: run training script
+TRAIN -> TORCH: check CUDA availability
+TRAIN -> YOLO: load base model or weights
+TRAIN -> AUGSET: load dataset from data.yaml
+loop epochs until convergence / patience
+    YOLO -> YOLO: train on batches
+end
+TRAIN -> YOLO: validate model
+YOLO --> TRAIN: metrics (mAP50, mAP50-95)
+TRAIN --> Developer: best model ready
+
+@enduml
+

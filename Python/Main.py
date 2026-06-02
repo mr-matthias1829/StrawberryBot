@@ -385,7 +385,8 @@ def run_webcam() -> None:
             gripper.shutdown()
             lift.shutdown()
             turntable.shutdown()
-            motor.shutdown()
+            motor.shutdown() # tries to shutdown motors activated through its class
+                            # consider removing motor shutdown as we dont activate motors through motor.py
 
 # =============================================================================
 # run_image
