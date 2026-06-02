@@ -55,6 +55,44 @@ RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
 
 # =============================================================================
+# Real-Time Capture Thread (Flushes OpenCV Buffer)
+# =============================================================================
+
+class Capture:
+    def __init__(self, cap: cv2.VideoCapture):
+        self.cap = cap
+        self.frame: Optional[np.ndarray] = None
+        self.running = True
+        self.lock = threading.Lock()
+
+        self.thread = threading.Thread(target=self._reader, daemon=True, name="camera-buffer-flusher")
+        self.thread.start()
+
+    def _reader(self) -> None:
+        while self.running:
+            if not self.cap.grab():
+                time.sleep(0.005)
+                continue
+
+            ok, frame = self.cap.retrieve()
+            if ok and frame is not None:
+                with self.lock:
+                    self.frame = frame
+
+    def read(self) -> Optional[np.ndarray]:
+        with self.lock:
+            return self.frame
+
+    def release(self) -> None:
+        self.running = False
+        try:
+            self.thread.join(timeout=1.0)
+        except Exception:
+            pass
+        self.cap.release()
+
+
+# =============================================================================
 # Worker state
 # =============================================================================
 
@@ -193,7 +231,7 @@ def run_webcam() -> None:
     show_mask       = config.SHOW_DEBUG_WINDOWS
     fps_timer       = time.perf_counter()
     fps_count       = 0
-    cap             = None
+    capture_wrapper = None
     headless        = False
     read_fail_count = 0
     READ_FAIL_MAX   = 30
@@ -208,7 +246,9 @@ def run_webcam() -> None:
     worker.start()
 
     try:
-        cap, cam_mode = _connect_camera()
+        raw_cap, cam_mode = _connect_camera()
+        capture_wrapper = Capture(raw_cap)
+
         print(f"\nCamera mode: {cam_mode}")
         print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
@@ -219,11 +259,9 @@ def run_webcam() -> None:
         while True:
             t_read = time.perf_counter()
 
-            for _ in range(1):
-                cap.grab()
-
-            ok, frame = cap.retrieve()
-
+            # Non-blocking pull of the absolute newest frame available in RAM
+            frame = capture_wrapper.read()
+            ok = frame is not None
 
             last_read_ms = (time.perf_counter() - t_read) * 1000.0
 
@@ -235,11 +273,12 @@ def run_webcam() -> None:
                 if read_fail_count >= READ_FAIL_MAX:
                     print("Too many failures — reconnecting...")
                     try:
-                        cap.release()
+                        capture_wrapper.release()
                     except Exception:
                         pass
                     try:
-                        cap, cam_mode = _connect_camera()
+                        raw_cap, cam_mode = _connect_camera()
+                        capture_wrapper = Capture(raw_cap)
                         read_fail_count = 0
                     except Exception as e:
                         print(f"Reconnect failed: {e}")
@@ -319,8 +358,8 @@ def run_webcam() -> None:
             worker.join(timeout=2.0)
         except Exception:
             pass
-        if cap is not None:
-            cap.release()
+        if capture_wrapper is not None:
+            capture_wrapper.release()
         cv2.destroyAllWindows()
         if ON_PI:
             lift.shutdown()
