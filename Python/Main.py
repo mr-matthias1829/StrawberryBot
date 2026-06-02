@@ -3,7 +3,7 @@
 import os
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|fflags;discardcorrupt|analyzeduration;100|probesize;32"
+    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|fflags;discardcorrupt|analyzeduration;500000|probesize;500000"
 )
 import time
 import platform
@@ -55,29 +55,87 @@ RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
 
 # =============================================================================
-# Real-Time Capture Thread (Flushes OpenCV Buffer)
+# Real-Time Robust Capture Thread (Auto-reconnects on drop)
 # =============================================================================
 
 class Capture:
-    def __init__(self, cap: cv2.VideoCapture):
-        self.cap = cap
+    def __init__(self, rtsp_url: str, label: str):
+        self.rtsp_url = rtsp_url
+        self.label = label
+        self.cap: Optional[cv2.VideoCapture] = None
         self.frame: Optional[np.ndarray] = None
         self.running = True
         self.lock = threading.Lock()
 
+        # Initial connection attempt
+        self._establish_connection()
+
         self.thread = threading.Thread(target=self._reader, daemon=True, name="camera-buffer-flusher")
         self.thread.start()
 
+    def _establish_connection(self) -> None:
+        """Safely opens or re-opens the cv2 VideoCapture pipeline."""
+        with self.lock:
+            if self.cap is not None:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+
+            print(f"[{self.label}] Connecting to stream: {self.rtsp_url}...")
+            if self.rtsp_url == "0":
+                # Handle local laptop camera fallback
+                cap = cv2.VideoCapture(0)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            else:
+                cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            self.cap = cap
+
     def _reader(self) -> None:
+        consecutive_failures = 0
+        MAX_FAILURES = 15 # ~3-4 seconds of dead frames before triggering hard restart
+
         while self.running:
-            if not self.cap.grab():
-                time.sleep(0.005)
+            # Check if capture object exists
+            with self.lock:
+                current_cap = self.cap
+
+            if current_cap is None or not current_cap.isOpened():
+                print(f"[{self.label}] Capture object is dead or null. Reconnecting...")
+                self._establish_connection()
+                time.sleep(1.0)
                 continue
 
-            ok, frame = self.cap.retrieve()
-            if ok and frame is not None:
-                with self.lock:
-                    self.frame = frame
+            # Attempt to grab the frame from hardware buffer
+            if not current_cap.grab():
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    print(f"[{self.label}] Stream died (failed grab). Hard reconnecting pipeline...")
+                    self._establish_connection()
+                    consecutive_failures = 0
+                    time.sleep(1.0)
+                else:
+                    time.sleep(0.01)
+                continue
+
+            # Retrieve the grab
+            ok, frame = current_cap.retrieve()
+            if not ok or frame is None:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    print(f"[{self.label}] Stream returned null frame data. Hard reconnecting...")
+                    self._establish_connection()
+                    consecutive_failures = 0
+                    time.sleep(1.0)
+                continue
+
+            # Successful capture loop cycle
+            consecutive_failures = 0
+            with self.lock:
+                self.frame = frame
 
     def read(self) -> Optional[np.ndarray]:
         with self.lock:
@@ -89,7 +147,9 @@ class Capture:
             self.thread.join(timeout=1.0)
         except Exception:
             pass
-        self.cap.release()
+        with self.lock:
+            if self.cap is not None:
+                self.cap.release()
 
 
 # =============================================================================
@@ -105,44 +165,22 @@ class _WorkerState:
 
 
 # =============================================================================
-# Camera helpers
+# Camera finder helper
 # =============================================================================
 
-def _try_rtsp(rtsp_url: str, label: str) -> Optional[cv2.VideoCapture]:
-    print(f"Trying {label}: {rtsp_url}")
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if cap.isOpened():
-        for _ in range(30):
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                print(f"{label} connected!")
-                return cap
-            time.sleep(0.1)
-    print(f"{label} not available.")
-    cap.release()
-    return None
-
-
-def _connect_camera() -> tuple:
-    cap = _try_rtsp(RTSP_ETHERNET, "reCamera Ethernet")
-    if cap is not None:
-        return cap, "Ethernet"
-    cap = _try_rtsp(RTSP_USB, "reCamera USB")
-    if cap is not None:
-        return cap, "USB"
-    return _open_laptop_camera(), "Laptop"
-
-
-def _open_laptop_camera() -> cv2.VideoCapture:
-    print("No reCamera found — trying laptop camera...")
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    if not cap.isOpened():
-        raise RuntimeError("No camera available.")
-    print("Laptop camera connected.")
-    return cap
+def _find_available_camera_source() -> tuple[str, str]:
+    """Probes URLs to find out which camera source is online."""
+    for url, label in [(RTSP_ETHERNET, "reCamera Ethernet"), (RTSP_USB, "reCamera USB")]:
+        print(f"Probing {label}...")
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            cap.release()
+            if ok:
+                print(f"Found active stream on {label}")
+                return url, label
+    print("No reCamera discovered. Falling back to laptop camera environment.")
+    return "0", "Laptop"
 
 
 # =============================================================================
@@ -170,7 +208,7 @@ def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
             + np.array([20, 20, 20], dtype="float32") * 0.55
         ).astype("uint8")
 
-    colours    = {"Ethernet": (80, 220, 80), "USB": (60, 220, 220), "Laptop": (220, 220, 60)}
+    colours    = {"reCamera Ethernet": (80, 220, 80), "reCamera USB": (60, 220, 220), "Laptop": (220, 220, 60)}
     dot_colour = colours.get(mode, (200, 200, 200))
     dot_x = x1 + padding + 5
     dot_y = y1 + (y2 - y1) // 2
@@ -233,8 +271,6 @@ def run_webcam() -> None:
     fps_count       = 0
     capture_wrapper = None
     headless        = False
-    read_fail_count = 0
-    READ_FAIL_MAX   = 30
 
     state = _WorkerState(lock=threading.Lock())
     worker = threading.Thread(
@@ -246,10 +282,11 @@ def run_webcam() -> None:
     worker.start()
 
     try:
-        raw_cap, cam_mode = _connect_camera()
-        capture_wrapper = Capture(raw_cap)
+        # Probe network strings and initialize auto-healing Capture wrapper
+        target_url, cam_mode = _find_available_camera_source()
+        capture_wrapper = Capture(target_url, cam_mode)
 
-        print(f"\nCamera mode: {cam_mode}")
+        print(f"\nCamera Engine initialized in background thread context.")
         print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
         print("Press 'q' to quit, 'd' to toggle debug mask.\n")
 
@@ -258,55 +295,32 @@ def run_webcam() -> None:
 
         while True:
             t_read = time.perf_counter()
-
-            # Non-blocking pull of the absolute newest frame available in RAM
             frame = capture_wrapper.read()
-            ok = frame is not None
-
             last_read_ms = (time.perf_counter() - t_read) * 1000.0
 
-            if not ok or frame is None:
-                read_fail_count += 1
-                print(f"Dropped frame ({read_fail_count})")
-                time.sleep(0.05)
-
-                if read_fail_count >= READ_FAIL_MAX:
-                    print("Too many failures — reconnecting...")
-                    try:
-                        capture_wrapper.release()
-                    except Exception:
-                        pass
-                    try:
-                        raw_cap, cam_mode = _connect_camera()
-                        capture_wrapper = Capture(raw_cap)
-                        read_fail_count = 0
-                    except Exception as e:
-                        print(f"Reconnect failed: {e}")
-                        time.sleep(1.0)
+            if frame is None:
+                # Thread is actively reconnecting or waiting for first frame buffer to arrive
+                time.sleep(0.03)
                 continue
 
-            read_fail_count = 0
-
-            # Post frame to inference worker (non-blocking, overwrites stale frame)
+            # Pass the frame safely down to the worker thread
             with cast(threading.Lock, state.lock):
                 state.frame = frame
 
-            # Grab latest result (non-blocking)
+            # Safely request last built result matrix
             res = None
             with cast(threading.Lock, state.lock):
                 res = state.result
 
-            #if res is None:
-            #    continue
-
-            with cast(threading.Lock, state.lock):
-                state.frame = frame
+            if res is None:
+                # Keep spinning camera collection loops until inference spins up
+                continue
 
             annotated, _, debug, mask, last_proc_ms = res
             if annotated is None:
                 continue
 
-            # Resize for display only if necessary
+            # Resize rendering layout
             h, w = annotated.shape[:2]
             display = (
                 cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
