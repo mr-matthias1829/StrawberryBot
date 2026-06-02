@@ -1,24 +1,25 @@
 """
 AS5600 Angle Sensor Manager
-Uses:
-    - TCA9548A multiplexer
-    - Direct AS5600 register reads
-    - No AS5600 library required
 
-Dependencies:
-    pip install adafruit-blinka
-    pip install adafruit-circuitpython-tca9548a
-    pip install smbus2
+Examples:
+    python angles.py scan
+    python angles.py sensor1
+    python angles.py sensor2
+    python angles.py both
+    python angles.py monitor
+    python angles.py monitor --interval 0.1
 """
+
+import argparse
+import time
 
 import board
 import adafruit_tca9548a
 from smbus2 import SMBus
 
-# AS5600 I2C address
+
 AS5600_ADDR = 0x36
 
-# AS5600 angle registers
 RAW_ANGLE_MSB = 0x0C
 RAW_ANGLE_LSB = 0x0D
 
@@ -33,7 +34,6 @@ class AngleSensorManager:
             address=multiplexer_address
         )
 
-        # Raspberry Pi I2C bus
         self.bus = SMBus(1)
 
         print(
@@ -75,28 +75,18 @@ class AngleSensorManager:
     # -------------------------------------------------
 
     def _select_channel(self, channel):
-        """
-        Select multiplexer channel.
-        """
 
         if channel < 0 or channel > 7:
             raise ValueError(
                 "Channel must be between 0 and 7"
             )
 
-        # TCA9548A channel select register
         self.bus.write_byte(
             0x70,
             1 << channel
         )
 
     def _read_raw_angle(self, channel):
-        """
-        Read raw 12-bit AS5600 angle.
-
-        Returns:
-            int (0-4095)
-        """
 
         self._select_channel(channel)
 
@@ -110,11 +100,10 @@ class AngleSensorManager:
             RAW_ANGLE_LSB
         )
 
-        raw = ((high << 8) | low) & 0x0FFF
+        return ((high << 8) | low) & 0x0FFF
 
-        return raw
-
-    def _raw_to_degrees(self, raw):
+    @staticmethod
+    def _raw_to_degrees(raw):
         return raw * 360.0 / 4096.0
 
     # -------------------------------------------------
@@ -145,27 +134,121 @@ class AngleSensorManager:
 
 
 # -------------------------------------------------
-# Example
+# CLI
 # -------------------------------------------------
 
+def print_sensor(name, data):
+    print(
+        f"{name}: "
+        f"{data['degrees']:.2f}° "
+        f"({data['raw']})"
+    )
+
+
+def cmd_scan(sensor_mgr):
+    sensor_mgr.scan_all_channels()
+
+
+def cmd_sensor1(sensor_mgr):
+    print_sensor(
+        "S1",
+        sensor_mgr.read_sensor_1()
+    )
+
+
+def cmd_sensor2(sensor_mgr):
+    print_sensor(
+        "S2",
+        sensor_mgr.read_sensor_2()
+    )
+
+
+def cmd_both(sensor_mgr):
+    data = sensor_mgr.read_both_sensors()
+
+    print_sensor(
+        "S1",
+        data["sensor1"]
+    )
+
+    print_sensor(
+        "S2",
+        data["sensor2"]
+    )
+
+
+def cmd_monitor(sensor_mgr, interval):
+
+    try:
+        while True:
+
+            data = sensor_mgr.read_both_sensors()
+
+            print(
+                f"S1: {data['sensor1']['degrees']:.2f}° "
+                f"({data['sensor1']['raw']}) | "
+                f"S2: {data['sensor2']['degrees']:.2f}° "
+                f"({data['sensor2']['raw']})"
+            )
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    subparsers = parser.add_subparsers(
+        dest="command"
+    )
+
+    subparsers.add_parser("scan")
+    subparsers.add_parser("sensor1")
+    subparsers.add_parser("sensor2")
+    subparsers.add_parser("both")
+
+    monitor = subparsers.add_parser(
+        "monitor"
+    )
+
+    monitor.add_argument(
+        "--interval",
+        type=float,
+        default=0.25
+    )
+
+    args = parser.parse_args()
+
+    sensor_mgr = AngleSensorManager()
+
+    if args.command == "scan":
+        cmd_scan(sensor_mgr)
+
+    elif args.command == "sensor1":
+        cmd_sensor1(sensor_mgr)
+
+    elif args.command == "sensor2":
+        cmd_sensor2(sensor_mgr)
+
+    elif args.command == "both":
+        cmd_both(sensor_mgr)
+
+    elif args.command == "monitor":
+        cmd_monitor(
+            sensor_mgr,
+            args.interval
+        )
+
+    else:
+        # No command supplied
+        cmd_monitor(
+            sensor_mgr,
+            0.25
+        )
+
+
 if __name__ == "__main__":
-
-    sensors = AngleSensorManager()
-
-    sensors.scan_all_channels()
-
-    while True:
-
-        data = sensors.read_both_sensors()
-
-        print(
-            f"S1: {data['sensor1']['degrees']:.2f}° "
-            f"({data['sensor1']['raw']})"
-        )
-
-        print(
-            f"S2: {data['sensor2']['degrees']:.2f}° "
-            f"({data['sensor2']['raw']})"
-        )
-
-        print("-" * 40)
+    main()
