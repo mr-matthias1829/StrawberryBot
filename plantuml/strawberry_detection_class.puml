@@ -1,0 +1,86 @@
+@startuml
+title Strawberry Detection - Class Diagram
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+class Main {
+  +run_webcam()
+  +run_image()
+}
+
+class Capture {
+  -rtsp_url: str
+  -label: str
+  -frame: np.ndarray
+  +read(): np.ndarray
+  +release()
+}
+
+class FusionEngine {
+  -worker: DetectionWorker
+  -robot: RobotController
+  +process_frame(frame)
+  +shutdown()
+}
+
+class DetectionWorker {
+  -ai: AIDetector
+  -cv: CVDectector
+  +push_frame(frame, small)
+  +push_zoom(frame, box, source)
+  +read_frame()
+  +read_zoom()
+}
+
+class AIDetector {
+  +detect(frame, conf_threshold)
+}
+
+class CVDectector {
+  +detect(frame)
+  +cv_score_crop(frame, box)
+}
+
+class RobotController {
+  +choose_target(detections, x, y)
+  +drive_hardware(x, y)
+}
+
+class Detection {
+  +x1: int
+  +y1: int
+  +x2: int
+  +y2: int
+  +confidence: float
+  +source: str
+  +label: str
+}
+
+class TrackedObject {
+  +id: int
+  +detection: Detection
+  +seen_count: int
+  +missed_count: int
+  +fused_confidence: float
+}
+
+Main ..> Capture
+Main ..> FusionEngine
+Main ..> web_server
+FusionEngine *-- DetectionWorker
+FusionEngine *-- RobotController
+DetectionWorker *-- AIDetector
+DetectionWorker *-- CVDectector
+FusionEngine o-- TrackedObject
+TrackedObject --> Detection
+AIDetector --> Detection
+CVDectector --> Detection
+
+note right of DetectionWorker
+Background worker thread
+runs AI + CV detection,
+then optional zoom rechecks.
+end note
+
+@enduml
+

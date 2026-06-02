@@ -1,0 +1,95 @@
+@startuml
+title StrawberryBot - Deployment Diagram (Physical View)
+skinparam backgroundColor #FEFEFE
+
+node "Raspberry Pi 4B\n[Target Device]" {
+  component "Detection Runtime" as DETECT
+  component "Fusion Engine" as FUSION
+  component "Control Loop" as CONTROL
+  artifact "best.pt\n(YOLO Model)" as MODEL
+  database "config.py\n(Parameters)" as CONFIG
+}
+
+node "Hardware Interface\n[Motor Controller]" {
+  component "Serial Bridge" as SERIAL
+  component "GPIO Output" as GPIO
+}
+
+artifact "Camera\n[reCamera USB/Ethernet]" as CAM
+artifact "Turntable Servo\nID 13" as TT
+artifact "Lift Servo A\nID 3" as LIFTA
+artifact "Lift Servo B\nID 4" as LIFTB
+artifact "Gripper Servo\nID 8" as GRIP
+artifact "Corner Sensors\n(AS5600 x2)" as SENSORS
+
+node "Web Dashboard\n[Client Browser]" {
+  component "Live MJPEG Stream" as MJPEG
+  component "Log Console (SSE)" as LOGS
+  interface "Flask API" as API
+}
+
+node "Training Station\n[Developer PC]" {
+  component "CSV Parser" as CSV
+  component "Data Augmenter" as AUG
+  component "YOLO Trainer" as TRAINER
+  artifact "Labelstudio Data" as LABELS
+}
+
+' Pi internals
+DETECT --> FUSION
+FUSION --> CONTROL
+CONTROL --> CONFIG
+DETECT --> MODEL
+
+' Pi to hardware
+FUSION --> SERIAL
+CONTROL --> GPIO
+SERIAL --> GPIO
+
+' Hardware connections
+GPIO --> TT
+GPIO --> LIFTA
+GPIO --> LIFTB
+GPIO --> GRIP
+GPIO --> SENSORS
+
+' Camera input
+CAM --> DETECT
+
+' Web dashboard
+FUSION --> API
+DETECT --> MJPEG
+CONTROL --> LOGS
+API --> MJPEG
+API --> LOGS
+
+' Training workflow
+CSV --> AUG
+AUG --> TRAINER
+LABELS --> CSV
+TRAINER --> MODEL
+
+' Bi-directional: model deployment
+TRAINER -.-> MODEL
+
+note bottom of "Raspberry Pi 4B\n[Target Device]"
+    Main inference &
+    robot control loop.
+    Runs at ~20-30 FPS
+    on full resolution.
+end note
+
+note bottom of "Training Station\n[Developer PC]"
+    Offline training pipeline.
+    Augments dataset 10x,
+    trains model, produces
+    best.pt weights.
+end note
+
+note right of CAM
+    USB or Ethernet
+    RTSP stream
+end note
+
+@enduml
+

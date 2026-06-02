@@ -31,7 +31,7 @@ PORT          = "/dev/ttyAMA0"
 BAUDRATE      = 1000000
 
 # All known servo IDs — all get torque-off on shutdown
-ALL_SERVO_IDS = [3, 4, 5, 8, 13]
+ALL_SERVO_IDS = [2, 3, 4, 5, 8, 13]
 
 # Registers (AX-12A)
 TORQUE_ENABLE = 24
