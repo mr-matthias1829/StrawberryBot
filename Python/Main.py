@@ -48,6 +48,7 @@ print(f"isatty={isatty}, stdin fd={stdin_fd}, pid={os.getpid()}", flush=True)
 
 import config
 import web_server
+import control_mode
 from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 
 DISPLAY_WIDTH  = 1280
@@ -70,14 +71,12 @@ class Capture:
         self.running = True
         self.lock = threading.Lock()
 
-        # Initial connection attempt
         self._establish_connection()
 
         self.thread = threading.Thread(target=self._reader, daemon=True, name="camera-buffer-flusher")
         self.thread.start()
 
     def _establish_connection(self) -> None:
-        """Safely opens or re-opens the cv2 VideoCapture pipeline."""
         with self.lock:
             if self.cap is not None:
                 try:
@@ -87,7 +86,6 @@ class Capture:
 
             print(f"[{self.label}] Connecting to stream: {self.rtsp_url}...")
             if self.rtsp_url == "0":
-                # Handle local laptop camera fallback
                 cap = cv2.VideoCapture(0)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -99,10 +97,9 @@ class Capture:
 
     def _reader(self) -> None:
         consecutive_failures = 0
-        MAX_FAILURES = 15 # ~3-4 seconds of dead frames before triggering hard restart
+        MAX_FAILURES = 15
 
         while self.running:
-            # Check if capture object exists
             with self.lock:
                 current_cap = self.cap
 
@@ -112,7 +109,6 @@ class Capture:
                 time.sleep(1.0)
                 continue
 
-            # Attempt to grab the frame from hardware buffer
             if not current_cap.grab():
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_FAILURES:
@@ -124,7 +120,6 @@ class Capture:
                     time.sleep(0.01)
                 continue
 
-            # Retrieve the grab
             ok, frame = current_cap.retrieve()
             if not ok or frame is None:
                 consecutive_failures += 1
@@ -135,7 +130,6 @@ class Capture:
                     time.sleep(1.0)
                 continue
 
-            # Successful capture loop cycle
             consecutive_failures = 0
             with self.lock:
                 self.frame = frame
@@ -172,11 +166,6 @@ class _WorkerState:
 # =============================================================================
 
 def _find_available_camera_source() -> tuple[str, str]:
-    """
-    Cycles through Ethernet, USB, and Laptop cameras in sequence.
-    Loops back to the beginning infinitely until a working source is found.
-    """
-    # The exact sequence of options
     options = [
         (RTSP_ETHERNET, "reCamera Ethernet"),
         (RTSP_USB, "reCamera USB"),
@@ -185,7 +174,6 @@ def _find_available_camera_source() -> tuple[str, str]:
 
     idx = 0
     while True:
-        # Wrap around the 3 options indefinitely using modulo arithmetic
         url, label = options[idx % len(options)]
         idx += 1
 
@@ -200,7 +188,6 @@ def _find_available_camera_source() -> tuple[str, str]:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if cap.isOpened():
-            # Give the stream a brief moment to deliver an actual video frame
             max_checks = 1 if url == "0" else 20
             frame_received = False
 
@@ -213,15 +200,14 @@ def _find_available_camera_source() -> tuple[str, str]:
 
             if frame_received:
                 print(f"--> Success! Found working camera: {label}")
-                cap.release()  # Clean up so the Capture thread can instantly grab it
+                cap.release()
                 return url, label
 
-        # Clean up the failed attempt before trying the next option in the sequence
         cap.release()
         print(f"{label} not available. Moving to next option...")
         time.sleep(0.5)
 
-        
+
 # =============================================================================
 # Camera badge
 # =============================================================================
@@ -252,6 +238,41 @@ def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
     dot_x = x1 + padding + 5
     dot_y = y1 + (y2 - y1) // 2
     cv2.circle(frame, (dot_x, dot_y), 4, dot_colour, cv2.FILLED)
+    cv2.putText(frame, label, (dot_x + 10, y1 + padding + th),
+                font, scale, (230, 230, 230), thick, cv2.LINE_AA)
+
+
+# =============================================================================
+# Control mode badge
+# =============================================================================
+
+def _draw_mode_badge(frame: np.ndarray) -> None:
+    is_manual = control_mode.is_manual()
+    label     = "MANUAL" if is_manual else "AUTO"
+    colour    = (0, 100, 255) if is_manual else (0, 220, 100)   # orange-red : green
+
+    font    = cv2.FONT_HERSHEY_SIMPLEX
+    scale   = 0.55
+    thick   = 1
+    padding = 6
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thick)
+
+    # Top-left corner, just below the camera badge area
+    x1 = 2
+    y1 = 2
+    x2 = x1 + tw + padding * 2 + 14
+    y2 = y1 + th + baseline + padding * 2
+
+    roi = frame[y1:y2, x1:x2]
+    if roi.size != 0:
+        roi[:] = (
+            roi.astype("float32") * 0.45
+            + np.array([20, 20, 20], dtype="float32") * 0.55
+        ).astype("uint8")
+
+    dot_x = x1 + padding + 5
+    dot_y = y1 + (y2 - y1) // 2
+    cv2.circle(frame, (dot_x, dot_y), 4, colour, cv2.FILLED)
     cv2.putText(frame, label, (dot_x + 10, y1 + padding + th),
                 font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
@@ -304,6 +325,7 @@ def _inference_worker(st: _WorkerState) -> None:
 
 def run_webcam() -> None:
     web_server.start()
+    control_mode.start_udp_toggle()
 
     show_mask       = config.SHOW_DEBUG_WINDOWS
     fps_timer       = time.perf_counter()
@@ -321,13 +343,12 @@ def run_webcam() -> None:
     worker.start()
 
     try:
-        # Probe network strings and initialize auto-healing Capture wrapper
         target_url, cam_mode = _find_available_camera_source()
         capture_wrapper = Capture(target_url, cam_mode)
 
         print(f"\nCamera Engine initialized in background thread context.")
         print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
-        print("Press 'q' to quit, 'd' to toggle debug mask.\n")
+        print("Press 'q' to quit, 'd' to toggle debug mask, 'm' to toggle manual/auto.\n")
 
         last_read_ms = 0.0
         last_proc_ms = 0.0
@@ -338,28 +359,60 @@ def run_webcam() -> None:
             last_read_ms = (time.perf_counter() - t_read) * 1000.0
 
             if frame is None:
-                # Thread is actively reconnecting or waiting for first frame buffer to arrive
                 time.sleep(0.03)
                 continue
 
-            # Pass the frame safely down to the worker thread
+            # ------------------------------------------------------------------
+            # MANUAL MODE — skip autonomous inference, just stream the raw frame
+            # ------------------------------------------------------------------
+            if control_mode.is_manual():
+                h, w = frame.shape[:2]
+                display = (
+                    cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+                    if (w, h) != (DISPLAY_WIDTH, DISPLAY_HEIGHT)
+                    else frame.copy()
+                )
+                _draw_camera_badge(display, cam_mode)
+                _draw_mode_badge(display)
+
+                try:
+                    web_server.push_frame(display)
+                except Exception as e:
+                    print(f"Warning: web_server.push_frame failed: {e}")
+
+                if not headless:
+                    try:
+                        cv2.imshow("Strawberry Detection", display)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"):
+                            break
+                        if key == ord("m"):
+                            new = control_mode.toggle()
+                            print(f"[main] Mode switched to: {new}")
+                    except Exception as e:
+                        print(f"GUI unavailable (headless): {e}")
+                        headless = True
+
+                time.sleep(0.03)
+                continue
+
+            # ------------------------------------------------------------------
+            # AUTONOMOUS MODE — pass frame to inference worker
+            # ------------------------------------------------------------------
             with cast(threading.Lock, state.lock):
                 state.frame = frame
 
-            # Safely request last built result matrix
             res = None
             with cast(threading.Lock, state.lock):
                 res = state.result
 
             if res is None:
-                # Keep spinning camera collection loops until inference spins up
                 continue
 
             annotated, _, debug, mask, last_proc_ms = res
             if annotated is None:
                 continue
 
-            # Resize rendering layout
             h, w = annotated.shape[:2]
             display = (
                 cv2.resize(annotated, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
@@ -368,6 +421,7 @@ def run_webcam() -> None:
             )
             display = np.asarray(display)
             _draw_camera_badge(display, cam_mode)
+            _draw_mode_badge(display)
 
             try:
                 web_server.push_frame(display)
@@ -404,12 +458,16 @@ def run_webcam() -> None:
                         show_mask = not show_mask
                         if not show_mask:
                             cv2.destroyWindow("CV Mask")
+                    if key == ord("m"):
+                        new = control_mode.toggle()
+                        print(f"[main] Mode switched to: {new}")
                 except Exception as e:
                     print(f"GUI unavailable (headless): {e}")
                     headless = True
 
     finally:
         state.stop = True
+        control_mode.stop_udp_toggle()
         try:
             worker.join(timeout=2.0)
         except Exception:
@@ -421,8 +479,8 @@ def run_webcam() -> None:
             gripper.shutdown()
             lift.shutdown()
             turntable.shutdown()
-            motor.shutdown() # tries to shutdown motors activated through its class
-                            # consider removing motor shutdown as we dont activate motors through motor.py
+            motor.shutdown()
+
 
 # =============================================================================
 # run_image
