@@ -5,3 +5,5 @@ val:   images/val
 nc: 1
 names:
   0: Strawberry
+  1: rotten
+  2: leaf
