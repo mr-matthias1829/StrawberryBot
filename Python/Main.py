@@ -325,7 +325,7 @@ def _inference_worker(st: _WorkerState) -> None:
 
 def run_webcam() -> None:
     web_server.start()
-    control_mode.start_udp_toggle()
+    control_mode.start()
 
     show_mask       = config.SHOW_DEBUG_WINDOWS
     fps_timer       = time.perf_counter()
@@ -387,8 +387,7 @@ def run_webcam() -> None:
                         if key == ord("q"):
                             break
                         if key == ord("m"):
-                            new = control_mode.toggle()
-                            print(f"[main] Mode switched to: {new}")
+                            print(f"[main] Mode: {control_mode.get_mode()} (gestuurd door controller)")
                     except Exception as e:
                         print(f"GUI unavailable (headless): {e}")
                         headless = True
@@ -467,7 +466,7 @@ def run_webcam() -> None:
 
     finally:
         state.stop = True
-        control_mode.stop_udp_toggle()
+        control_mode.stop()
         try:
             worker.join(timeout=2.0)
         except Exception:

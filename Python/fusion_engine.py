@@ -406,6 +406,9 @@ class FusionEngine:
         for det in fused_dets:
             if not det.is_targetable:
                 continue  # rotten/leaf never enter tracking
+            # CV-only detections mogen niet zelfstandig tracken
+            if FusionEngine._is_cv_like(det.source) and not FusionEngine._is_ai_like(det.source):
+                continue
 
             best_iou = 0.0
             best_id  = -1
