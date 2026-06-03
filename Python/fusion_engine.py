@@ -13,16 +13,39 @@ from detection import AIDetector, CVDectector, Detection, iou
 from robot_controller import RobotController
 
 
-INFER_SCALE: float = 1          # inference resolution multiplier
-DETECT_EVERY: int  = 1          # run detection every N frames
+INFER_SCALE: float = 1
+DETECT_EVERY: int  = 1
 RECHECK_EVERY_N_DETECTIONS: int = 3
 ZOOM_QUEUE_MAXSIZE: int         = 4
-CLEANUP_INTERVAL: int           = 30
+CLEANUP_INTERVAL: int           = 15
 
-# Containment score supplement to standard IoU.
-# Handles the case where a small CV box sits entirely inside a larger AI box.
 CONTAINMENT_MATCH_THRESHOLD = 0.45
 
+# =============================================================================
+# AI TOGGLE
+# =============================================================================
+# Thread-safe flag — flip this at runtime via set_ai_enabled() without
+# restarting the process or recreating the FusionEngine.
+
+_ai_enabled      = True
+_ai_enabled_lock = threading.Lock()
+
+
+def set_ai_enabled(enabled: bool) -> None:
+    global _ai_enabled
+    with _ai_enabled_lock:
+        _ai_enabled = bool(enabled)
+    print(f"[FusionEngine] AI detector {'ENABLED' if enabled else 'DISABLED'}")
+
+
+def is_ai_enabled() -> bool:
+    with _ai_enabled_lock:
+        return _ai_enabled
+
+
+# =============================================================================
+# TRACKED OBJECT
+# =============================================================================
 
 @dataclass
 class TrackedObject:
@@ -45,7 +68,7 @@ class TrackedObject:
 
     @property
     def is_confirmed(self) -> bool:
-        src = (self.detection.source or "").lower()
+        src      = (self.detection.source or "").lower()
         required = (
             config.PERSISTENCE_REQUIRED_CV_ONLY
             if src.startswith("cv") or "zoomed_cv" in src
@@ -104,10 +127,10 @@ class DetectionWorker:
         self._lock  = threading.Lock()
         self._stop  = threading.Event()
 
-        self._ai_dets: List[Detection]      = []
-        self._cv_dets: List[Detection]      = []
-        self._mask:    Optional[np.ndarray] = None
-        self._zoom_results: List[Detection] = []
+        self._ai_dets:      List[Detection]      = []
+        self._cv_dets:      List[Detection]      = []
+        self._mask:         Optional[np.ndarray] = None
+        self._zoom_results: List[Detection]      = []
 
         self._thread = threading.Thread(target=self._run, daemon=True, name="detection-worker")
         self._thread.start()
@@ -154,13 +177,22 @@ class DetectionWorker:
                 pass
 
     def _process_frame(self, job: _FrameJob) -> None:
-        ai_dets, (cv_dets, mask) = self.ai.detect(job.small), self.cv.detect(job.small)
-        inv = 1.0 / INFER_SCALE
+        # Only run AI if the toggle is on
+        if is_ai_enabled():
+            ai_dets = self.ai.detect(job.small)
+        else:
+            ai_dets = []
+
+        cv_dets, mask = self.cv.detect(job.small)
+
+        inv     = 1.0 / INFER_SCALE
         ai_dets = [_scale_det(d, inv) for d in ai_dets]
         cv_dets = [_scale_det(d, inv) for d in cv_dets]
+
         if mask is not None:
             h, w = job.frame.shape[:2]
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
         with self._lock:
             self._ai_dets = ai_dets
             self._cv_dets = cv_dets
@@ -180,7 +212,9 @@ class DetectionWorker:
 
         scale  = config.ZOOM_SCALE_FACTOR
         roi_up = cv2.resize(roi, (int(roi.shape[1] * scale), int(roi.shape[0] * scale)))
-        ai_res = self.ai.detect(roi_up, conf_threshold=config.RECHECK_AI_CONF)
+
+        # Only zoom-run AI if enabled
+        ai_res = self.ai.detect(roi_up, conf_threshold=config.RECHECK_AI_CONF) if is_ai_enabled() else []
         cv_res, _ = self.cv.detect(roi_up)
 
         sx = roi.shape[1] / roi_up.shape[1]
@@ -383,7 +417,6 @@ class FusionEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    @staticmethod
     def draw_annotations(
             frame: np.ndarray,
             ai_dets: List[Detection],
@@ -400,216 +433,72 @@ class FusionEngine:
 
         out = frame
 
-        # ------------------------------------------------------------------
-        # AI detections
-        # ------------------------------------------------------------------
         for det in ai_dets:
-            cv2.rectangle(
-                out,
-                (det.x1, det.y1),
-                (det.x2, det.y2),
-                config.COLOR_AI,
-                1,
-            )
+            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_AI, 1)
+            cv2.putText(out, f"AI:{det.confidence:.2f}", (det.x1, det.y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_AI, 1)
 
-            cv2.putText(
-                out,
-                f"AI:{det.confidence:.2f}",
-                (det.x1, det.y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                config.COLOR_AI,
-                1,
-            )
-
-        # ------------------------------------------------------------------
-        # CV detections
-        # ------------------------------------------------------------------
         for det in cv_dets:
-            cv2.rectangle(
-                out,
-                (det.x1, det.y1),
-                (det.x2, det.y2),
-                config.COLOR_CV,
-                1,
-            )
+            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_CV, 1)
+            cv2.putText(out, f"CV:{det.confidence:.2f}", (det.x1, det.y2 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, config.COLOR_CV, 1)
 
-            cv2.putText(
-                out,
-                f"CV:{det.confidence:.2f}",
-                (det.x1, det.y2 - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                config.COLOR_CV,
-                1,
-            )
-
-        # ------------------------------------------------------------------
-        # Confirmed targets
-        # ------------------------------------------------------------------
         for obj in confirmed:
-            det = obj.detection
+            det   = obj.detection
+            color = (0, 165, 255) if obj.id == target_id else config.COLOR_FUSED
+            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)
+            cv2.putText(out, f"#{obj.id} {det.confidence:.2f}", (det.x1, det.y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            color = (
-                (0, 165, 255)
-                if obj.id == target_id
-                else config.COLOR_FUSED
-            )
-
-            cv2.rectangle(
-                out,
-                (det.x1, det.y1),
-                (det.x2, det.y2),
-                color,
-                2,
-            )
-
-            cv2.putText(
-                out,
-                f"#{obj.id} {det.confidence:.2f}",
-                (det.x1, det.y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                2,
-            )
-
-        # ------------------------------------------------------------------
-        # Possible targets
-        # ------------------------------------------------------------------
         for obj in possible:
-            det = obj.detection
-
-            src = (det.source or "").lower()
+            det      = obj.detection
+            src      = (det.source or "").lower()
             det_conf = float(det.confidence or 0.0)
-
             if FusionEngine._is_ai_like(src):
                 display_score = det_conf * config.POSSIBLE_AI_CONF_WEIGHT
             elif FusionEngine._is_cv_like(src):
                 display_score = det_conf
             else:
                 display_score = obj.fused_confidence
+            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_POSSIBLE, 1)
+            cv2.putText(out, f"P#{obj.id} {display_score:.2f}", (det.x1, det.y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_POSSIBLE, 1)
 
-            cv2.rectangle(
-                out,
-                (det.x1, det.y1),
-                (det.x2, det.y2),
-                config.COLOR_POSSIBLE,
-                1,
-            )
-
-            cv2.putText(
-                out,
-                f"P#{obj.id} {display_score:.2f}",
-                (det.x1, det.y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                config.COLOR_POSSIBLE,
-                1,
-            )
-
-        # ------------------------------------------------------------------
-        # Gripper bounding box
-        # ------------------------------------------------------------------
-
-        # check gripper state (if available)
+        # Gripper bbox
         gripping = False
-
         try:
             import gripper as _gripper
-            state = _gripper.get_state().lower()
-            gripping = "grip" in state  # covers "gripping", "grip", etc.
+            state    = _gripper.get_state().lower()
+            gripping = "grip" in state
         except Exception:
             pass
 
-        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = (
-            RobotController.get_gripper_bbox(
-                gripper_x,
-                gripper_y,
-            )
-        )
+        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = RobotController.get_gripper_bbox(gripper_x, gripper_y)
 
         contained = False
-
         if target_center is not None:
             for obj in confirmed + possible:
                 if obj.id == target_id:
                     contained = RobotController.is_detection_fully_contained(
-                        obj.detection,
-                        (bbox_x1, bbox_y1, bbox_x2, bbox_y2),
+                        obj.detection, (bbox_x1, bbox_y1, bbox_x2, bbox_y2)
                     )
                     break
 
-        if gripping:
-            gripper_color = (0, 0, 255)  # 🔴 GRABBING
-        elif contained:
-            gripper_color = (0, 255, 0)  # 🟢 READY
-        else:
-            gripper_color = (255, 0, 255)  # 🟣 NOT READY
+        gripper_color = (0, 0, 255) if gripping else ((0, 255, 0) if contained else (255, 0, 255))
+        cv2.rectangle(out, (bbox_x1, bbox_y1), (bbox_x2, bbox_y2), gripper_color, 2)
+        cv2.circle(out, (gripper_x, gripper_y), 8, gripper_color, -1)
+        cv2.putText(out, "GRIPPER", (gripper_x + 10, gripper_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, gripper_color, 2)
 
-        cv2.rectangle(
-            out,
-            (bbox_x1, bbox_y1),
-            (bbox_x2, bbox_y2),
-            gripper_color,
-            2,
-        )
-
-        # ------------------------------------------------------------------
-        # Gripper center point
-        # ------------------------------------------------------------------
-        cv2.circle(
-            out,
-            (gripper_x, gripper_y),
-            8,
-            gripper_color,
-            -1,
-        )
-
-        cv2.putText(
-            out,
-            "GRIPPER",
-            (gripper_x + 10, gripper_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            gripper_color,
-            2,
-        )
-
-        # ------------------------------------------------------------------
-        # Line to target
-        # ------------------------------------------------------------------
         if target_center is not None:
-            cv2.line(
-                out,
-                (gripper_x, gripper_y),
-                target_center,
-                (0, 165, 255),
-                2,
-            )
+            cv2.line(out, (gripper_x, gripper_y), target_center, (0, 165, 255), 2)
 
-        # ------------------------------------------------------------------
-        # HUD
-        # ------------------------------------------------------------------
-        cv2.putText(
-            out,
-            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-        )
-
-        cv2.putText(
-            out,
-            f"Robot: {movement_text}",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 165, 255),
-            2,
-        )
+        # HUD — show AI status
+        ai_badge = "AI:ON" if is_ai_enabled() else "AI:OFF"
+        cv2.putText(out, f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)} | {ai_badge}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(out, f"Robot: {movement_text}",
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
         return out
 
@@ -626,16 +515,21 @@ class FusionEngine:
                            interpolation=cv2.INTER_LINEAR)
         self._worker.push_frame(frame, small)
 
-        # ── Skip detection on non-detect frames — return last result immediately ──
         if self.frame_count % DETECT_EVERY != 0 and self._last_annotated is not None:
             return self._last_annotated, self.last_confirmed_hits, self._last_debug, self._last_mask
 
-        # ── Detection cycle ───────────────────────────────────────────────────
         self.detect_count += 1
         ai_dets, cv_dets, mask = self._worker.read_frame()
         zoom_dets = self._worker.read_zoom()
 
-        matches, unmatched_ai, unmatched_cv = self._match_detections(ai_dets, cv_dets)
+        # When AI is off, skip matching entirely — treat everything as unmatched CV
+        if is_ai_enabled():
+            matches, unmatched_ai, unmatched_cv = self._match_detections(ai_dets, cv_dets)
+        else:
+            matches      = {}
+            unmatched_ai = []
+            unmatched_cv = list(range(len(cv_dets)))
+
         fused: List[Detection] = list(zoom_dets)
 
         for ai_idx, cv_idx in matches.items():
@@ -665,7 +559,6 @@ class FusionEngine:
         gripper_x = frame.shape[1] // 2
         gripper_y = frame.shape[0] // 2
 
-        # ── Target selection ──────────────────────────────────────────────────
         target_pool = [obj.detection for obj in confirmed]
         using_possible_fallback = False
 
@@ -692,10 +585,8 @@ class FusionEngine:
         mode = "possible" if using_possible_fallback else "confirmed"
         print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy}, {self.robot.generate_depthstring()}")
 
-        # ── Hardware dispatch — non-blocking, runs in submodule threads ────────
         self.robot.drive_hardware(gripper_x, gripper_y)
 
-        # ── Annotation ────────────────────────────────────────────────────────
         target_id     = None
         target_center = None
         if target is not None:
