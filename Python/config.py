@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 BASE_DIR = os.path.dirname(__file__)
-MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "ultrav3", "weights", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "CV", "weights", "best.pt")
 
 # =============================================================================
 # FUSION THRESHOLDS
