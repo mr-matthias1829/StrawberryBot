@@ -82,7 +82,7 @@ class CVConfig:
     h2_high: int = 179    # upper hue-band: high end
 
     # ── Saturation / value gate ─────────────────────────────────────────────
-    sat_min: int = 80     # reject washed-out / pastel colours
+    sat_min: int = 150     # reject washed-out / pastel colours
     val_min: int = 50     # reject very dark regions / shadows
     val_max: int = 240    # reject near-white highlights
 
