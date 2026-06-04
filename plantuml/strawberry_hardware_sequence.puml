@@ -1,10 +1,8 @@
 @startuml
-title Strawberry Detection - Hardware Control Sequence
+title StrawberryBot - Hardware Control Sequence
 autonumber
 skinparam responseMessageBelowArrow true
-skinparam sequenceMessageAlign center
 
-actor MainLoop as Main
 participant "FusionEngine" as FE
 participant "RobotController" as RC
 participant "turntable.py" as TT
@@ -12,32 +10,73 @@ participant "lift.py" as LIFT
 participant "gripper.py" as GRIP
 participant "motor.py" as MOTOR
 
-Main -> FE: process_frame(frame)
 FE -> RC: choose_target(detections, gripper_x, gripper_y)
-FE -> RC: generate_dx()/generate_dy()
+note right of RC
+  Ghost-lock: hold current target for
+  LOCK_GHOST_FRAMES if not seen this frame.
+  Steal threshold scales with depth_score
+  of current target.
+end note
+RC --> FE: RobotTarget or None
+
 FE -> RC: drive_hardware(gripper_x, gripper_y)
 
-alt target missing
-	RC -> TT: stop()
-	RC -> LIFT: stop()
-	opt gripper status only
-		RC -> GRIP: get_state()
-	end
-else target present
-	RC -> TT: update(dx)
-	TT -> TT: compute speed + direction
-	TT -> MOTOR: _write_word(speed register)
+alt No target
+  RC -> TT: stop()
+  TT -> MOTOR: _write_word(ID 13, SPEED reg, 0)
+  RC -> LIFT: stop()
+  LIFT -> MOTOR: _write_word(ID 3, SPEED reg, 0)
+  LIFT -> MOTOR: _write_word(ID 4, SPEED reg, 0)
 
-	RC -> LIFT: update(dy)
-	LIFT -> LIFT: compute speed + direction
-	LIFT -> MOTOR: _write_word(speed register x2)
+else Target present
+  RC -> RC: generate_dx(gripper_x)
+  RC -> RC: generate_dy(gripper_y)
 
-	opt auto-grip condition met
-		RC -> GRIP: grip()
-		GRIP -> GRIP: background worker executes command
-		GRIP -> MOTOR: _write_word(grip speed)
-	end
+  RC -> TT: update(dx)
+  note right of TT
+    Speed tiers from dx magnitude:
+    dead zone  -> stop
+    slow zone  -> speed 150
+    medium zone -> speed 300
+    else       -> speed 500
+    dx positive = CW (right)
+    dx negative = CCW (left)
+  end note
+  TT -> TT: post speed word via lock + Event
+  TT -> MOTOR: _write_word(ID 13, SPEED reg, word)
+  MOTOR -> MOTOR: GPIO dir HIGH, serial write, GPIO dir LOW
+
+  RC -> LIFT: update(dy)
+  note right of LIFT
+    Same speed tiers as turntable.
+    dy positive = DOWN (CW both servos)
+    dy negative = UP (CCW both servos)
+    Both servo 3 and 4 get same word.
+  end note
+  LIFT -> LIFT: post speed words via lock + Event
+  LIFT -> MOTOR: _write_word(ID 3, SPEED reg, word)
+  LIFT -> MOTOR: _write_word(ID 4, SPEED reg, word)
+
+  RC -> RC: update_gripper_containment(gripper_x, gripper_y)
+
+  opt auto-grip: containment frames >= threshold AND ready_to_grab()
+    RC -> GRIP: grip()
+    note right of GRIP
+      grip() is non-blocking.
+      Background worker thread executes:
+      1. write SPEED_GRIP to servo 8
+      2. sleep GRIP_TIME seconds
+      3. write speed 0 to servo 8
+      4. set state = GRIPPED
+      Busy guard prevents overlap.
+      Same-action guard prevents repeats.
+    end note
+    GRIP -> GRIP: set pending action, fire Event
+    GRIP -> MOTOR: _write_word(ID 8, SPEED reg, SPEED_GRIP)
+    MOTOR --> GRIP: done
+    GRIP -> MOTOR: _write_word(ID 8, SPEED reg, 0)
+  end
+
 end
 
 @enduml
-

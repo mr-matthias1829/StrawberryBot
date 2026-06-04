@@ -1,0 +1,91 @@
+@startuml
+title StrawberryBot - Process View (Threads and Concurrency)
+skinparam activityBorderColor #666
+skinparam activityBackgroundColor #f8f8f8
+
+|#lightblue|Main Thread|
+start
+:Init hardware (Pi only);
+:Start Flask web server thread;
+:Start Manual UDP listener thread;
+:Probe camera sources until one responds;
+:Start inference-worker thread;
+:Start camera-buffer-flusher thread;
+
+repeat
+  :Read latest frame from Capture;
+  if (manual mode?) then (yes)
+    :Resize frame;
+    :Draw camera + MANUAL badges;
+    :push_frame() to web server;
+    :cv2.imshow() if not headless;
+    :sleep 30ms;
+  else (no)
+    :Post frame to inference worker state;
+    :Read latest result from inference worker;
+    if (result ready?) then (yes)
+      :push_frame(annotated) to web server;
+      :cv2.imshow() if not headless;
+    endif
+  endif
+repeat while (running?)
+
+:Shutdown all threads and hardware;
+stop
+
+|#lightyellow|Inference Worker Thread|
+repeat
+  :Read latest frame from shared state;
+  :FusionEngine.process_frame(frame);
+  :Write annotated result to shared state;
+repeat while (running?)
+
+|#lightgreen|Detection Worker Thread|
+repeat
+  :Wait for frame on Queue (maxsize=1);
+  :Run AI detect on downscaled frame;
+  :Run CV detect on downscaled frame;
+  :Write ai_dets + cv_dets + mask to result lock;
+  :Process any zoom-recheck jobs from queue;
+repeat while (running?)
+
+|#lightsalmon|Camera Thread|
+repeat
+  :grab() frame from RTSP stream;
+  if (grab failed 15x in a row?) then (yes)
+    :Release and reconnect VideoCapture;
+  else (no)
+    :retrieve() and store frame in lock;
+  endif
+repeat while (running?)
+
+|#plum|Flask Thread (daemon)|
+:Serve /video_feed as MJPEG stream;
+:Serve /logs as SSE stream;
+:Handle POST /api/cv_config - update CVConfig singleton;
+:Handle POST /api/full_config - live setattr on config.py;
+:Handle POST /api/ai_enabled - toggle AI flag;
+
+|#wheat|Manual UDP Thread (daemon)|
+repeat
+  if (packet received within 0.2s?) then (yes)
+    :Parse JSON joystick payload;
+    :set_mode("manual") via control_mode;
+    :apply_input(lx, ly, grip) to servos;
+  else (timeout)
+    if (no packet for over 1 second?) then (yes)
+      :set_mode("autonomous");
+      :stop turntable and lift;
+    endif
+  endif
+repeat while (running?)
+
+|#lightcyan|Servo Writer Threads (3x daemon)|
+note
+  turntable, lift, and gripper each
+  own one background writer thread.
+  Commands posted via Event + Lock.
+  Writes serialised through motor.py.
+end note
+
+@enduml
