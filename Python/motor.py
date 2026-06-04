@@ -2,60 +2,63 @@
 motor.py
 ========
 Hardware owner for all Dynamixel AX-12A servos.
-Owns the single serial connection and GPIO handle shared across all motor modules.
 
-All other motor files import from here — they do NOT open their own serial/GPIO.
+Owns the single serial connection and GPIO handle shared by every motor
+sub-module (turntable, lift, gripper).  Nothing else opens serial/GPIO.
 
-Lifecycle:
+Lifecycle
+---------
     import motor
-    motor.init()          # call once at startup
-    # ... do stuff ...
-    motor.shutdown()      # call on exit (also registered via atexit automatically)
+    motor.init()       # once at startup — idempotent
+    # ... run ...
+    motor.shutdown()   # on exit (also registered via atexit automatically)
+
+Low-level helpers (_write_word, _write_byte, _send_packet) are intentionally
+private.  Sub-modules import and call them directly; nothing outside this
+package should need them.
 """
 
-import platform
 import atexit
+import platform
 import time
 
 ON_PI = platform.system() == "Linux"
 
 if ON_PI:
     import lgpio
+
 import serial
 
-# =========================
+# =============================================================================
 # CONFIG
-# =========================
-DIRECTION_PIN = 17
-PORT          = "/dev/ttyAMA0"
-BAUDRATE      = 1000000
+# =============================================================================
 
-# All known servo IDs — all get torque-off on shutdown
+DIRECTION_PIN  = 17
+PORT           = "/dev/ttyAMA0"
+BAUDRATE       = 1_000_000
+
+# All known servo IDs — torque is disabled on all of them during shutdown.
 ALL_SERVO_IDS = [2, 3, 4, 5, 8, 13]
 
-# Registers (AX-12A)
+# AX-12A register addresses
 TORQUE_ENABLE = 24
 GOAL_POSITION = 30
 MOVING_SPEED  = 32
 
-# Positional servo defaults (ID 13)
-POS_LEFT  = 300
-POS_RIGHT = 700
-SPEED     = 300
+# =============================================================================
+# HARDWARE STATE  (module-level singletons)
+# =============================================================================
 
-# =========================
-# HARDWARE STATE
-# =========================
-_h   = None   # lgpio chip handle
-_ser = None   # serial port
-_initialized = False
+_h:            object = None   # lgpio chip handle  (Pi only)
+_ser:          object = None   # serial.Serial instance
+_initialized:  bool   = False
 
-# =========================
+# =============================================================================
 # LIFECYCLE
-# =========================
+# =============================================================================
 
-def init():
-    """Open GPIO and serial. Call once at startup before using any motor."""
+def init() -> None:
+    """Open GPIO and serial port.  Call once at startup before any motor use."""
     global _h, _ser, _initialized
 
     if _initialized:
@@ -66,34 +69,30 @@ def init():
         _h = lgpio.gpiochip_open(0)
         lgpio.gpio_claim_output(_h, DIRECTION_PIN)
 
-    _ser = serial.Serial(
-        port=PORT,
-        baudrate=BAUDRATE,
-        timeout=0.1
-    )
+    _ser = serial.Serial(port=PORT, baudrate=BAUDRATE, timeout=0.1)
 
     _initialized = True
-    print("✅ Motor hardware initialized.")
+    print("✅ Motor hardware initialised.")
 
-    # Register shutdown so it fires automatically on any exit
     atexit.register(shutdown)
 
 
-def shutdown():
-    """Torque-off all known servos, close serial + GPIO. Safe to call multiple times."""
+def shutdown() -> None:
+    """Torque-off all servos, close serial and GPIO.  Safe to call multiple times."""
     global _ser, _h, _initialized
 
     if not _initialized:
         return
 
-    _initialized = False  # prevent double-shutdown from atexit + manual call
+    # Guard against double-call from atexit + manual shutdown
+    _initialized = False
 
-    print("🛑 Motor shutdown: disabling torque on all servos...")
-    for servo_id in ALL_SERVO_IDS:
+    print("🛑 Motor shutdown: disabling torque on all servos…")
+    for sid in ALL_SERVO_IDS:
         try:
-            _write_word(servo_id, TORQUE_ENABLE, 0)
+            _write_word(sid, TORQUE_ENABLE, 0)
         except Exception as e:
-            print(f"  ⚠️  Could not disable torque on ID {servo_id}: {e}")
+            print(f"  ⚠️  Could not disable torque on ID {sid}: {e}")
 
     time.sleep(0.1)
 
@@ -113,13 +112,11 @@ def shutdown():
 
     print("✅ Motor shutdown complete.")
 
+# =============================================================================
+# LOW-LEVEL COMMS  (private — used by sub-modules only)
+# =============================================================================
 
-# =========================
-# LOW-LEVEL COMMS
-# (private — use write_word / write_byte from here or submodules)
-# =========================
-
-def _send_packet(packet: bytes):
+def _send_packet(packet: bytes) -> None:
     if not _initialized:
         raise RuntimeError("motor.init() has not been called.")
     if ON_PI:
@@ -135,70 +132,26 @@ def _checksum(data: list) -> int:
     return (~sum(data)) & 0xFF
 
 
-def _write_word(servo_id: int, address: int, value: int):
+def _write_word(servo_id: int, address: int, value: int) -> None:
     low  = value & 0xFF
     high = (value >> 8) & 0xFF
     data = [servo_id, 5, 0x03, address, low, high]
-    chk  = _checksum(data)
-    _send_packet(bytes([0xFF, 0xFF] + data + [chk]))
+    _send_packet(bytes([0xFF, 0xFF] + data + [_checksum(data)]))
 
 
-def _write_byte(servo_id: int, address: int, value: int):
+def _write_byte(servo_id: int, address: int, value: int) -> None:
     data = [servo_id, 4, 0x03, address, value]
-    chk  = _checksum(data)
-    _send_packet(bytes([0xFF, 0xFF] + data + [chk]))
+    _send_packet(bytes([0xFF, 0xFF] + data + [_checksum(data)]))
 
+# =============================================================================
+# PUBLIC TORQUE HELPERS
+# =============================================================================
 
-# =========================
-# PUBLIC HELPERS
-# =========================
-
-def enable_torque(servo_id: int):
+def enable_torque(servo_id: int) -> None:
     print(f"⚙️  Torque ON  (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 1)
 
 
-def disable_torque(servo_id: int):
+def disable_torque(servo_id: int) -> None:
     print(f"🛑 Torque OFF (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 0)
-
-
-# =========================
-# POSITIONAL SERVO MOVES
-# (default ID 13, but accepts any)
-# =========================
-
-def turn_left(servo_id: int = 13, position: int = POS_LEFT, speed: int = SPEED) -> dict:
-    """
-    Move a positional servo left.
-
-    Args:
-        servo_id: Target servo ID (default 13)
-        position: Goal position    (default POS_LEFT = 300)
-        speed:    Movement speed   (default 300)
-
-    Returns:
-        dict with direction, servo_id, position, speed, status
-    """
-    _write_word(servo_id, MOVING_SPEED, speed)
-    _write_word(servo_id, GOAL_POSITION, position)
-    time.sleep(1.5)
-    return {"direction": "left", "servo_id": servo_id, "position": position, "speed": speed, "status": "ok"}
-
-
-def turn_right(servo_id: int = 13, position: int = POS_RIGHT, speed: int = SPEED) -> dict:
-    """
-    Move a positional servo right.
-
-    Args:
-        servo_id: Target servo ID (default 13)
-        position: Goal position    (default POS_RIGHT = 700)
-        speed:    Movement speed   (default 300)
-
-    Returns:
-        dict with direction, servo_id, position, speed, status
-    """
-    _write_word(servo_id, MOVING_SPEED, speed)
-    _write_word(servo_id, GOAL_POSITION, position)
-    time.sleep(1.5)
-    return {"direction": "right", "servo_id": servo_id, "position": position, "speed": speed, "status": "ok"}

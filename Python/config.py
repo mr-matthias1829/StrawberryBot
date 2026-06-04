@@ -18,7 +18,7 @@ CV_BASE_THRESHOLD = 0.50
 
 # Lowered from 0.72 → 0.65: previous value was hard to reach with the old
 # scoring — a well-lit berry with good shape now reliably clears 0.65.
-CV_DIRECT_ACCEPT_THRESHOLD = 0.65
+CV_DIRECT_ACCEPT_THRESHOLD = 0.5
 
 HIGH_AI_CONFIDENCE = 0.85       # If YOLO > this, trust even without CV
 LOW_AI_CONFIDENCE  = 0.40       # If YOLO < this, trigger zoom recheck
