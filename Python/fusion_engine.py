@@ -23,13 +23,17 @@ CLEANUP_INTERVAL: int           = 30
 # Handles the case where a small CV box sits entirely inside a larger AI box.
 CONTAINMENT_MATCH_THRESHOLD = 0.45
 
+# ── Minimum box size for targeting ───────────────────────────────────────────
+# Detections whose bounding-box area (in pixels) is below this threshold are
+# still detected and drawn, but will never enter the tracker and can therefore
+# never become confirmed/possible targets.
+# Tune this value to match the smallest real strawberry you expect to pick.
+MIN_TARGET_BOX_AREA: int = 900   # pixels² — e.g. roughly 20×20 px
+
 
 # =============================================================================
 # AI TOGGLE
 # =============================================================================
-# Thread-safe flag — flip this at runtime via set_ai_enabled() without
-# restarting the process or recreating the FusionEngine.
-
 _ai_enabled      = True
 _ai_enabled_lock = threading.Lock()
 
@@ -119,6 +123,11 @@ def _containment(d1: Detection, d2: Detection) -> float:
     area1 = max(1, (d1.x2 - d1.x1) * (d1.y2 - d1.y1))
     area2 = max(1, (d2.x2 - d2.x1) * (d2.y2 - d2.y1))
     return inter / min(area1, area2)
+
+
+def _box_area(det: Detection) -> int:
+    """Return the pixel area of a detection's bounding box."""
+    return max(0, det.x2 - det.x1) * max(0, det.y2 - det.y1)
 
 
 # =============================================================================
@@ -396,9 +405,11 @@ class FusionEngine:
 
     def _update_tracking(self, fused_dets: List[Detection]) -> List[TrackedObject]:
         """
-        Only track detections that are targetable (ripe strawberries).
-        Rotten/leaf detections are intentionally excluded from the tracker
-        so they never appear in confirmed/possible hit lists.
+        Only track detections that are targetable (ripe strawberries) AND
+        whose bounding box meets the minimum size threshold (MIN_TARGET_BOX_AREA).
+
+        Detections below the size threshold are silently skipped — they are still
+        drawn on screen (via ai_dets / cv_dets) but will never become targets.
         """
         new_tracked: List[TrackedObject] = []
         used: set = set()
@@ -406,6 +417,10 @@ class FusionEngine:
         for det in fused_dets:
             if not det.is_targetable:
                 continue  # rotten/leaf never enter tracking
+
+            # ── Minimum size gate ─────────────────────────────────────────
+            if _box_area(det) < MIN_TARGET_BOX_AREA:
+                continue  # too small — visible on screen but never targeted
 
             best_iou = 0.0
             best_id  = -1
@@ -545,13 +560,11 @@ class FusionEngine:
         # ------------------------------------------------------------------
         # Gripper bounding box
         # ------------------------------------------------------------------
-
-        # Check gripper state (if available)
         gripping = False
         try:
             import gripper as _gripper
             state    = _gripper.get_state().lower()
-            gripping = "grip" in state  # covers "gripping", "grip", etc.
+            gripping = "grip" in state
         except Exception:
             pass
 
@@ -570,17 +583,13 @@ class FusionEngine:
                     break
 
         if gripping:
-            gripper_color = (0, 0, 255)    # 🔴 GRABBING
+            gripper_color = (0, 0, 255)    # red — grabbing
         elif contained:
-            gripper_color = (0, 255, 0)    # 🟢 READY
+            gripper_color = (0, 255, 0)    # green — ready
         else:
-            gripper_color = (255, 0, 255)  # 🟣 NOT READY
+            gripper_color = (255, 0, 255)  # magenta — not ready
 
         cv2.rectangle(out, (bbox_x1, bbox_y1), (bbox_x2, bbox_y2), gripper_color, 2)
-
-        # ------------------------------------------------------------------
-        # Gripper center point
-        # ------------------------------------------------------------------
         cv2.circle(out, (gripper_x, gripper_y), 8, gripper_color, -1)
         cv2.putText(
             out,
@@ -592,9 +601,6 @@ class FusionEngine:
             2,
         )
 
-        # ------------------------------------------------------------------
-        # Line to target
-        # ------------------------------------------------------------------
         if target_center is not None:
             cv2.line(out, (gripper_x, gripper_y), target_center, (0, 165, 255), 2)
 
@@ -614,7 +620,7 @@ class FusionEngine:
             ly += 20
 
         # ------------------------------------------------------------------
-        # HUD — show AI toggle status
+        # HUD
         # ------------------------------------------------------------------
         ai_badge = "AI:ON" if is_ai_enabled() else "AI:OFF"
         cv2.putText(
@@ -662,7 +668,7 @@ class FusionEngine:
 
         # Split AI detections: targetable (ripe) vs display-only (rotten/leaf)
         ai_targetable   = [d for d in ai_dets if d.is_targetable]
-        ai_display_only = [d for d in ai_dets if not d.is_targetable]  # noqa: F841 — kept for clarity
+        ai_display_only = [d for d in ai_dets if not d.is_targetable]  # noqa: F841
 
         # When AI is off, skip matching entirely — treat everything as unmatched CV
         if is_ai_enabled():
@@ -729,7 +735,7 @@ class FusionEngine:
         mode = "possible" if using_possible_fallback else "confirmed"
         print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy}, {self.robot.generate_depthstring()}")
 
-        # ── Hardware dispatch — non-blocking, runs in submodule threads ────────
+        # ── Hardware dispatch ──────────────────────────────────────────────────
         self.robot.drive_hardware(gripper_x, gripper_y)
 
         # ── Annotation — pass the FULL ai_dets list so rotten/leaf are drawn ──
@@ -750,7 +756,7 @@ class FusionEngine:
         self._last_mask      = mask
         self._last_annotated = self.draw_annotations(
             frame,
-            ai_dets,    # ← ALL ai detections (incl. rotten + leaf) for display
+            ai_dets,    # ALL ai detections (incl. rotten + leaf) for display
             cv_dets,
             confirmed,
             possible,
