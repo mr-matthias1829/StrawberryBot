@@ -2,8 +2,8 @@ from ultralytics import YOLO
 import torch
 print(torch.cuda.is_available()) # false = we are using cpu, which is MUCH slower
 
-model = YOLO("yolov8n.pt")   # tiny starter model
-#model = YOLO(r"../runs/detect/train-4/weights/best.pt")
+#model = YOLO("yolov8n.pt")   # tiny starter model
+model = YOLO(r"../runs/detect/ultrav3/weights/best.pt")
 
 model.train(
     data="data.yaml",
