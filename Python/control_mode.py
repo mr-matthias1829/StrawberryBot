@@ -61,7 +61,7 @@ def start() -> None:
 
     import Manual_controller
     Manual_controller.start()
-    print("[control_mode] Gestart. Wacht op controller...")
+    print("[control_mode] Started. Waiting on controller...")
 
 
 def stop() -> None:
@@ -70,7 +70,7 @@ def stop() -> None:
     Manual_controller.stop()
 
     _set_mode("autonomous")
-    print("[control_mode] Gestopt.")
+    print("[control_mode] Stopped.")
 
 
 # =============================================================================
@@ -93,4 +93,4 @@ def _set_mode(new_mode: str) -> None:
         try:
             cb(new_mode)
         except Exception as e:
-            print(f"[control_mode] Callback fout: {e}")
+            print(f"[control_mode] Callback Error: {e}")

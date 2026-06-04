@@ -150,8 +150,8 @@ def _listener() -> None:
 
     import control_mode
 
-    print(f"[manual] Luisteren op {UDP_HOST}:{UDP_PORT} "
-          f"(disconnect na {DISCONNECT_TIMEOUT}s)")
+    print(f"[manual] Listening on {UDP_HOST}:{UDP_PORT} "
+          f"(disconnected after {DISCONNECT_TIMEOUT}s)")
 
     connected = False
 
@@ -162,7 +162,7 @@ def _listener() -> None:
         except socket.timeout:
             # Geen pakket in dit venster — check watchdog
             if connected and (time.monotonic() - _last_packet_time) >= DISCONNECT_TIMEOUT:
-                print(f"[manual] Verbinding verloren — terug naar autonomous.")
+                print(f"[manual] Connection lost — converting to autonomous.")
                 connected = False
                 _stop_all()
                 control_mode._set_mode("autonomous")
@@ -174,7 +174,7 @@ def _listener() -> None:
         _last_packet_time = time.monotonic()
 
         if not connected:
-            print("[manual] Controller verbonden.")
+            print("[manual] Controller connected.")
             connected = True
             control_mode._set_mode("manual")
 
@@ -182,7 +182,7 @@ def _listener() -> None:
         try:
             payload = json.loads(data.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            print(f"[manual] Ongeldig pakket: {e}")
+            print(f"[manual] Invalid package: {e}")
             continue
 
         lx   = int(payload.get("lx",   0))
@@ -192,14 +192,14 @@ def _listener() -> None:
         try:
             _apply_input(lx, ly, grip)
         except Exception as e:
-            print(f"[manual] Fout bij aansturen servo's: {e}")
+            print(f"[manual] Error with controlling servo's: {e}")
 
     _stop_all()
-    print("[manual] Listener gestopt.")
+    print("[manual] Listener stopped.")
 
 
 # =============================================================================
-# PUBLIEKE API
+# PUBLIC API
 # =============================================================================
 
 def start() -> None:
@@ -243,7 +243,7 @@ def stop() -> None:
         _thread.join(timeout=2.0)
 
     _stop_all()
-    print("[manual] Gestopt.")
+    print("[manual] Stopped.")
 
 
 def is_active() -> bool:

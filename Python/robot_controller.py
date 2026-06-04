@@ -186,7 +186,9 @@ class RobotController:
             return "MEDIUM"
         if depth_score >= 0.25:
             return "FAR"
-        return "VERY FAR"
+        if depth_score > 0.0:
+            return "VERY FAR"
+        return "UNKNOWN"
 
     # =========================================================================
     # CANDIDATE SCORING
