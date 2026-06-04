@@ -1,0 +1,94 @@
+@startuml
+title StrawberryBot - Development View (Module Dependencies)
+skinparam componentStyle rectangle
+left to right direction
+
+package "Core Runtime" {
+  [Main.py] as MAIN
+  [fusion_engine.py] as FE
+  [detection.py] as DET
+  [robot_controller.py] as RC
+  [config.py] as CFG
+}
+
+package "Hardware Drivers" {
+  [motor.py] as MOTOR
+  [turntable.py] as TT
+  [lift.py] as LIFT
+  [gripper.py] as GRIP
+  [corner_sensors.py] as CSENS
+}
+
+package "Control and UI" {
+  [control_mode.py] as CM
+  [Manual_controller.py] as MC
+  [web_server.py] as WS
+}
+
+package "Training Pipeline" {
+  [convert_csv.py] as CSV
+  [convert_aug.py] as AUG
+  [AiTrain.py] as ATRAIN
+  [data.yaml] as YAML
+}
+
+package "Third-party" {
+  [ultralytics] as YOLO
+  [opencv-python] as OCV
+  [Flask] as FLASK
+  [torch] as TORCH
+  [smbus2] as SMBUS
+  [pyserial] as SERIAL
+  [lgpio] as LGPIO
+}
+
+MAIN --> FE
+MAIN --> CM
+MAIN --> WS
+MAIN --> CFG
+
+FE --> DET
+FE --> RC
+FE --> CFG
+
+DET --> CFG
+DET --> YOLO
+DET --> OCV
+
+RC --> DET
+RC --> CFG
+RC --> TT
+RC --> LIFT
+RC --> GRIP
+
+TT --> MOTOR
+LIFT --> MOTOR
+GRIP --> MOTOR
+TT .> CSENS
+LIFT .> CSENS
+GRIP .> CSENS
+
+MOTOR --> SERIAL
+MOTOR --> LGPIO
+CSENS --> SMBUS
+
+CM --> MC
+MC --> TT
+MC --> LIFT
+MC --> GRIP
+MC --> CM
+
+WS --> DET
+WS --> FE
+WS --> CFG
+WS --> FLASK
+WS --> OCV
+
+ATRAIN --> YOLO
+ATRAIN --> TORCH
+ATRAIN --> YAML
+CSV --> YAML
+AUG --> OCV
+CSV --> AUG
+
+@enduml

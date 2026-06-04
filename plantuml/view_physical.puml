@@ -1,0 +1,89 @@
+@startuml
+title StrawberryBot - Physical View (Deployment)
+skinparam nodeBackgroundColor #f0f4ff
+skinparam componentBackgroundColor #ffffff
+skinparam linetype ortho
+
+node "Raspberry Pi 4B" as PI {
+
+  node "Python Process" as PROC {
+    component "Main + Capture threads" as MAIN
+    component "Inference worker thread\n(FusionEngine)" as IW
+    component "Detection worker thread\n(AIDetector + CVDectector)" as DW
+    component "Servo writer threads x3\n(turntable, lift, gripper)" as SW
+    component "Flask daemon thread\n(web_server.py)" as FLASK
+    component "Manual UDP listener\n(Manual_controller.py)" as UDP
+    artifact "best.pt\nYOLOv8n weights" as MODEL
+    artifact "config.py\nlive-mutable constants" as CFG
+  }
+
+  node "Serial Bus /dev/ttyAMA0" as SBUS {
+    component "motor.py\nGPIO dir pin + pyserial" as MOTOR
+  }
+
+  node "I2C Bus (TCA9548A)" as I2C {
+    component "corner_sensors.py\nAS5600 encoders (stubbed)" as CSENS
+  }
+
+}
+
+node "Dynamixel AX-12A Servos" as SERVOS {
+  artifact "Turntable  ID 13" as SV_TT
+  artifact "Lift A     ID 3" as SV_LA
+  artifact "Lift B     ID 4" as SV_LB
+  artifact "Gripper    ID 8" as SV_GR
+}
+
+node "AS5600 Encoders" as ENCS {
+  artifact "Turntable encoder  TCA ch0" as EN_TT
+  artifact "Lift encoder A     TCA ch1" as EN_LA
+  artifact "Lift encoder B     TCA ch2" as EN_LB
+  artifact "Gripper encoder    TCA ch3" as EN_GR
+}
+
+node "reCamera" as CAM {
+  interface "RTSP stream\nEthernet 169.254.x.x\nor USB 192.168.42.x" as RTSP
+}
+
+node "ESP32 Controller" as ESP {
+  interface "UDP port 5005\nJSON joystick packets" as UDPIFACE
+}
+
+node "Operator Browser" as BROWSER {
+  interface "HTTP port 8080\nMJPEG + SSE + REST" as HTTP
+}
+
+node "Developer PC (offline)" as DEV {
+  component "AiTrain.py" as TRAINER
+  component "convert_csv + convert_aug" as DATAPREP
+}
+
+' Internal wiring
+MAIN --> IW
+IW --> DW
+IW --> SW
+SW --> MOTOR
+FLASK --> CFG
+IW --> MODEL
+
+' Physical hardware
+MOTOR --> SBUS
+SBUS --> SV_TT
+SBUS --> SV_LA
+SBUS --> SV_LB
+SBUS --> SV_GR
+
+CSENS --> I2C
+I2C --> EN_TT
+I2C --> EN_LA
+I2C --> EN_LB
+I2C --> EN_GR
+
+' External connections
+RTSP --> MAIN : cv2.VideoCapture
+UDPIFACE --> UDP : recvfrom()
+FLASK --> HTTP
+DATAPREP --> TRAINER
+TRAINER ..> MODEL : deploys best.pt
+
+@enduml
