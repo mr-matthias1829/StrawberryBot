@@ -1,9 +1,9 @@
 """
 lift.py
 =======
-Controls the lift mechanism using two AX-12A servos (ID 3 and ID 4) in
-wheel / continuous-rotation mode so the robot arm can move up or down to
-track a strawberry on the Y-axis.
+Controls the lift mechanism using two AX-12A servos (IDs 3 and 4) in
+wheel / continuous-rotation mode so the arm can move up or down to track
+a strawberry on the Y-axis.
 
 Architecture
 ------------
@@ -15,24 +15,33 @@ Architecture
 
 Mechanical note
 ---------------
-Servo 3 and servo 4 are mounted so that both must spin in the SAME
-direction to move the lift:
+Both servos must spin in the SAME direction to move the lift:
 
     Lift UP   → servo 3 CCW  + servo 4 CCW
     Lift DOWN → servo 3 CW   + servo 4 CW
 
-AX-12A wheel-mode register layout (MOVING_SPEED reg 32)
---------------------------------------------------------
-    Bits 0-9  →  speed magnitude  (0 = stop)
-    Bit  10   →  0 = CCW  /  1 = CW  (bit set = clockwise)
+Corner sensor (AS5600 via TCA9548A)
+------------------------------------
+The CornerSensorManager is imported and instantiated at init() time.
+Two sensor channels are reserved — one per servo side if available.
+Reads are currently STUBBED.
 
-Wheel mode is activated by setting both angle-limit registers to 0.
+TODO (hardware bring-up):
+  1. Set SENSOR_CHANNEL_A / _B to the correct TCA channels.
+  2. Define travel limits in degrees (MIN_DEG, MAX_DEG).
+  3. Call _read_sensor() inside update() or a dedicated safety thread
+     to stop the lift before it hits a hard end-stop.
+
+AX-12A wheel-mode  (MOVING_SPEED reg 32)
+-----------------------------------------
+    Bits 0-9  → speed magnitude  (0 = stop)
+    Bit  10   → 0 = CCW  /  1 = CW
 
 Coordinate convention (matches robot_controller.py)
 ----------------------------------------------------
-    dy > 0  →  target is BELOW  gripper  →  lift DOWN
-    dy < 0  →  target is ABOVE  gripper  →  lift UP
-    |dy| <= DEAD_ZONE  →  aligned, stop
+    dy > 0  → target is BELOW  gripper → move DOWN
+    dy < 0  → target is ABOVE  gripper → move UP
+    |dy| ≤ DEAD_ZONE  → aligned, stop
 """
 
 import threading
@@ -44,18 +53,22 @@ import motor
 # TUNING
 # =============================================================================
 
-SERVO_ID_A = 3          # first  lift servo
-SERVO_ID_B = 4          # second lift servo (mechanically mirrored)
+SERVO_ID_A = 3
+SERVO_ID_B = 4
 
-DEAD_ZONE = 25          # px — mirrors Y_THRESHOLD in robot_controller.py
+DEAD_ZONE = 25
 
-# Speed tiers (0–1023)
 SPEED_SLOW   = 150
 SPEED_MEDIUM = 300
 SPEED_FAST   = 500
 
-THRESHOLD_SLOW   = 50   # |dy| ≤ this → SLOW
-THRESHOLD_MEDIUM = 150  # |dy| ≤ this → MEDIUM, above → FAST
+THRESHOLD_SLOW   = 50
+THRESHOLD_MEDIUM = 150
+
+# TCA9548A channels wired to the lift AS5600 encoders.
+# TODO: set to the correct channels once hardware is confirmed.
+SENSOR_CHANNEL_A = 1   # servo 3 side
+SENSOR_CHANNEL_B = 2   # servo 4 side
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -63,24 +76,60 @@ _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
 _REG_SPEED     = 32
 
-# Direction bits
-_DIR_CCW = 0            # counter-clockwise
-_DIR_CW  = 1 << 10      # clockwise
+_DIR_CCW = 0
+_DIR_CW  = 1 << 10
+
+# =============================================================================
+# CORNER SENSORS  (optional — gracefully absent on non-Pi or pre-wiring)
+# =============================================================================
+
+_sensor_mgr = None
+
+def _init_sensors() -> None:
+    global _sensor_mgr
+    try:
+        from corner_sensors import CornerSensorManager
+        mgr = CornerSensorManager(bus_num=1)
+        found = [ch for ch in (SENSOR_CHANNEL_A, SENSOR_CHANNEL_B)
+                 if mgr.channel_has_sensor(ch)]
+        if found:
+            _sensor_mgr = mgr
+            print(f"[lift] Corner sensor(s) ready on TCA ch {found}.")
+        else:
+            print(f"[lift] ⚠️  No AS5600 found on TCA ch "
+                  f"{SENSOR_CHANNEL_A}/{SENSOR_CHANNEL_B} — running open-loop.")
+    except Exception as e:
+        print(f"[lift] Corner sensor unavailable ({e}) — running open-loop.")
+
+
+def _read_sensor(channel: int) -> dict | None:
+    """
+    Return the latest reading for one lift encoder, or None if unavailable.
+
+    Dict keys: channel, raw, deg, laps
+    TODO: use in update() to enforce soft travel limits (MIN_DEG / MAX_DEG).
+    """
+    if _sensor_mgr is None or not _sensor_mgr.channel_has_sensor(channel):
+        return None
+    try:
+        return _sensor_mgr.read_sensor(channel)
+    except Exception as e:
+        print(f"[lift] Sensor ch{channel} read error: {e}")
+        return None
 
 # =============================================================================
 # STATE
 # =============================================================================
 
 _initialized:    bool = False
-_pending_word_a: int  = -1   # speed word for servo 3  (-1 = nothing pending)
-_pending_word_b: int  = -1   # speed word for servo 4
+_pending_word_a: int  = -1
+_pending_word_b: int  = -1
 _last_word_a:    int  = -1
 _last_word_b:    int  = -1
-_lock       = threading.Lock()
-_event      = threading.Event()
-_stop_flag  = False
+_lock      = threading.Lock()
+_event     = threading.Event()
+_stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
-
 
 # =============================================================================
 # BACKGROUND WRITER THREAD
@@ -89,8 +138,7 @@ _thread: threading.Thread = None  # type: ignore[assignment]
 def _writer() -> None:
     global _last_word_a, _last_word_b
     while not _stop_flag:
-        fired = _event.wait(timeout=0.1)
-        if not fired:
+        if not _event.wait(timeout=0.1):
             continue
         _event.clear()
 
@@ -98,29 +146,26 @@ def _writer() -> None:
             word_a = _pending_word_a
             word_b = _pending_word_b
 
-        # Servo A
         if word_a >= 0 and word_a != _last_word_a:
             try:
                 motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
                 _last_word_a = word_a
             except Exception as e:
-                print(f"[lift] serial error (servo {SERVO_ID_A}): {e}")
+                print(f"[lift] Serial error (servo {SERVO_ID_A}): {e}")
 
-        # Servo B
         if word_b >= 0 and word_b != _last_word_b:
             try:
                 motor._write_word(SERVO_ID_B, _REG_SPEED, word_b)
                 _last_word_b = word_b
             except Exception as e:
-                print(f"[lift] serial error (servo {SERVO_ID_B}): {e}")
-
+                print(f"[lift] Serial error (servo {SERVO_ID_B}): {e}")
 
 # =============================================================================
 # LIFECYCLE
 # =============================================================================
 
 def init() -> None:
-    """Switch both servos to wheel mode and start background writer. Idempotent."""
+    """Switch both servos to wheel mode and start background writer.  Idempotent."""
     global _initialized, _stop_flag, _thread
 
     if _initialized:
@@ -129,25 +174,23 @@ def init() -> None:
     _stop_flag = False
 
     for sid in (SERVO_ID_A, SERVO_ID_B):
-        motor._write_word(sid, _REG_TORQUE_EN, 0)
-        time.sleep(0.05)
-        motor._write_word(sid, _REG_CW_LIMIT,  0)
-        time.sleep(0.02)
-        motor._write_word(sid, _REG_CCW_LIMIT, 0)
-        time.sleep(0.02)
-        motor._write_word(sid, _REG_TORQUE_EN, 1)
-        time.sleep(0.05)
-        motor._write_word(sid, _REG_SPEED, 0)
+        motor._write_word(sid, _REG_TORQUE_EN, 0); time.sleep(0.05)
+        motor._write_word(sid, _REG_CW_LIMIT,  0); time.sleep(0.02)
+        motor._write_word(sid, _REG_CCW_LIMIT, 0); time.sleep(0.02)
+        motor._write_word(sid, _REG_TORQUE_EN, 1); time.sleep(0.05)
+        motor._write_word(sid, _REG_SPEED,     0)
 
     _thread = threading.Thread(target=_writer, daemon=True, name="lift-writer")
     _thread.start()
+
+    _init_sensors()
 
     _initialized = True
     print(f"✅ Lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
 
 
 def shutdown() -> None:
-    """Stop motors and disable torque. Called automatically via motor.shutdown()."""
+    """Stop motors and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -168,15 +211,13 @@ def shutdown() -> None:
     _initialized = False
     print("🛑 Lift shut down.")
 
-
 # =============================================================================
 # INTERNAL HELPERS
 # =============================================================================
 
 def _post_words(word_a: int, word_b: int) -> None:
-    """Post speed words for both servos to the background writer (non-blocking)."""
+    global _pending_word_a, _pending_word_b
     with _lock:
-        global _pending_word_a, _pending_word_b
         _pending_word_a = word_a
         _pending_word_b = word_b
     _event.set()
@@ -191,7 +232,6 @@ def _speed_from_dy(dy_abs: int) -> int:
         return SPEED_MEDIUM
     return SPEED_FAST
 
-
 # =============================================================================
 # PUBLIC API
 # =============================================================================
@@ -202,36 +242,33 @@ def stop() -> None:
 
 
 def move_up(speed: int = SPEED_MEDIUM) -> dict:
-    """
-    Move lift UP.
-    Both servos spin CCW.
-    Non-blocking.
-    """
+    """Move lift UP — both servos CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CCW | speed, _DIR_CCW | speed)
-    return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
+    return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B],
+            "speed": speed, "status": "ok"}
 
 
 def move_down(speed: int = SPEED_MEDIUM) -> dict:
-    """
-    Move lift DOWN.
-    Both servos spin CW.
-    Non-blocking.
-    """
+    """Move lift DOWN — both servos CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CW | speed, _DIR_CW | speed)
-    return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": speed, "status": "ok"}
+    return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B],
+            "speed": speed, "status": "ok"}
 
 
 def update(dy: int) -> str:
     """
-    Main per-frame entry point. Posts the appropriate speed words and returns
-    a log string. Never blocks — serial writes are handled in background thread.
+    Main per-frame entry point.  Posts the appropriate speed words and returns
+    a log string.  Never blocks.
 
     Args:
         dy: target_y - gripper_y  (from RobotController.generate_dy)
-            dy > 0 → target is below  → move DOWN
-            dy < 0 → target is above  → move UP
+            dy > 0 → target below  → move DOWN
+            dy < 0 → target above  → move UP
+
+    TODO: call _read_sensor(SENSOR_CHANNEL_A) here to check position against
+    soft travel limits before commanding movement.
     """
     if not _initialized:
         return f"LIFT SIMULATED (dy={dy:+d})"
