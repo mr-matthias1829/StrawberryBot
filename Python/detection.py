@@ -21,8 +21,8 @@ CLASS_NAMES = {
 
 # Unique box colours per class (BGR)
 CLASS_COLORS = {
-    0: (0,   200, 255),   # Strawberry  — geel-oranje
-    1: (0,   0,   200),   # rotten      — rood
+    0: (0,   0, 200),   # Strawberry  — rood
+    1: (200,   0,   0),   # rotten      — blauw
     2: (0,   180,  60),   # leaf        — groen
 }
 
