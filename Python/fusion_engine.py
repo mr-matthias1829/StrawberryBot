@@ -24,11 +24,20 @@ CLEANUP_INTERVAL: int           = 30
 CONTAINMENT_MATCH_THRESHOLD = 0.45
 
 # ── Minimum box size for targeting ───────────────────────────────────────────
-# Detections whose bounding-box area (in pixels) is below this threshold are
-# still detected and drawn, but will never enter the tracker and can therefore
-# never become confirmed/possible targets.
-# Tune this value to match the smallest real strawberry you expect to pick.
-MIN_TARGET_BOX_AREA: int = 900   # pixels² — e.g. roughly 20×20 px
+MIN_TARGET_BOX_AREA: int = 900   # pixels²
+
+# ── Movement prediction ───────────────────────────────────────────────────────
+# Smoothing factor for the exponential moving average velocity (0 = no update,
+# 1 = instant update).  Lower values produce smoother but laggier predictions.
+VELOCITY_ALPHA: float = 0.4
+
+# Maximum age (seconds) of a tracker's last real detection before its predicted
+# position is no longer drawn.  Keeps stale ghosts off the screen.
+MAX_PREDICT_AGE: float = 0.25   # seconds
+
+# How many frames back we look to compute the initial velocity estimate.
+# Increasing this smooths out noise but makes the estimate slower to react.
+VELOCITY_HISTORY_LEN: int = 6
 
 
 # =============================================================================
@@ -63,7 +72,59 @@ class TrackedObject:
     fused_confidence: float = 0.0
     first_seen: float = field(default_factory=time.time)
 
+    # ── Velocity / prediction ─────────────────────────────────────────────────
+    # Velocity is stored in pixels-per-second for both axes, as an EMA.
+    _vx: float = field(default=0.0, init=False, repr=False)
+    _vy: float = field(default=0.0, init=False, repr=False)
+    _last_cx: float = field(default=0.0, init=False, repr=False)
+    _last_cy: float = field(default=0.0, init=False, repr=False)
+    _last_update_time: float = field(default_factory=time.time, init=False, repr=False)
+
+    # Ring buffer of (cx, cy, timestamp) for the initial velocity window.
+    _pos_history: list = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        cx = (self.detection.x1 + self.detection.x2) / 2.0
+        cy = (self.detection.y1 + self.detection.y2) / 2.0
+        self._last_cx = cx
+        self._last_cy = cy
+        self._last_update_time = time.time()
+        self._pos_history = [(cx, cy, self._last_update_time)]
+
+    # ------------------------------------------------------------------
+    def _push_history(self, cx: float, cy: float, now: float) -> None:
+        self._pos_history.append((cx, cy, now))
+        if len(self._pos_history) > VELOCITY_HISTORY_LEN:
+            self._pos_history.pop(0)
+
+    def _recompute_velocity(self, cx: float, cy: float, now: float) -> None:
+        """
+        Update the EMA velocity estimate given a fresh centre position.
+        We use the oldest sample in the history window to get a stable
+        direction, then blend it into the running EMA.
+        """
+        if len(self._pos_history) >= 2:
+            oldest_cx, oldest_cy, oldest_t = self._pos_history[0]
+            dt = now - oldest_t
+            if dt > 1e-4:
+                raw_vx = (cx - oldest_cx) / dt
+                raw_vy = (cy - oldest_cy) / dt
+                self._vx = VELOCITY_ALPHA * raw_vx + (1.0 - VELOCITY_ALPHA) * self._vx
+                self._vy = VELOCITY_ALPHA * raw_vy + (1.0 - VELOCITY_ALPHA) * self._vy
+
+    # ------------------------------------------------------------------
     def update(self, new_det: Detection) -> None:
+        now = time.time()
+        cx  = (new_det.x1 + new_det.x2) / 2.0
+        cy  = (new_det.y1 + new_det.y2) / 2.0
+
+        self._push_history(cx, cy, now)
+        self._recompute_velocity(cx, cy, now)
+
+        self._last_cx          = cx
+        self._last_cy          = cy
+        self._last_update_time = now
+
         self.fused_confidence = 0.7 * new_det.confidence + 0.3 * self.fused_confidence
         self.detection    = new_det
         self.seen_count  += 1
@@ -73,6 +134,39 @@ class TrackedObject:
         self.missed_count += 1
         self.fused_confidence *= config.PERSISTENCE_DECAY
 
+    # ------------------------------------------------------------------
+    def predicted_box(self, now: Optional[float] = None) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Return a predicted bounding box (x1, y1, x2, y2) extrapolated from the
+        last known position using the current velocity estimate.
+
+        Returns None if the last real detection is older than MAX_PREDICT_AGE
+        (avoids drawing ghost boxes for long-lost objects).
+        """
+        if now is None:
+            now = time.time()
+
+        age = now - self._last_update_time
+        if age > MAX_PREDICT_AGE:
+            return None
+
+        dt = age  # seconds since last confirmed detection
+        det = self.detection
+        w   = det.x2 - det.x1
+        h   = det.y2 - det.y1
+
+        # Predicted centre
+        pred_cx = self._last_cx + self._vx * dt
+        pred_cy = self._last_cy + self._vy * dt
+
+        return (
+            int(pred_cx - w / 2),
+            int(pred_cy - h / 2),
+            int(pred_cx + w / 2),
+            int(pred_cy + h / 2),
+        )
+
+    # ------------------------------------------------------------------
     @property
     def is_confirmed(self) -> bool:
         src      = (self.detection.source or "").lower()
@@ -148,6 +242,13 @@ class DetectionWorker:
         self._mask:    Optional[np.ndarray] = None
         self._zoom_results: List[Detection] = []
 
+        # ── Non-blocking result freshness ─────────────────────────────────────
+        # Set to True whenever a new batch of detections has been written.
+        # FusionEngine reads and clears this flag so it knows when to run the
+        # full tracking/fusion pipeline vs. simply re-annotating with predicted
+        # positions.
+        self._results_fresh: bool = False
+
         self._thread = threading.Thread(target=self._run, daemon=True, name="detection-worker")
         self._thread.start()
 
@@ -167,9 +268,17 @@ class DetectionWorker:
         except queue.Full:
             pass
 
-    def read_frame(self) -> Tuple[List[Detection], List[Detection], Optional[np.ndarray]]:
+    def read_frame(self) -> Tuple[List[Detection], List[Detection], Optional[np.ndarray], bool]:
+        """
+        Returns (ai_dets, cv_dets, mask, fresh).
+
+        `fresh` is True exactly once per new detection batch — the caller is
+        responsible for running the fusion/tracking pipeline only when True.
+        """
         with self._lock:
-            return self._ai_dets, self._cv_dets, self._mask
+            fresh = self._results_fresh
+            self._results_fresh = False
+            return self._ai_dets, self._cv_dets, self._mask, fresh
 
     def read_zoom(self) -> List[Detection]:
         with self._lock:
@@ -210,9 +319,10 @@ class DetectionWorker:
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
         with self._lock:
-            self._ai_dets = ai_dets
-            self._cv_dets = cv_dets
-            self._mask    = mask
+            self._ai_dets       = ai_dets
+            self._cv_dets       = cv_dets
+            self._mask          = mask
+            self._results_fresh = True   # signal: new batch ready
 
     def _process_zoom(self, job: _ZoomJob) -> None:
         x1, y1, x2, y2 = job.box
@@ -229,7 +339,6 @@ class DetectionWorker:
         scale  = config.ZOOM_SCALE_FACTOR
         roi_up = cv2.resize(roi, (int(roi.shape[1] * scale), int(roi.shape[0] * scale)))
 
-        # Only zoom-run AI if enabled
         ai_res = self.ai.detect(roi_up, conf_threshold=config.RECHECK_AI_CONF) if is_ai_enabled() else []
         cv_res, _ = self.cv.detect(roi_up)
 
@@ -285,6 +394,14 @@ class FusionEngine:
         self._last_mask:      Optional[np.ndarray] = None
         self._last_debug: Dict = self._make_debug(0, 0, 0, 0, 0, 0)
 
+        # ── State carried between frames for the non-blocking predict path ────
+        self._last_ai_dets:    List[Detection]      = []
+        self._last_cv_dets:    List[Detection]      = []
+        self._last_gripper_xy: Tuple[int, int]      = (0, 0)
+        self._last_movement:   str                  = ""
+        self._last_target_id:  Optional[int]        = None
+        self._last_target_center: Optional[Tuple[int, int]] = None
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -307,17 +424,12 @@ class FusionEngine:
         ai_dets: List[Detection],
         cv_dets: List[Detection],
     ) -> Tuple[Dict[int, int], List[int], List[int]]:
-        """
-        Only match AI vs CV detections that are BOTH targetable (class_id==0).
-        Non-targetable AI detections (rotten/leaf) are returned as unmatched_ai
-        for display only and never fused with CV results.
-        """
         matches: Dict[int, int] = {}
         used_cv: set            = set()
 
         for i, ai_det in enumerate(ai_dets):
             if not ai_det.is_targetable:
-                continue  # rotten/leaf — never match with CV
+                continue
             best_score = 0.0
             best_j     = -1
             for j, cv_det in enumerate(cv_dets):
@@ -349,12 +461,6 @@ class FusionEngine:
         self._worker.push_zoom(frame, box, source)
 
     def _fuse_decision(self, ai_det, cv_det, frame) -> Optional[Detection]:
-        """
-        Produce a fused detection.  Only called for targetable detections.
-        Matched pairs are blended by configured weights; unmatched high-confidence
-        AI detections pass through directly; low-confidence unmatched detections
-        are queued for a zoom recheck.
-        """
         if ai_det and cv_det:
             fused = config.YOLO_FUSION_WEIGHT * ai_det.confidence + config.CV_FUSION_WEIGHT * cv_det.confidence
             return Detection(ai_det.x1, ai_det.y1, ai_det.x2, ai_det.y2,
@@ -404,23 +510,14 @@ class FusionEngine:
         return confirmed, possible
 
     def _update_tracking(self, fused_dets: List[Detection]) -> List[TrackedObject]:
-        """
-        Only track detections that are targetable (ripe strawberries) AND
-        whose bounding box meets the minimum size threshold (MIN_TARGET_BOX_AREA).
-
-        Detections below the size threshold are silently skipped — they are still
-        drawn on screen (via ai_dets / cv_dets) but will never become targets.
-        """
         new_tracked: List[TrackedObject] = []
         used: set = set()
 
         for det in fused_dets:
             if not det.is_targetable:
-                continue  # rotten/leaf never enter tracking
-
-            # ── Minimum size gate ─────────────────────────────────────────
+                continue
             if _box_area(det) < MIN_TARGET_BOX_AREA:
-                continue  # too small — visible on screen but never targeted
+                continue
 
             best_iou = 0.0
             best_id  = -1
@@ -478,66 +575,112 @@ class FusionEngine:
             target_id: Optional[int],
             target_center: Optional[Tuple[int, int]],
             movement_text: str,
+            use_predicted: bool = False,
     ) -> np.ndarray:
+        """
+        Draw all annotations onto `frame`.
+
+        When `use_predicted` is True (i.e. no fresh detection this frame), the
+        confirmed/possible boxes are drawn at their *predicted* positions via
+        `TrackedObject.predicted_box()`.  A velocity arrow and fading ghost trail
+        show where each strawberry is heading.  Raw AI/CV detector boxes are NOT
+        re-drawn on predicted frames — they would just be stale noise.
+        """
 
         out = frame
+        now = time.time()
 
         # ------------------------------------------------------------------
-        # AI detections — colour by class (Strawberry / rotten / leaf)
+        # Raw detector boxes — only on frames with fresh detections
         # ------------------------------------------------------------------
-        for det in ai_dets:
-            color = det.color
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 1)
-            cv2.putText(
-                out,
-                f"AI:{det.class_name}:{det.confidence:.2f}",
-                (det.x1, det.y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                color,
-                1,
-            )
+        if not use_predicted:
+            for det in ai_dets:
+                color = det.color
+                cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 1)
+                cv2.putText(
+                    out,
+                    f"AI:{det.class_name}:{det.confidence:.2f}",
+                    (det.x1, det.y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    color,
+                    1,
+                )
+
+            for det in cv_dets:
+                color = det.color
+                cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 1)
+                cv2.putText(
+                    out,
+                    f"CV:{det.confidence:.2f}",
+                    (det.x1, det.y2 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    color,
+                    1,
+                )
 
         # ------------------------------------------------------------------
-        # CV detections — always class_id=0, shown in strawberry colour
-        # ------------------------------------------------------------------
-        for det in cv_dets:
-            color = det.color
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 1)
-            cv2.putText(
-                out,
-                f"CV:{det.confidence:.2f}",
-                (det.x1, det.y2 - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                color,
-                1,
-            )
-
-        # ------------------------------------------------------------------
-        # Confirmed targets (only ripe strawberries reach this list)
+        # Confirmed targets
         # ------------------------------------------------------------------
         for obj in confirmed:
             det   = obj.detection
             color = (0, 165, 255) if obj.id == target_id else config.COLOR_FUSED
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)
-            cv2.putText(
-                out,
-                f"#{obj.id} {det.confidence:.2f}",
-                (det.x1, det.y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                2,
-            )
+            w     = det.x2 - det.x1
+            h     = det.y2 - det.y1
+
+            if use_predicted:
+                pbox = obj.predicted_box(now)
+                if pbox is None:
+                    continue  # too old — skip ghost entirely
+                px1, py1, px2, py2 = pbox
+                pcx = (px1 + px2) / 2.0
+                pcy = (py1 + py2) / 2.0
+
+                # Ghost trail showing future positions
+                _draw_ghost_trail(out, pcx, pcy, obj._vx, obj._vy, w, h, color)
+
+                # Predicted box (thin solid border at current predicted position)
+                cv2.rectangle(out, (px1, py1), (px2, py2), color, 1)
+
+                # Velocity arrow from predicted centre
+                _draw_velocity_arrow(out, pcx, pcy, obj._vx, obj._vy, color)
+
+                cv2.putText(
+                    out,
+                    f"#{obj.id} ~{det.confidence:.2f}",
+                    (px1, py1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                )
+            else:
+                cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)
+                # Always draw velocity arrow on confirmed targets even on fresh frames
+                # so the user can see motion direction at all times
+                cx = (det.x1 + det.x2) / 2.0
+                cy = (det.y1 + det.y2) / 2.0
+                _draw_velocity_arrow(out, cx, cy, obj._vx, obj._vy, color)
+                cv2.putText(
+                    out,
+                    f"#{obj.id} {det.confidence:.2f}",
+                    (det.x1, det.y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2,
+                )
 
         # ------------------------------------------------------------------
-        # Possible targets (only ripe strawberries)
+        # Possible targets
         # ------------------------------------------------------------------
         for obj in possible:
             det      = obj.detection
             src      = (det.source or "").lower()
             det_conf = float(det.confidence or 0.0)
+            w        = det.x2 - det.x1
+            h        = det.y2 - det.y1
 
             if FusionEngine._is_ai_like(src):
                 display_score = det_conf * config.POSSIBLE_AI_CONF_WEIGHT
@@ -546,16 +689,40 @@ class FusionEngine:
             else:
                 display_score = obj.fused_confidence
 
-            cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_POSSIBLE, 1)
-            cv2.putText(
-                out,
-                f"P#{obj.id} {display_score:.2f}",
-                (det.x1, det.y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                config.COLOR_POSSIBLE,
-                1,
-            )
+            if use_predicted:
+                pbox = obj.predicted_box(now)
+                if pbox is None:
+                    continue
+                px1, py1, px2, py2 = pbox
+                pcx = (px1 + px2) / 2.0
+                pcy = (py1 + py2) / 2.0
+
+                _draw_ghost_trail(out, pcx, pcy, obj._vx, obj._vy, w, h, config.COLOR_POSSIBLE)
+                cv2.rectangle(out, (px1, py1), (px2, py2), config.COLOR_POSSIBLE, 1)
+                _draw_velocity_arrow(out, pcx, pcy, obj._vx, obj._vy, config.COLOR_POSSIBLE)
+                cv2.putText(
+                    out,
+                    f"P#{obj.id} ~{display_score:.2f}",
+                    (px1, py1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    config.COLOR_POSSIBLE,
+                    1,
+                )
+            else:
+                cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), config.COLOR_POSSIBLE, 1)
+                cx = (det.x1 + det.x2) / 2.0
+                cy = (det.y1 + det.y2) / 2.0
+                _draw_velocity_arrow(out, cx, cy, obj._vx, obj._vy, config.COLOR_POSSIBLE)
+                cv2.putText(
+                    out,
+                    f"P#{obj.id} {display_score:.2f}",
+                    (det.x1, det.y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    config.COLOR_POSSIBLE,
+                    1,
+                )
 
         # ------------------------------------------------------------------
         # Gripper bounding box
@@ -576,18 +743,30 @@ class FusionEngine:
         if target_center is not None:
             for obj in confirmed + possible:
                 if obj.id == target_id:
+                    det_for_check = obj.detection
+                    if use_predicted:
+                        pbox = obj.predicted_box(now)
+                        if pbox:
+                            # Build a temporary Detection-like object from predicted box
+                            det_for_check = Detection(
+                                *pbox,
+                                confidence=obj.detection.confidence,
+                                source=obj.detection.source,
+                                label=obj.detection.label,
+                                class_id=obj.detection.class_id,
+                            )
                     contained = RobotController.is_detection_fully_contained(
-                        obj.detection,
+                        det_for_check,
                         (bbox_x1, bbox_y1, bbox_x2, bbox_y2),
                     )
                     break
 
         if gripping:
-            gripper_color = (0, 0, 255)    # red — grabbing
+            gripper_color = (0, 0, 255)
         elif contained:
-            gripper_color = (0, 255, 0)    # green — ready
+            gripper_color = (0, 255, 0)
         else:
-            gripper_color = (255, 0, 255)  # magenta — not ready
+            gripper_color = (255, 0, 255)
 
         cv2.rectangle(out, (bbox_x1, bbox_y1), (bbox_x2, bbox_y2), gripper_color, 2)
         cv2.circle(out, (gripper_x, gripper_y), 8, gripper_color, -1)
@@ -605,7 +784,7 @@ class FusionEngine:
             cv2.line(out, (gripper_x, gripper_y), target_center, (0, 165, 255), 2)
 
         # ------------------------------------------------------------------
-        # Legend — class colours
+        # Legend
         # ------------------------------------------------------------------
         legend_items = [
             (CLASS_COLORS[0], "Strawberry (targetable)"),
@@ -622,10 +801,11 @@ class FusionEngine:
         # ------------------------------------------------------------------
         # HUD
         # ------------------------------------------------------------------
-        ai_badge = "AI:ON" if is_ai_enabled() else "AI:OFF"
+        ai_badge   = "AI:ON" if is_ai_enabled() else "AI:OFF"
+        pred_badge = " [PRED]" if use_predicted else ""
         cv2.putText(
             out,
-            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)} | {ai_badge}",
+            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)} | {ai_badge}{pred_badge}",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -657,20 +837,42 @@ class FusionEngine:
                            interpolation=cv2.INTER_LINEAR)
         self._worker.push_frame(frame, small)
 
-        # ── Skip detection on non-detect frames — return last result immediately ──
-        if self.frame_count % DETECT_EVERY != 0 and self._last_annotated is not None:
-            return self._last_annotated, self.last_confirmed_hits, self._last_debug, self._last_mask
+        gripper_x = frame.shape[1] // 2
+        gripper_y = frame.shape[0] // 2
 
-        # ── Detection cycle ───────────────────────────────────────────────────
+        # ── Check if fresh detections are available (non-blocking) ───────────
+        ai_dets, cv_dets, mask, fresh = self._worker.read_frame()
+
+        if not fresh:
+            # ── PREDICT PATH — no new detections yet; return immediately ─────
+            # Re-draw the current frame with predicted bounding boxes so the
+            # display never freezes waiting for the detection thread.
+            annotated = self.draw_annotations(
+                frame.copy(),
+                self._last_ai_dets,
+                self._last_cv_dets,
+                self.last_confirmed_hits,
+                self.last_possible_hits,
+                self.frame_count,
+                gripper_x, gripper_y,
+                self._last_target_id,
+                self._last_target_center,
+                self._last_movement,
+                use_predicted=True,
+            )
+            return annotated, self.last_confirmed_hits, self._last_debug, self._last_mask
+
+        # ── DETECTION PATH — fresh batch from the worker ─────────────────────
         self.detect_count += 1
-        ai_dets, cv_dets, mask = self._worker.read_frame()
         zoom_dets = self._worker.read_zoom()
 
-        # Split AI detections: targetable (ripe) vs display-only (rotten/leaf)
+        self._last_ai_dets = ai_dets
+        self._last_cv_dets = cv_dets
+
+        # Split AI detections: targetable vs display-only
         ai_targetable   = [d for d in ai_dets if d.is_targetable]
         ai_display_only = [d for d in ai_dets if not d.is_targetable]  # noqa: F841
 
-        # When AI is off, skip matching entirely — treat everything as unmatched CV
         if is_ai_enabled():
             matches, unmatched_ai, unmatched_cv = self._match_detections(ai_targetable, cv_dets)
         else:
@@ -678,7 +880,6 @@ class FusionEngine:
             unmatched_ai = []
             unmatched_cv = list(range(len(cv_dets)))
 
-        # fused list only ever contains targetable detections
         fused: List[Detection] = [d for d in zoom_dets if d.is_targetable]
 
         for ai_idx, cv_idx in matches.items():
@@ -705,10 +906,7 @@ class FusionEngine:
         self.last_confirmed_hits = confirmed
         self.last_possible_hits  = possible
 
-        gripper_x = frame.shape[1] // 2
-        gripper_y = frame.shape[0] // 2
-
-        # ── Target selection — only confirmed/possible ripe strawberries ──────
+        # ── Target selection ──────────────────────────────────────────────────
         target_pool = [obj.detection for obj in confirmed]
         using_possible_fallback = False
 
@@ -735,10 +933,9 @@ class FusionEngine:
         mode = "possible" if using_possible_fallback else "confirmed"
         print(f"[ROBOT][{mode}] {movement}: X{dx}, Y{dy}, {self.robot.generate_depthstring()}")
 
-        # ── Hardware dispatch ──────────────────────────────────────────────────
         self.robot.drive_hardware(gripper_x, gripper_y)
 
-        # ── Annotation — pass the FULL ai_dets list so rotten/leaf are drawn ──
+        # ── Resolve target id / centre ────────────────────────────────────────
         target_id     = None
         target_center = None
         if target is not None:
@@ -749,14 +946,20 @@ class FusionEngine:
                     target_id = obj.id
                     break
 
+        # Cache for predict path
+        self._last_movement      = movement
+        self._last_target_id     = target_id
+        self._last_target_center = target_center
+
         self._last_debug = self._make_debug(
             len(ai_dets), len(cv_dets), len(matches),
             len(fused), len(confirmed), len(possible),
         )
-        self._last_mask      = mask
-        self._last_annotated = self.draw_annotations(
+        self._last_mask = mask
+
+        annotated = self.draw_annotations(
             frame,
-            ai_dets,    # ALL ai detections (incl. rotten + leaf) for display
+            ai_dets,
             cv_dets,
             confirmed,
             possible,
@@ -764,9 +967,109 @@ class FusionEngine:
             gripper_x, gripper_y,
             target_id, target_center,
             movement,
+            use_predicted=False,
         )
 
-        return self._last_annotated, confirmed, self._last_debug, mask
+        return annotated, confirmed, self._last_debug, mask
 
     def shutdown(self) -> None:
         self._worker.stop()
+
+
+# =============================================================================
+# DRAWING UTILITIES
+# =============================================================================
+
+# How far ahead (seconds) the velocity arrow tip represents.
+# E.g. 0.5 means "where the strawberry will be in 500 ms at current speed".
+ARROW_LOOKAHEAD_SEC: float = 0.5
+
+# Minimum pixel length for the arrow to be drawn (avoids drawing tiny arrows
+# for nearly-stationary strawberries).
+ARROW_MIN_PX: int = 8
+
+# Ghost trail: how many evenly-spaced future positions to show as fading dots.
+TRAIL_STEPS: int  = 4
+TRAIL_MAX_SEC: float = 0.5   # time span covered by the trail dots
+
+
+def _draw_velocity_arrow(
+    img: np.ndarray,
+    cx: float,
+    cy: float,
+    vx: float,
+    vy: float,
+    color: Tuple[int, int, int],
+    lookahead: float = ARROW_LOOKAHEAD_SEC,
+    min_px: int      = ARROW_MIN_PX,
+) -> None:
+    """
+    Draw an arrow from the current centre (cx, cy) pointing in the direction
+    of motion.  Arrow length is proportional to speed × lookahead seconds.
+    """
+    tip_x = cx + vx * lookahead
+    tip_y = cy + vy * lookahead
+    length = np.hypot(tip_x - cx, tip_y - cy)
+    if length < min_px:
+        return
+
+    src = (int(cx), int(cy))
+    tip = (int(tip_x), int(tip_y))
+
+    # Thick white outline first so the arrow is readable on any background
+    cv2.arrowedLine(img, src, tip, (255, 255, 255), thickness=4, tipLength=0.25)
+    cv2.arrowedLine(img, src, tip, color,           thickness=2, tipLength=0.25)
+
+    # Speed label next to the tip (pixels per second)
+    speed_px_s = np.hypot(vx, vy)
+    cv2.putText(
+        img,
+        f"{speed_px_s:.0f}px/s",
+        (tip[0] + 4, tip[1] - 4),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        color,
+        1,
+    )
+
+
+def _draw_ghost_trail(
+    img: np.ndarray,
+    cx: float,
+    cy: float,
+    vx: float,
+    vy: float,
+    w: int,
+    h: int,
+    color: Tuple[int, int, int],
+    steps: int      = TRAIL_STEPS,
+    max_sec: float  = TRAIL_MAX_SEC,
+) -> None:
+    """
+    Draw a series of fading semi-transparent ghost rectangles ahead of the
+    strawberry to visualise the predicted trajectory.
+
+    Each successive ghost is drawn more transparently and slightly smaller
+    so the visual weight tapers off into the future.
+    """
+    overlay = img.copy()
+    for i in range(1, steps + 1):
+        t      = max_sec * i / steps          # time offset for this ghost
+        alpha  = 0.35 * (1.0 - i / (steps + 1))  # fade with distance
+        scale  = 1.0 - 0.06 * i              # shrink slightly
+        gcx    = cx + vx * t
+        gcy    = cy + vy * t
+        gw     = int(w * scale)
+        gh     = int(h * scale)
+        gx1    = int(gcx - gw / 2)
+        gy1    = int(gcy - gh / 2)
+        gx2    = int(gcx + gw / 2)
+        gy2    = int(gcy + gh / 2)
+
+        cv2.rectangle(overlay, (gx1, gy1), (gx2, gy2), color, 1)
+        # Blend just the affected pixels back onto img
+        cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+        overlay = img.copy()   # refresh overlay base for next iteration
+
+        # Small dot at predicted centre
+        cv2.circle(img, (int(gcx), int(gcy)), 3, color, -1)
