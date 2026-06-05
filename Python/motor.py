@@ -57,7 +57,7 @@ _initialized:  bool   = False
 # LIFECYCLE
 # =============================================================================
 
-def init() -> None:
+def init() -> None: # TODO: brothar we need to make it reset when it shuts down, the zero point my guy, dewit.
     """Open GPIO and serial port.  Call once at startup before any motor use."""
     global _h, _ser, _initialized
 

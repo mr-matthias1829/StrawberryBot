@@ -1,83 +1,111 @@
 @startuml
-title Strawberry Detection Sequence
+title StrawberryBot - Detection Sequence (corrected)
 autonumber
 skinparam responseMessageBelowArrow true
 skinparam sequenceMessageAlign center
 
 actor Operator
-participant "Main.run_webcam()" as Main
-participant "Capture" as Capture
-participant "Inference worker" as IW
-participant "FusionEngine" as FE
-participant "DetectionWorker" as DW
+participant "Main thread" as MAIN
+participant "Camera thread\n(Capture)" as CAP
+participant "Inference worker\n(FusionEngine)" as IW
+participant "Detection worker\n(DetectionWorker)" as DW
 participant "AIDetector" as AI
 participant "CVDectector" as CV
+participant "CVConfig\n(singleton)" as CVCFG
 participant "RobotController" as RC
-participant "web_server" as WS
-participant "OpenCV GUI" as GUI
+participant "Servo writer threads" as SERVO
+participant "Flask thread\n(web_server)" as FLASK
 
-Operator -> Main: start application
-Main -> WS: start()
-Main -> Capture: initialize camera source
-Main -> IW: start background thread
+Operator -> MAIN: launch application
+MAIN -> FLASK: start() [daemon thread]
+MAIN -> MAIN: start Manual UDP listener [daemon thread]
+MAIN -> CAP: init (probe camera sources)
+MAIN -> IW: start [daemon thread]
 
-loop each incoming camera frame
-	Capture -> Capture: grab()/retrieve()
-	Capture --> Main: latest frame available
-	Main -> IW: post frame to worker state
-	IW -> FE: process_frame(frame)
+IW -> DW: DetectionWorker.__init__()\n[starts detection daemon thread]
 
-	FE -> FE: resize frame
-	FE -> DW: push_frame(frame, small)
-
-	alt detection cycle
-		FE -> DW: read_frame() + read_zoom()
-		DW -> AI: detect(small frame)
-		activate AI
-		AI --> DW: AI detections
-		deactivate AI
-
-		DW -> CV: detect(small frame)
-		activate CV
-		CV -> CV: build red mask
-		CV -> CV: contour filtering
-		CV -> CV: watershed split + scoring + NMS
-		CV --> DW: CV detections + mask
-		deactivate CV
-
-		DW --> FE: ai_dets, cv_dets, mask
-
-		FE -> FE: match AI/CV detections
-		alt matched AI/CV pair
-			FE -> FE: fuse confidences
-		else unmatched detection
-			FE -> FE: accept, reject, or request zoom
-			opt zoom recheck requested
-				FE -> DW: push_zoom(frame, box, source)
-				DW -> AI: detect(zoomed ROI)
-				AI --> DW: zoomed AI result
-				DW -> CV: detect(zoomed ROI)
-				CV --> DW: zoomed CV result
-				DW --> FE: zoomed detection
-			end
-		end
-
-		FE -> FE: update tracking
-		FE -> FE: classify confirmed vs possible hits
-		FE -> RC: choose_target()/drive_hardware()
-		FE --> IW: annotated frame + debug + mask
-	else skipped detection frame
-		FE --> IW: last annotated frame
-	end
-
-	IW --> Main: result ready
-	Main -> WS: push_frame(display)
-	alt GUI available
-		Main -> GUI: imshow("Strawberry Detection")
-	else headless environment
-		Main -> Main: continue without GUI
-	end
+loop camera frames (Camera thread)
+  CAP -> CAP: grab() / retrieve()
+  note right: reconnects automatically\nafter 15 consecutive failures
 end
 
-@enduml
+loop main loop
+  MAIN -> CAP: read() [lock]
+  CAP --> MAIN: latest frame (or None)
 
+  alt MANUAL mode (control_mode.is_manual())
+    MAIN -> MAIN: resize + draw badges
+    MAIN -> FLASK: push_frame(display)
+    MAIN -> MAIN: cv2.imshow()
+  else AUTONOMOUS mode
+    MAIN -> IW: post frame to worker state [lock]
+
+    IW -> IW: read frame from state [lock]
+    IW -> DW: push_frame(frame, small)\n[Queue maxsize=1, drops old]
+
+    note over DW: Detection runs in its own\nthread continuously
+    DW -> AI: detect(small)
+    AI --> DW: List[Detection]
+    DW -> CV: detect(small)
+    CV -> CVCFG: get_cv_config() [lock - snapshot]
+    CVCFG --> CV: CVConfig copy
+    CV -> CV: build_red_mask()\ncontour filter\nwatershed split\nNMS
+    CV --> DW: List[Detection], mask
+    DW -> DW: scale detections by 1/INFER_SCALE\nwrite ai_dets, cv_dets, mask [lock]
+
+    IW -> DW: read_frame() [lock]
+    DW --> IW: ai_dets, cv_dets, mask
+    IW -> DW: read_zoom() [lock - consume pending zoom results]
+    DW --> IW: zoom_dets
+
+    IW -> IW: split AI -> targetable vs display-only\n(rotten/leaf = display only)
+    IW -> IW: match_detections(ai_targetable, cv_dets)\n[IoU + containment]
+
+    alt matched AI + CV pair
+      IW -> IW: fuse confidences\n(YOLO_FUSION_WEIGHT * ai + CV_FUSION_WEIGHT * cv)
+    else unmatched AI (low confidence)
+      IW -> DW: push_zoom(frame, box, "ai") [Queue maxsize=4]
+    else unmatched AI (high confidence)
+      IW -> IW: accept directly as "ai_high"
+    else unmatched CV
+      alt CV conf >= CV_DIRECT_ACCEPT_THRESHOLD
+        IW -> IW: accept CV detection directly
+      else
+        IW -> DW: push_zoom(frame, box, "cv")
+      end
+    end
+
+    note over DW: Zoom recheck (async):
+    DW -> DW: crop + upscale ROI
+    DW -> AI: detect(zoomed ROI)
+    DW -> CV: detect(zoomed ROI)
+    DW -> DW: fuse best zoom result\nwrite to zoom_results [lock]
+
+    IW -> IW: update_tracking(fused_dets)\n[IoU + containment match; miss() unmatched]
+    IW -> IW: classify_hits(tracked)\n-> confirmed + possible lists
+
+    IW -> RC: choose_target(confirmed+possible, gx, gy)
+    RC --> IW: RobotTarget (with ghost-lock hysteresis)
+    IW -> RC: drive_hardware(gripper_x, gripper_y)
+    RC -> SERVO: turntable.update(dx)\nlift.update(dy)
+    opt containment frames >= threshold AND ready_to_grab()
+      RC -> SERVO: gripper.grip()
+    end
+
+    IW -> IW: draw_annotations(frame, ai_dets, cv_dets,\nconfirmed, possible, gripper_bbox, ...)
+    IW -> MAIN: annotated frame + debug + mask [lock]
+
+    MAIN -> FLASK: push_frame(display)
+    MAIN -> MAIN: cv2.imshow() if not headless
+  end
+end
+
+Operator -> FLASK: POST /api/cv_config (HSV params)
+FLASK -> CVCFG: set_cv_config(new_cfg) [lock]
+note right: Takes effect on next\ndetection frame immediately
+
+Operator -> FLASK: POST /api/ai_enabled {"enabled": false}
+FLASK -> IW: set_ai_enabled(False)
+note right: AI branch skipped;\nCV-only mode
+
+@enduml

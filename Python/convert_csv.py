@@ -14,7 +14,8 @@ os.makedirs(LABELS_DIR, exist_ok=True)
 df = pd.read_csv(CSV_FILE)
 
 CLASS_MAP = {
-    "Strawberry": 0
+    "strawberry": 0,
+    "rotten": 1
 }
 
 for image_name, group in df.groupby("image_name"):

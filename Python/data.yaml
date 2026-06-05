@@ -2,8 +2,7 @@ path: dataset_aug
 train: images/train
 val:   images/val
 
-nc: 1
+nc: 2
 names:
-  0: Strawberry
+  0: strawberry
   1: rotten
-  2: leaf

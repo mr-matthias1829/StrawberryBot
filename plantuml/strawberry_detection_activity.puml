@@ -1,52 +1,120 @@
 @startuml
-title Strawberry Detection - Activity Diagram
+title StrawberryBot - Activity Diagram (corrected)
 start
 
 :Launch app;
-:Start web server;
-:Find camera source;
-:Start capture thread;
-:Start inference worker;
+:Init hardware (Pi only: motor, turntable, lift, gripper);
+:Start Flask web server (daemon thread);
+:Start Manual UDP listener (daemon thread);
+:Probe camera sources (Ethernet RTSP -> USB RTSP -> Laptop webcam);
+:Start Capture thread (auto-reconnect on stream drop);
+:Start inference-worker thread (FusionEngine);
+:DetectionWorker starts detection daemon thread;
 
 repeat
-  :Read latest frame;
-  if (Frame available?) then (yes)
-    :Post frame to worker;
-    :FusionEngine.process_frame();
-    :Resize frame for inference;
-    :Push frame into DetectionWorker;
 
-    if (Detection frame?) then (yes)
-      :Read AI detections;
-      :Read CV detections and mask;
-      :Match AI and CV boxes;
-      if (Matched detections exist?) then (yes)
-        :Fuse confidence scores;
-      else (no)
-        :Handle unmatched detections;
-        if (Needs zoom recheck?) then (yes)
-          :Push zoom job;
-          :Re-run AI/CV on ROI;
-          :Use zoom result if accepted;
+  :Read latest frame from Capture [lock];
+
+  if (Frame available?) then (no)
+    :sleep 30ms;
+  else (yes)
+
+    if (control_mode.is_manual()?) then (yes)
+      :Resize frame to display size;
+      :Draw camera badge + MANUAL badge;
+      :push_frame() to web server;
+      if (GUI available?) then (yes)
+        :cv2.imshow();
+      endif
+      :sleep 30ms;
+
+    else (no - AUTONOMOUS)
+
+      :Post frame to inference worker state [lock];
+      :Read latest result from inference worker [lock];
+
+      if (Result ready?) then (yes)
+
+        note right
+          DetectionWorker runs continuously
+          in background - results are async.
+        end note
+
+        ' Detection worker (background)
+        fork
+          :AI detect (small frame);
+          note right: Skipped if ai_enabled=False
+        fork again
+          :CV detect (small frame):\n  build HSV red mask (CVConfig)\n  morphology open/close\n  find contours\n  circularity + aspect-ratio filter\n  watershed split for clusters\n  score crops (redness, circ, size, texture)\n  NMS deduplication;
+        end fork
+
+        :Scale detections -> full frame coords;
+        :Split AI: targetable (Strawberry) vs display-only (rotten, leaf);
+        :Match AI-targetable <-> CV (IoU + containment);
+
+        if (Matched pair?) then (yes)
+          :Fuse confidence scores\n(YOLO_FUSION_WEIGHT x AI + CV_FUSION_WEIGHT x CV);
         else (no)
-          :Use direct accept / reject logic;
+          if (Unmatched AI - high confidence?) then (yes)
+            :Accept directly as "ai_high";
+          else if (Unmatched AI - low confidence?) then (yes)
+            :Queue zoom recheck;
+            :Zoom ROI x ZOOM_SCALE_FACTOR;
+            :Re-run AI + CV on zoom;
+            :Accept best zoom result if >= thresholds;
+          else if (Unmatched CV - above direct-accept?) then (yes)
+            :Accept CV directly;
+          else (unmatched CV - low confidence)
+            :Queue zoom recheck;
+            :Zoom ROI x ZOOM_SCALE_FACTOR;
+            :Re-run AI + CV on zoom;
+            :Accept best zoom result if >= thresholds;
+          endif
         endif
+
+        :Add any resolved zoom detections;
+        :update_tracking(fused_dets)\n[IoU+containment match; increment seen / miss; cleanup stale];
+        :classify_hits(tracked)\n-> confirmed (seen >= PERSISTENCE_REQUIRED)\n-> possible (partially seen, above min conf);
+
+        :choose_target(confirmed+possible, gripper_x, gripper_y)\n[combined dist+depth score; ghost-lock hysteresis];
+
+        if (Target exists?) then (yes)
+          :generate_dx(), generate_dy();
+          :turntable.update(dx) -> servo writer thread;
+          :lift.update(dy) -> servo writer thread;
+          :update_gripper_containment();
+          if (containment frames >= threshold\nAND ready_to_grab()?) then (yes)
+            :gripper.grip() -> servo writer thread;
+          endif
+        else (no)
+          :turntable.stop(), lift.stop();
+        endif
+
+        :draw_annotations()\n[AI boxes by class colour, CV boxes,\nconfirmed / possible overlays,\ngripper bbox + state colour, legend, HUD];
+        :push_frame(annotated) to web server;
+        if (GUI available?) then (yes)
+          :cv2.imshow("Strawberry Detection");
+          :cv2.imshow("CV Mask") if show_mask;
+          :waitKey(1) - handle q/d/m keys;
+        endif
+
+      else (no result yet)
+        :continue (skip frame);
       endif
 
-      :Update tracking;
-      :Classify confirmed / possible hits;
-      :Select target;
-      :Generate robot movement;
-      :Drive hardware;
-      :Annotate frame;
-      :Push frame to web server / GUI;
-    else (no)
-      :Reuse last annotated frame;
     endif
-  else (no)
-    :Wait briefly;
+
   endif
+
 repeat while (running?) is (yes)
+->no;
+
+:state.stop = True;
+:control_mode.stop() -> Manual_controller.stop();
+:worker.join(2s);
+:capture_wrapper.release();
+:cv2.destroyAllWindows();
+:Hardware shutdown (Pi: gripper, lift, turntable, motor);
 
 stop
 @enduml
