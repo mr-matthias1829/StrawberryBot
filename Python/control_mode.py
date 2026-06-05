@@ -59,14 +59,14 @@ def start() -> None:
     """Start het systeem: zet modus op autonomous en start manual_controller."""
     _set_mode("autonomous")
 
-    import Manual_controller
+    import manual_controller
     Manual_controller.start()
     print("[control_mode] Started. Waiting on controller...")
 
 
 def stop() -> None:
     """Stop alles en zet modus terug op autonomous."""
-    import Manual_controller
+    import manual_controller
     Manual_controller.stop()
 
     _set_mode("autonomous")
