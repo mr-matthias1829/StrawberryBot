@@ -180,11 +180,11 @@ class RobotController:
     @staticmethod
     def depth_label(depth_score: float) -> str:
         """Human-readable depth bucket for logging."""
-        if depth_score >= 0.80:
+        if depth_score >= 0.30:
             return "CLOSE"
-        if depth_score >= 0.50:
+        if depth_score >= 0.05:
             return "MEDIUM"
-        if depth_score >= 0.25:
+        if depth_score >= 0.03:
             return "FAR"
         if depth_score > 0.0:
             return "VERY FAR"

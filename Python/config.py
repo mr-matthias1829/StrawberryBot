@@ -61,7 +61,7 @@ CV_WEIGHT_TEXTURE     = 0.05
 CV_WEIGHT_TEMPORAL    = 0.05    # Placeholder — not used in single-frame scoring
 
 # Size scoring reference values (px² in the inference frame)
-BERRY_SIZE_IDEAL = 225_000         # px² — ideal berry area
+BERRY_SIZE_IDEAL = 15_000         # px² — ideal berry area
 BERRY_SIZE_MIN   = 200            # px² — below this, size score decays toward 0
 BERRY_SIZE_MAX   = 500_000        # px² — above this, size score decays toward 0
 
