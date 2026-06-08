@@ -15,7 +15,7 @@ df = pd.read_csv(CSV_FILE)
 
 CLASS_MAP = {
     "strawberry": 0,
-    "rotten": 1
+    "bad strawberry": 1
 }
 
 for image_name, group in df.groupby("image_name"):

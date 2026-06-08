@@ -2,12 +2,12 @@ from ultralytics import YOLO
 import torch
 print(torch.cuda.is_available()) # false = we are using cpu, which is MUCH slower
 
-#model = YOLO("yolov8n.pt")   # tiny starter model
-model = YOLO(r"../runs/detect/ultrav3/weights/best.pt")
+model = YOLO("yolov8n.pt")   # tiny starter model
+#model = YOLO(r"../runs/detect/ultrav3/weights/best.pt")
 
 model.train(
     data="data.yaml",
-    epochs=75, # around this point the model seems to hit the peak, more epochs doesn't improve it by much more
+    epochs=60, # around this point the model seems to hit the peak, more epochs doesn't improve it by much more
     imgsz=960,
     batch=16,
     cache="ram",   # loads entire dataset into RAM once, no disk reads after epoch 1

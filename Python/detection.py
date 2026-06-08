@@ -14,9 +14,8 @@ import config
 # Class definitions — must match dataset_aug yaml order
 # ---------------------------------------------------------------------------
 CLASS_NAMES = {
-    0: "Strawberry",
-    1: "rotten",
-    2: "leaf",
+    0: "strawberry",
+    1: "bad strawberry",
 }
 
 # Unique box colours per class (BGR)
