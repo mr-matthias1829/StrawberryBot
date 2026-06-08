@@ -22,25 +22,19 @@ ON_PI = platform.system() == "Linux"
 # Hardware init — must happen before any submodule that touches motor/servos
 # =============================================================================
 if ON_PI:
-    import motor
-    motor.init()
-
-    import turntable
-    turntable.init()
-
-    import lift
-    lift.init()
-
-    import arm
-    arm.init()
-
-    import pivot
-    pivot.init()
-
-    import gripper
-    gripper.init()
+    if __package__:
+        from .motors import lift, gripper, pivot, turntable, motor, arm
+    else:
+        from motors import lift, gripper, pivot, turntable, motor, arm
 
     import manual_controller
+
+    motor.init()
+    turntable.init()
+    lift.init()
+    arm.init()
+    pivot.init()
+    gripper.init()
     manual_controller.start()
 
 # =============================================================================

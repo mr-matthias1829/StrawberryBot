@@ -27,25 +27,25 @@ import config
 # =============================================================================
 
 try:
-    import turntable as _turntable
+    from .motors import turntable as _turntable
     _HAS_TURNTABLE = True
 except ImportError:
     _HAS_TURNTABLE = False
 
 try:
-    import lift as _lift
+    from .motors import lift as _lift
     _HAS_LIFT = True
 except ImportError:
     _HAS_LIFT = False
 
 try:
-    import arm as _arm
+    from .motors import arm as _arm
     _HAS_ARM = True
 except ImportError:
     _HAS_ARM = False
 
 try:
-    import gripper as _gripper
+    from .motors import gripper as _gripper
     _HAS_GRIPPER = True
 except ImportError:
     _HAS_GRIPPER = False

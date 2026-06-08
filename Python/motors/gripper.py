@@ -37,7 +37,10 @@ Put gripper in open position, then:
 import threading
 import time
 
-import motor
+try:
+    from . import motor
+except ImportError:
+    import motor
 
 # =============================================================================
 # TUNING
@@ -72,7 +75,7 @@ _sensor_mgr = None
 def _init_sensor() -> None:
     global _sensor_mgr
     try:
-        from corner_sensors import CornerSensorManager
+        from ..corner_sensors import CornerSensorManager
         mgr = CornerSensorManager(bus_num=1)
         if mgr.channel_has_sensor(SENSOR_CHANNEL):
             _sensor_mgr = mgr

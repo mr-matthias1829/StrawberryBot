@@ -1,54 +1,56 @@
 """
-turntable.py
-============
-Controls the turntable servo (AX-12A, ID 13) in wheel / continuous-rotation
-mode so the robot can pan left or right to track a strawberry on the X-axis.
+pivot.py
+========
+Controls the gripper-pivot servo (AX-12A, ID 2) in wheel /
+continuous-rotation mode so the gripper mount can rotate up or down.
 
 Architecture
 ------------
 - Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then turntable.init() once at startup.
-- update(dx) is the only call needed per frame from RobotController.
-- All serial writes run on a background thread so they never block the
-  vision/inference pipeline.
+- Call motor.init() then pivot.init() once at startup.
+- update(dp) is the per-frame entry point for autonomous use.
+- rotate_up() / rotate_down() / stop() are used by manual_controller.
+- All serial writes run on a background thread so they never block
+  the vision/inference pipeline.
 
-Corner sensor (AS5600 via TCA9548A, TCA channel: see SENSOR_CHANNEL)
----------------------------------------------------------------------
-The CornerSensorManager is imported and instantiated at init() time.
-Reads are currently STUBBED — the sensor is present in the object but its
-output is not yet wired into any control logic.
+Coordinate convention (for autonomous use)
+-------------------------------------------
+    dp > 0  → pivot DOWN  (gripper nose tilts down)
+    dp < 0  → pivot UP    (gripper nose tilts up)
+    |dp| ≤ DEAD_ZONE  → aligned, stop
+
+AX-12A wheel-mode  (MOVING_SPEED reg 32)
+-----------------------------------------
+    Bits 0-9  → speed magnitude  (0 = stop)
+    Bit  10   → 0 = CCW (up)  /  1 = CW (down)
 
 TODO (hardware bring-up):
-  1. Set SENSOR_CHANNEL to the correct TCA multiplexer channel.
-  2. Decide what "zero" means for the turntable (call sensor.reset_laps()).
-  3. Use sensor.read_sensor(SENSOR_CHANNEL) in update() or a separate
-     feedback loop to implement position limits / closed-loop control.
+  Verify which spin direction corresponds to up/down on the physical pivot
+  and swap _DIR_CCW / _DIR_CW if needed.
 
-AX-12A wheel-mode register layout  (MOVING_SPEED reg 32)
----------------------------------------------------------
-    Bits 0-9  → speed magnitude  (0 = stop)
-    Bit  10   → 0 = CCW (LEFT)  /  1 = CW (RIGHT)
+Corner sensor (AS5600 via TCA9548A)
+------------------------------------
+SENSOR_CHANNEL is reserved but reads are currently STUBBED.
 
-Wheel mode is activated by setting both angle-limit registers to 0.
-
-Coordinate convention (matches robot_controller.py)
-----------------------------------------------------
-    dx > 0  → target is RIGHT of gripper → spin RIGHT (CW)
-    dx < 0  → target is LEFT  of gripper → spin LEFT  (CCW)
-    |dx| ≤ DEAD_ZONE  → aligned, stop
+TODO:
+  1. Set SENSOR_CHANNEL to the correct TCA channel.
+  2. Define soft travel limits (MIN_DEG, MAX_DEG) to avoid over-rotation.
+  3. Use _read_sensor() in update() to enforce those limits.
 """
 
 import threading
 import time
 
-import motor
-
+try:
+    from . import motor
+except ImportError:
+    import motor
 # =============================================================================
 # TUNING
 # =============================================================================
 
-SERVO_ID  = 13
-DEAD_ZONE = 25          # px — mirrors X_THRESHOLD in robot_controller.py
+SERVO_ID  = 2
+DEAD_ZONE = 25
 
 SPEED_SLOW   = 150
 SPEED_MEDIUM = 300
@@ -57,9 +59,7 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-# TCA9548A channel wired to the turntable AS5600 encoder.
-# TODO: set to the correct channel once hardware is confirmed.
-SENSOR_CHANNEL = 0
+SENSOR_CHANNEL = 5   # TODO: set to correct TCA channel
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -67,8 +67,8 @@ _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
 _REG_SPEED     = 32
 
-_DIR_CCW = 0
-_DIR_CW  = 1 << 10
+_DIR_CCW = 0          # up
+_DIR_CW  = 1 << 10    # down
 
 # =============================================================================
 # CORNER SENSOR  (optional — gracefully absent on non-Pi or pre-wiring)
@@ -76,33 +76,33 @@ _DIR_CW  = 1 << 10
 
 _sensor_mgr = None
 
+
 def _init_sensor() -> None:
     global _sensor_mgr
     try:
-        from corner_sensors import CornerSensorManager
+        from ..corner_sensors import CornerSensorManager
         mgr = CornerSensorManager(bus_num=1)
         if mgr.channel_has_sensor(SENSOR_CHANNEL):
             _sensor_mgr = mgr
-            print(f"[turntable] Corner sensor ready on TCA ch {SENSOR_CHANNEL}.")
+            print(f"[pivot] Corner sensor ready on TCA ch {SENSOR_CHANNEL}.")
         else:
-            print(f"[turntable] ⚠️  No AS5600 found on TCA ch {SENSOR_CHANNEL} — running open-loop.")
+            print(f"[pivot] ⚠️  No AS5600 found on TCA ch {SENSOR_CHANNEL} — running open-loop.")
     except Exception as e:
-        print(f"[turntable] Corner sensor unavailable ({e}) — running open-loop.")
+        print(f"[pivot] Corner sensor unavailable ({e}) — running open-loop.")
 
 
 def _read_sensor() -> dict | None:
     """
-    Return the latest sensor reading dict, or None if unavailable.
-
+    Return the latest pivot encoder reading, or None if unavailable.
     Dict keys: channel, raw, deg, laps
-    TODO: use this in update() for closed-loop / limit enforcement.
+    TODO: use in update() to enforce soft travel limits.
     """
     if _sensor_mgr is None:
         return None
     try:
         return _sensor_mgr.read_sensor(SENSOR_CHANNEL)
     except Exception as e:
-        print(f"[turntable] Sensor read error: {e}")
+        print(f"[pivot] Sensor read error: {e}")
         return None
 
 # =============================================================================
@@ -135,7 +135,7 @@ def _writer() -> None:
             motor._write_word(SERVO_ID, _REG_SPEED, word)
             _last_word = word
         except Exception as e:
-            print(f"[turntable] Serial error: {e}")
+            print(f"[pivot] Serial error: {e}")
 
 # =============================================================================
 # LIFECYCLE
@@ -156,13 +156,13 @@ def init() -> None:
     motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1); time.sleep(0.05)
     motor._write_word(SERVO_ID, _REG_SPEED,     0)
 
-    _thread = threading.Thread(target=_writer, daemon=True, name="turntable-writer")
+    _thread = threading.Thread(target=_writer, daemon=True, name="pivot-writer")
     _thread.start()
 
     _init_sensor()
 
     _initialized = True
-    print(f"✅ Turntable initialised (ID {SERVO_ID}, wheel mode).")
+    print(f"✅ Pivot initialised (ID {SERVO_ID}, wheel mode).")
 
 
 def shutdown() -> None:
@@ -184,7 +184,7 @@ def shutdown() -> None:
         pass
 
     _initialized = False
-    print("🛑 Turntable shut down.")
+    print("🛑 Pivot shut down.")
 
 # =============================================================================
 # INTERNAL HELPERS
@@ -197,12 +197,12 @@ def _post_word(word: int) -> None:
     _event.set()
 
 
-def _speed_from_dx(dx_abs: int) -> int:
-    if dx_abs <= DEAD_ZONE:
+def _speed_from_dp(dp_abs: int) -> int:
+    if dp_abs <= DEAD_ZONE:
         return 0
-    if dx_abs <= THRESHOLD_SLOW:
+    if dp_abs <= THRESHOLD_SLOW:
         return SPEED_SLOW
-    if dx_abs <= THRESHOLD_MEDIUM:
+    if dp_abs <= THRESHOLD_MEDIUM:
         return SPEED_MEDIUM
     return SPEED_FAST
 
@@ -215,43 +215,42 @@ def stop() -> None:
     _post_word(0)
 
 
-def spin_left(speed: int = SPEED_MEDIUM) -> dict:
-    """Spin CCW — gripper moves LEFT.  Non-blocking."""
+def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
+    """Rotate pivot up — CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
-    return {"direction": "left", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
+    return {"direction": "up", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
-def spin_right(speed: int = SPEED_MEDIUM) -> dict:
-    """Spin CW — gripper moves RIGHT.  Non-blocking."""
+def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
+    """Rotate pivot down — CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
-    return {"direction": "right", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
+    return {"direction": "down", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
-def update(dx: int) -> str:
+def update(dp: int) -> str:
     """
-    Main per-frame entry point.  Posts the appropriate speed word and returns
-    a log string.  Never blocks.
+    Per-frame entry point for autonomous control.  Posts the appropriate
+    speed word and returns a log string.  Never blocks.
 
     Args:
-        dx: target_x - gripper_x  (from RobotController.generate_dx)
+        dp: pivot error — positive = tilt down, negative = tilt up.
 
-    TODO: call _read_sensor() here to enforce soft travel limits once the
-    encoder zero-point and degree budget have been defined.
+    TODO: call _read_sensor() here to enforce soft travel limits.
     """
     if not _initialized:
-        return f"TURNTABLE SIMULATED (dx={dx:+d})"
+        return f"PIVOT SIMULATED (dp={dp:+d})"
 
-    speed = _speed_from_dx(abs(dx))
+    speed = _speed_from_dp(abs(dp))
 
-    if dx > DEAD_ZONE:
-        spin_right(speed)
-        return f"TURNTABLE RIGHT (dx={dx:+d}, speed={speed})"
+    if dp > DEAD_ZONE:
+        rotate_down(speed)
+        return f"PIVOT DOWN (dp={dp:+d}, speed={speed})"
 
-    if dx < -DEAD_ZONE:
-        spin_left(speed)
-        return f"TURNTABLE LEFT  (dx={dx:+d}, speed={speed})"
+    if dp < -DEAD_ZONE:
+        rotate_up(speed)
+        return f"PIVOT UP   (dp={dp:+d}, speed={speed})"
 
     stop()
-    return f"TURNTABLE STOP  (dx={dx:+d}, aligned)"
+    return f"PIVOT STOP (dp={dp:+d}, aligned)"

@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 import config
-from detection import AIDetector, CVDectector, Detection, CLASS_COLORS, CLASS_NAMES, iou
+from detection import AIDetector, CVDectector, Detection, CLASS_COLORS, iou
 from robot_controller import RobotController
 
 
@@ -729,7 +729,7 @@ class FusionEngine:
         # ------------------------------------------------------------------
         gripping = False
         try:
-            import gripper as _gripper
+            from Python.motors import gripper as _gripper
             state    = _gripper.get_state().lower()
             gripping = "grip" in state
         except Exception:
