@@ -6,6 +6,12 @@ Selects the best strawberry target and produces movement commands.
 Also dispatches hardware commands to the servo submodules.
 
 Hardware calls are fire-and-forget.
+
+Arm logic (autonomous mode)
+----------------------------
+The arm extends forward whenever the current target is **fully contained**
+inside the gripper bounding box, regardless of apparent size / depth.
+Once the target leaves the gripper area the arm stops.
 """
 
 import math
@@ -33,6 +39,12 @@ except ImportError:
     _HAS_LIFT = False
 
 try:
+    import arm as _arm
+    _HAS_ARM = True
+except ImportError:
+    _HAS_ARM = False
+
+try:
     import gripper as _gripper
     _HAS_GRIPPER = True
 except ImportError:
@@ -49,41 +61,22 @@ Y_THRESHOLD = 25
 PRIORITIZE_Y = True
 
 # ── Lock hysteresis ────────────────────────────────────────────────────────────
-# A new candidate must beat the current target by this many pixels (baseline).
-# The effective threshold is multiplied by the current target's depth_score,
-# so a close/confident target is harder to steal than a distant/uncertain one.
-LOCK_HYSTERESIS_BASE  = 40    # pixels — baseline steal threshold
-LOCK_HYSTERESIS_DEPTH = 30    # extra pixels added at full depth_score (1.0)
-#   effective = LOCK_HYSTERESIS_BASE + LOCK_HYSTERESIS_DEPTH * current_depth_score
+LOCK_HYSTERESIS_BASE  = 40
+LOCK_HYSTERESIS_DEPTH = 30
 
 # ── Ghost-lock grace period ────────────────────────────────────────────────────
-# If the locked target is not found in the current frame, hold the lock for up
-# to this many consecutive misses before releasing.  Prevents thrashing on
-# single-frame detection gaps.
 LOCK_GHOST_FRAMES = 2
 
 # ── Candidate scoring weights ──────────────────────────────────────────────────
-# Initial target selection (and lock-steal evaluation) ranks candidates by a
-# combined score rather than raw pixel distance alone.
-#   score = distance_norm * WEIGHT_DIST + (1 - depth_score) * WEIGHT_DEPTH
-# Both terms are "lower is better", so the candidate with the lowest score wins.
-WEIGHT_DIST  = 0.5   # how much pixel distance matters
-WEIGHT_DEPTH = 0.5   # how much depth (proximity) matters
+WEIGHT_DIST  = 0.5
+WEIGHT_DEPTH = 0.5
 
 # ── Depth units ───────────────────────────────────────────────────────────────
-# depth_units is a relative distance value where 1.0 means the berry appears at
-# exactly the ideal (picking) size.  Values > 1.0 mean farther away; < 1.0 mean
-# closer than ideal.
-#
-# Formula:  depth_units = sqrt(BERRY_SIZE_IDEAL / apparent_area)
-#
-# Clipped to [DEPTH_UNITS_MIN, DEPTH_UNITS_MAX] so extreme noise doesn't
-# produce absurd values.
 DEPTH_UNITS_MIN = 0.2
 DEPTH_UNITS_MAX = 1000
 
 # ── Depth estimation ──────────────────────────────────────────────────────────
-DEPTH_CONF_WEIGHT = 0.35   # how much detection confidence softens the score (0 = ignore)
+DEPTH_CONF_WEIGHT = 0.35
 
 HW_LOG_EVERY = 5
 
@@ -98,8 +91,8 @@ class RobotTarget:
     center_x:    int
     center_y:    int
     distance:    float
-    depth_score: float = 0.0   # 0–1, 1 = at ideal picking distance
-    depth_units: float = 1.0   # relative distance, 1.0 = ideal picking distance
+    depth_score: float = 0.0
+    depth_units: float = 1.0
 
 
 # =============================================================================
@@ -111,10 +104,13 @@ class RobotController:
 
     def __init__(self) -> None:
         self.current_target: Optional[RobotTarget] = None
-        self._ghost_frames: int = 0            # consecutive frames the target was not found
+        self._ghost_frames: int = 0
         self._hw_log_counter = 0
         self._gripper_containment_frames = 0
         self._last_target_id = None
+
+        # Track whether the arm is currently extending so we only log changes.
+        self._arm_extending: bool = False
 
     # =========================================================================
     # GEOMETRY
@@ -134,17 +130,6 @@ class RobotController:
 
     @staticmethod
     def estimate_depth(det: Detection) -> float:
-        """
-        Estimate relative depth from apparent bounding-box size.
-
-        Returns depth_score in [0.0, 1.0]:
-            1.0  →  berry is close (at or above ideal size)
-            0.0  →  berry is far away (much smaller than ideal)
-
-        Asymmetric curve:
-            - Smaller than ideal → score drops toward 0 (far)
-            - Larger than ideal  → score stays near 1.0 (very close)
-        """
         area  = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
         ideal = max(1, config.BERRY_SIZE_IDEAL)
         ratio = area / ideal
@@ -160,18 +145,6 @@ class RobotController:
 
     @staticmethod
     def estimate_depth_units(det: Detection) -> float:
-        """
-        Return a relative distance value where 1.0 = berry at ideal picking size.
-
-        depth_units = sqrt(BERRY_SIZE_IDEAL / apparent_area)
-
-        Properties
-        ----------
-        - Physically linear with real distance (area ∝ 1/d², so sqrt inverts it).
-        - 20→60 unit real-world range gives a 3× swing.
-        - Clipped to [DEPTH_UNITS_MIN, DEPTH_UNITS_MAX] to suppress noise.
-        - Values are always positive; lower = closer.
-        """
         area  = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
         ideal = max(1, config.BERRY_SIZE_IDEAL)
         units = math.sqrt(ideal / area)
@@ -179,7 +152,6 @@ class RobotController:
 
     @staticmethod
     def depth_label(depth_score: float) -> str:
-        """Human-readable depth bucket for logging."""
         if depth_score >= 0.80:
             return "CLOSE"
         if depth_score >= 0.50:
@@ -194,18 +166,7 @@ class RobotController:
     # CANDIDATE SCORING
     # =========================================================================
 
-    def _candidate_score(
-        self,
-        dist: float,
-        depth_score: float,
-        max_dist: float,
-    ) -> float:
-        """
-        Combined score for candidate ranking — lower is better.
-
-        Normalises pixel distance to [0, 1] using the furthest candidate in
-        this frame as the reference, then blends with (1 - depth_score).
-        """
+    def _candidate_score(self, dist: float, depth_score: float, max_dist: float) -> float:
         dist_norm = dist / max(max_dist, 1.0)
         return dist_norm * WEIGHT_DIST + (1.0 - depth_score) * WEIGHT_DEPTH
 
@@ -226,13 +187,6 @@ class RobotController:
         return inter / union if union > 0 else 0.0
 
     def _target_still_exists(self, detections: List[Detection]) -> bool:
-        """
-        Try to match the current target against new detections.
-
-        Returns True (and updates the target in-place) if found.
-        If not found, increments the ghost-frame counter and returns True
-        while still within the grace period, so the lock is held temporarily.
-        """
         if self.current_target is None:
             return False
 
@@ -249,12 +203,10 @@ class RobotController:
                 self._ghost_frames = 0
                 return True
 
-        # Not found — apply ghost-lock grace period
         self._ghost_frames += 1
         if self._ghost_frames <= LOCK_GHOST_FRAMES:
-            return True   # hold the lock without updating position
+            return True
 
-        # Grace period expired — release
         self._ghost_frames = 0
         return False
 
@@ -270,7 +222,6 @@ class RobotController:
             self._ghost_frames  = 0
             return None
 
-        # Build candidates with full metrics
         candidates: List[RobotTarget] = []
         for det in detections:
             cx, cy = self.get_box_center(det)
@@ -279,33 +230,25 @@ class RobotController:
             units  = self.estimate_depth_units(det)
             candidates.append(RobotTarget(det, cx, cy, dist, depth, units))
 
-        # max_dist reference includes all candidates so normalisation is stable
         max_dist = max(c.distance for c in candidates)
 
-        # Find the best candidate by combined score
         best = min(
             candidates,
             key=lambda c: self._candidate_score(c.distance, c.depth_score, max_dist),
         )
 
-        # Update current target's metrics (or apply ghost-lock) before comparing
         target_alive = self._target_still_exists(detections)
 
         if target_alive:
-            # Re-score the (now freshly updated) current target on the same
-            # max_dist scale so the comparison is apples-to-apples.
             cur      = self.current_target
             cur_dist = self._distance_to(gripper_x, gripper_y, cur.center_x, cur.center_y)
             cur_score  = self._candidate_score(cur_dist, cur.depth_score, max_dist)
             best_score = self._candidate_score(best.distance, best.depth_score, max_dist)
 
-            # Hysteresis: expressed as a score-space margin so depth differences
-            # are properly accounted for.  Deeper/closer lock → larger margin.
-            # LOCK_HYSTERESIS_BASE / max_dist normalises pixels → score space.
             margin = (
                 (LOCK_HYSTERESIS_BASE + LOCK_HYSTERESIS_DEPTH * cur.depth_score)
                 / max(max_dist, 1.0)
-            ) * WEIGHT_DIST   # only the distance component is in comparable units
+            ) * WEIGHT_DIST
 
             if best_score < cur_score - margin:
                 self._ghost_frames  = 0
@@ -313,7 +256,6 @@ class RobotController:
 
             return self.current_target
 
-        # No existing target — take the best combined-score candidate
         self._ghost_frames  = 0
         self.current_target = best
         return self.current_target
@@ -323,10 +265,7 @@ class RobotController:
     # =========================================================================
 
     @staticmethod
-    def get_gripper_bbox(
-        gripper_x: int,
-        gripper_y: int,
-    ) -> Tuple[int, int, int, int]:
+    def get_gripper_bbox(gripper_x: int, gripper_y: int) -> Tuple[int, int, int, int]:
         half_w = config.GRIPPER_BB_WIDTH // 2
         half_h = config.GRIPPER_BB_HEIGHT // 2
         return (
@@ -352,8 +291,8 @@ class RobotController:
     def object_fill_ratio(self) -> float:
         if self.current_target is None:
             return 0.0
-        det         = self.current_target.detection
-        target_area = (det.x2 - det.x1) * (det.y2 - det.y1)
+        det          = self.current_target.detection
+        target_area  = (det.x2 - det.x1) * (det.y2 - det.y1)
         gripper_area = config.GRIPPER_BB_WIDTH * config.GRIPPER_BB_HEIGHT
         return target_area / max(1, gripper_area)
 
@@ -361,10 +300,10 @@ class RobotController:
         if self.current_target is None:
             return False
 
-        det      = self.current_target.detection
-        bbox     = self.get_gripper_bbox(gripper_x, gripper_y)
+        det       = self.current_target.detection
+        bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
         contained = self.is_detection_fully_contained(det, bbox)
-        ratio    = self.object_fill_ratio()
+        ratio     = self.object_fill_ratio()
 
         dx = self.generate_dx(gripper_x)
         dy = self.generate_dy(gripper_y)
@@ -426,7 +365,6 @@ class RobotController:
         return "TARGET LOCKED"
 
     def generate_depthstring(self) -> str:
-        """One-liner depth summary for the current target, ready to log."""
         if self.current_target is None:
             return "DEPTH: no target"
         t    = self.current_target
@@ -453,9 +391,52 @@ class RobotController:
             f"({self._gripper_containment_frames}/{required})"
         )
 
+    def generate_armstring(self, contained: bool) -> str:
+        """One-liner arm status for logging."""
+        if not _HAS_ARM:
+            return "ARM: SIMULATED"
+        status = "EXTENDING" if contained else "STOPPED"
+        return f"ARM: {status}"
+
     # =========================================================================
     # HARDWARE
     # =========================================================================
+
+    def _drive_arm(self, gripper_x: int, gripper_y: int) -> Tuple[bool, str]:
+        """
+        Drive the arm servo based purely on gripper containment.
+
+        The arm extends forward whenever the current target detection is
+        fully inside the gripper bounding box — regardless of apparent size
+        (depth).  It stops in all other cases.
+
+        Returns (contained: bool, log_string: str).
+        """
+        if self.current_target is None:
+            if _HAS_ARM:
+                _arm.stop()
+            self._arm_extending = False
+            return False, "ARM: no target"
+
+        bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
+        contained = self.is_detection_fully_contained(
+            self.current_target.detection, bbox
+        )
+
+        if contained:
+            if _HAS_ARM:
+                _arm.move_forward()
+            if not self._arm_extending:
+                print("[ARM] Target contained — extending arm forward")
+                self._arm_extending = True
+            return True, "ARM: EXTENDING (target contained)"
+        else:
+            if _HAS_ARM:
+                _arm.stop()
+            if self._arm_extending:
+                print("[ARM] Target left gripper area — arm stopped")
+                self._arm_extending = False
+            return False, "ARM: STOPPED"
 
     def drive_hardware(self, gripper_x: int, gripper_y: int) -> None:
         self._hw_log_counter += 1
@@ -466,21 +447,30 @@ class RobotController:
                 _turntable.stop()
             if _HAS_LIFT:
                 _lift.stop()
+            if _HAS_ARM:
+                _arm.stop()
+            self._arm_extending = False
             return
 
         dx = self.generate_dx(gripper_x)
         dy = self.generate_dy(gripper_y)
 
+        # ── Turntable (horizontal) ────────────────────────────────────────────
         if _HAS_TURNTABLE:
             tt_msg = _turntable.update(dx)
         else:
             tt_msg = f"TURNTABLE dx={dx}"
 
+        # ── Lift (vertical) ───────────────────────────────────────────────────
         if _HAS_LIFT:
             lift_msg = _lift.update(dy)
         else:
             lift_msg = f"LIFT dy={dy}"
 
+        # ── Arm (depth) — extend when target is fully in the gripper bbox ─────
+        contained, arm_msg = self._drive_arm(gripper_x, gripper_y)
+
+        # ── Gripper ───────────────────────────────────────────────────────────
         if _HAS_GRIPPER:
             self.update_gripper_containment(gripper_x, gripper_y)
             gripper_msg = self.generate_gripperstring()
@@ -507,5 +497,6 @@ class RobotController:
                 f"[HW] "
                 f"{tt_msg} | "
                 f"{lift_msg} | "
+                f"{arm_msg} | "
                 f"{gripper_msg}"
             )

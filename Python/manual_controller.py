@@ -168,7 +168,7 @@ def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
 
     # --- Gripper toggle (knop, stijgende flank) ---
     if _HAS_GRIPPER:
-        if grip and not _grip_btn_prev:
+        if grip != _grip_btn_prev:
             _gripper_open = not _gripper_open
             if _gripper_open:
                 _gripper.open_gripper()
