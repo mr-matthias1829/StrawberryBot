@@ -788,7 +788,7 @@ class FusionEngine:
         # ------------------------------------------------------------------
         legend_items = [
             (CLASS_COLORS[0], "Strawberry (targetable)"),
-            (CLASS_COLORS[1], "Rotten (display only)"),
+            (CLASS_COLORS[1], "Bad (display only)"),
             (CLASS_COLORS[2], "Leaf (display only)"),
         ]
         lx, ly = 10, frame.shape[0] - 10 - len(legend_items) * 20
