@@ -10,7 +10,8 @@ df = pd.read_csv(csv_path)
 
 # class mapping
 class_map = {
-    "Strawberry": 0
+    "strawberry": 0,
+    "bad strawberry": 1
 }
 
 # group by image (important!)

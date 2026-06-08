@@ -61,46 +61,45 @@ _PRESETS = {
 # =============================================================================
 # FULL CONFIG — keys exposed to the web UI
 # =============================================================================
-# Each entry: (key, type, min, max, label, group)
-# group: "thresholds" | "fusion" | "tracking" | "shape" | "zoom"
+# Each entry: (key, type, min, max, label, group, default)
 
 _FULL_CONFIG_SCHEMA = [
     # ── Thresholds ──────────────────────────────────────────────────────────
-    ("YOLO_BASE_THRESHOLD",         float, 0.0,  1.0,  "YOLO base threshold",          "thresholds"),
-    ("CV_BASE_THRESHOLD",           float, 0.0,  1.0,  "CV base threshold",            "thresholds"),
-    ("CV_DIRECT_ACCEPT_THRESHOLD",  float, 0.0,  1.0,  "CV direct-accept threshold",   "thresholds"),
-    ("HIGH_AI_CONFIDENCE",          float, 0.0,  1.0,  "High AI confidence",           "thresholds"),
-    ("LOW_AI_CONFIDENCE",           float, 0.0,  1.0,  "Low AI confidence",            "thresholds"),
+    ("YOLO_BASE_THRESHOLD",         float, 0.0,  1.0,  "YOLO base threshold",          "thresholds", 0.5),
+    ("CV_BASE_THRESHOLD",           float, 0.0,  1.0,  "CV base threshold",            "thresholds", 0.4),
+    ("CV_DIRECT_ACCEPT_THRESHOLD",  float, 0.0,  1.0,  "CV direct-accept threshold",   "thresholds", 0.75),
+    ("HIGH_AI_CONFIDENCE",          float, 0.0,  1.0,  "High AI confidence",           "thresholds", 0.75),
+    ("LOW_AI_CONFIDENCE",           float, 0.0,  1.0,  "Low AI confidence",            "thresholds", 0.35),
     # ── Fusion weights ───────────────────────────────────────────────────────
-    ("YOLO_FUSION_WEIGHT",          float, 0.0,  1.0,  "YOLO fusion weight",           "fusion"),
-    ("CV_FUSION_WEIGHT",            float, 0.0,  1.0,  "CV fusion weight",             "fusion"),
+    ("YOLO_FUSION_WEIGHT",          float, 0.0,  1.0,  "YOLO fusion weight",           "fusion", 0.6),
+    ("CV_FUSION_WEIGHT",            float, 0.0,  1.0,  "CV fusion weight",             "fusion", 0.4),
     # ── CV scoring weights ───────────────────────────────────────────────────
-    ("CV_WEIGHT_REDNESS",           float, 0.0,  1.0,  "CV weight: redness",           "fusion"),
-    ("CV_WEIGHT_CIRCULARITY",       float, 0.0,  1.0,  "CV weight: circularity",       "fusion"),
-    ("CV_WEIGHT_SIZE",              float, 0.0,  1.0,  "CV weight: size",              "fusion"),
-    ("CV_WEIGHT_TEXTURE",           float, 0.0,  1.0,  "CV weight: texture",           "fusion"),
+    ("CV_WEIGHT_REDNESS",           float, 0.0,  1.0,  "CV weight: redness",           "fusion", 0.4),
+    ("CV_WEIGHT_CIRCULARITY",       float, 0.0,  1.0,  "CV weight: circularity",       "fusion", 0.3),
+    ("CV_WEIGHT_SIZE",              float, 0.0,  1.0,  "CV weight: size",              "fusion", 0.2),
+    ("CV_WEIGHT_TEXTURE",           float, 0.0,  1.0,  "CV weight: texture",           "fusion", 0.1),
     # ── Tracking / persistence ───────────────────────────────────────────────
-    ("PERSISTENCE_REQUIRED",        int,   1,    20,   "Frames to confirm (AI/fused)", "tracking"),
-    ("PERSISTENCE_REQUIRED_CV_ONLY",int,   1,    20,   "Frames to confirm (CV only)",  "tracking"),
-    ("PERSISTENCE_DECAY",           float, 0.0,  1.0,  "Confidence decay per miss",    "tracking"),
-    ("IOU_MATCH_THRESHOLD",         float, 0.0,  1.0,  "IoU match threshold",          "tracking"),
+    ("PERSISTENCE_REQUIRED",        int,   1,    20,   "Frames to confirm (AI/fused)", "tracking", 3),
+    ("PERSISTENCE_REQUIRED_CV_ONLY",int,   1,    20,   "Frames to confirm (CV only)",  "tracking", 5),
+    ("PERSISTENCE_DECAY",           float, 0.0,  1.0,  "Confidence decay per miss",    "tracking", 0.3),
+    ("IOU_MATCH_THRESHOLD",         float, 0.0,  1.0,  "IoU match threshold",          "tracking", 0.3),
     # ── Possible-hit lane ────────────────────────────────────────────────────
-    ("POSSIBLE_HIT_MIN_CONF",       float, 0.0,  1.0,  "Possible min conf (fused)",    "tracking"),
-    ("POSSIBLE_HIT_MIN_SEEN",       int,   1,    10,   "Possible min seen (fused)",    "tracking"),
-    ("POSSIBLE_CV_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (CV only)",  "tracking"),
-    ("POSSIBLE_CV_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (CV only)",  "tracking"),
-    ("POSSIBLE_AI_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (AI only)",  "tracking"),
-    ("POSSIBLE_AI_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (AI only)",  "tracking"),
-    ("POSSIBLE_AI_CONF_WEIGHT",     float, 0.0,  1.0,  "AI conf weight for possible",  "tracking"),
-    ("POSSIBLE_TARGET_MIN_CONF",    float, 0.0,  1.0,  "Possible target min conf",     "tracking"),
+    ("POSSIBLE_HIT_MIN_CONF",       float, 0.0,  1.0,  "Possible min conf (fused)",    "tracking", 0.25),
+    ("POSSIBLE_HIT_MIN_SEEN",       int,   1,    10,   "Possible min seen (fused)",    "tracking", 2),
+    ("POSSIBLE_CV_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (CV only)",  "tracking", 0.3),
+    ("POSSIBLE_CV_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (CV only)",  "tracking", 3),
+    ("POSSIBLE_AI_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (AI only)",  "tracking", 0.3),
+    ("POSSIBLE_AI_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (AI only)",  "tracking", 2),
+    ("POSSIBLE_AI_CONF_WEIGHT",     float, 0.0,  1.0,  "AI conf weight for possible",  "tracking", 0.6),
+    ("POSSIBLE_TARGET_MIN_CONF",    float, 0.0,  1.0,  "Possible target min conf",     "tracking", 0.4),
     # ── Shape / contour ──────────────────────────────────────────────────────
-    ("MIN_CONTOUR_AREA",            int,   10,   5000, "Min contour area (px²)",       "shape"),
-    ("CONVEXITY_MIN_AREA",          int,   100,  20000,"Watershed split min area",     "shape"),
+    ("MIN_CONTOUR_AREA",            int,   10,   5000, "Min contour area (px²)",       "shape", 300),
+    ("CONVEXITY_MIN_AREA",          int,   100,  20000,"Watershed split min area",     "shape", 2000),
     # ── Zoom recheck ─────────────────────────────────────────────────────────
-    ("MAX_RECHECKS",                int,   0,    10,   "Max zoom rechecks",            "zoom"),
-    ("ZOOM_SCALE_FACTOR",           float, 1.0,  4.0,  "Zoom scale factor",            "zoom"),
-    ("RECHECK_AI_CONF",             float, 0.0,  1.0,  "Zoom recheck AI threshold",    "zoom"),
-    ("RECHECK_CV_CONF",             float, 0.0,  1.0,  "Zoom recheck CV threshold",    "zoom"),
+    ("MAX_RECHECKS",                int,   0,    10,   "Max zoom rechecks",            "zoom", 2),
+    ("ZOOM_SCALE_FACTOR",           float, 1.0,  4.0,  "Zoom scale factor",            "zoom", 2.0),
+    ("RECHECK_AI_CONF",             float, 0.0,  1.0,  "Zoom recheck AI threshold",    "zoom", 0.4),
+    ("RECHECK_CV_CONF",             float, 0.0,  1.0,  "Zoom recheck CV threshold",    "zoom", 0.35),
 ]
 
 
@@ -128,6 +127,16 @@ def _write_full_config(data: dict) -> dict:
         except (ValueError, TypeError):
             pass
     return changed
+
+
+def _get_schema_defaults() -> dict:
+    """Return the hardcoded default value for every full-config key."""
+    out = {}
+    for entry in _FULL_CONFIG_SCHEMA:
+        key, typ = entry[0], entry[1]
+        default  = entry[6]          # 7th element
+        out[key] = typ(default)
+    return out
 
 
 # =============================================================================
@@ -335,6 +344,11 @@ def api_full_config_post():
     changed = _write_full_config(data)
     print(f"[WebUI] Full config updated: {changed}")
     return jsonify({"ok": True, "changed": changed})
+
+
+@_app.route("/api/default_config", methods=["GET"])
+def api_default_config_get():
+    return jsonify(_get_schema_defaults())
 
 
 # ── AI toggle API ─────────────────────────────────────────────────────────────
@@ -583,6 +597,11 @@ _HTML = r"""<!DOCTYPE html>
       pointer-events: none; transition: left .1s;
     }
 
+    /* Apply / Reset button row */
+    .btn-row { display: flex; gap: 6px; margin-top: 10px; }
+    .btn-row .apply-btn,
+    .btn-row .cfg-apply-btn { flex: 1; margin-top: 0; }
+
     /* Apply button */
     .apply-btn {
       width: 100%; padding: 7px; margin-top: 10px;
@@ -659,6 +678,17 @@ _HTML = r"""<!DOCTYPE html>
     }
     button:hover  { background: var(--border2); color: var(--text); }
     button.active { border-color: var(--green); color: var(--green); background: var(--green-lo); }
+
+    /* Reset button — must come after global `button` rule to win cascade */
+    .reset-btn {
+      padding: 7px 10px; margin-top: 0;
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      border: 1px solid var(--border2); border-radius: 6px;
+      background: var(--bg2); color: var(--muted);
+      cursor: pointer; transition: all .15s; letter-spacing: .5px; white-space: nowrap;
+    }
+    .reset-btn:hover { border-color: var(--yellow) !important; color: var(--yellow) !important; background: rgba(245,200,66,.08) !important; }
+    .reset-btn:active { transform: scale(.97); }
 
     #log { flex: 1; overflow-y: auto; padding: 6px 4px 6px 10px; min-height: 0; }
     #log::-webkit-scrollbar { width: 3px; }
@@ -824,7 +854,10 @@ _HTML = r"""<!DOCTYPE html>
           <input type="range" min="0" max="255" value="240" id="sl-vmax" oninput="sliderChanged()">
         </div>
 
-        <button class="apply-btn" id="applyBtn" onclick="applyHSV()">▶ Apply HSV</button>
+        <div class="btn-row">
+          <button class="apply-btn" id="applyBtn" onclick="applyHSV()">▶ Apply HSV</button>
+          <button class="reset-btn" onclick="resetHSV()" title="Reset to red preset defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb"></div>
       </div>
     </div>
@@ -834,7 +867,10 @@ _HTML = r"""<!DOCTYPE html>
       <div class="section">
         <div class="section-title">Confidence thresholds</div>
         <div id="knobs-thresholds"></div>
-        <button class="cfg-apply-btn" id="applyThresholds" onclick="applyGroup('thresholds')">▶ Apply</button>
+        <div class="btn-row">
+          <button class="cfg-apply-btn" id="applyThresholds" onclick="applyGroup('thresholds')">▶ Apply</button>
+          <button class="reset-btn" onclick="resetGroup('thresholds')" title="Reset to defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb-thresholds"></div>
       </div>
     </div>
@@ -844,7 +880,10 @@ _HTML = r"""<!DOCTYPE html>
       <div class="section">
         <div class="section-title">Fusion & CV scoring weights</div>
         <div id="knobs-fusion"></div>
-        <button class="cfg-apply-btn" id="applyFusion" onclick="applyGroup('fusion')">▶ Apply</button>
+        <div class="btn-row">
+          <button class="cfg-apply-btn" id="applyFusion" onclick="applyGroup('fusion')">▶ Apply</button>
+          <button class="reset-btn" onclick="resetGroup('fusion')" title="Reset to defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb-fusion"></div>
       </div>
     </div>
@@ -854,7 +893,10 @@ _HTML = r"""<!DOCTYPE html>
       <div class="section">
         <div class="section-title">Persistence & possible-hit lane</div>
         <div id="knobs-tracking"></div>
-        <button class="cfg-apply-btn" id="applyTracking" onclick="applyGroup('tracking')">▶ Apply</button>
+        <div class="btn-row">
+          <button class="cfg-apply-btn" id="applyTracking" onclick="applyGroup('tracking')">▶ Apply</button>
+          <button class="reset-btn" onclick="resetGroup('tracking')" title="Reset to defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb-tracking"></div>
       </div>
     </div>
@@ -884,7 +926,10 @@ _HTML = r"""<!DOCTYPE html>
             <input type="range" min="0" max="1" step="0.01" value="0.35" id="sl-nms" oninput="document.getElementById('v-nms').textContent=parseFloat(this.value).toFixed(2)">
           </div>
         </div>
-        <button class="cfg-apply-btn" id="applyShape" onclick="applyShape()">▶ Apply</button>
+        <div class="btn-row">
+          <button class="cfg-apply-btn" id="applyShape" onclick="applyShape()">▶ Apply</button>
+          <button class="reset-btn" onclick="resetShape()" title="Reset to defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb-shape"></div>
       </div>
     </div>
@@ -894,7 +939,10 @@ _HTML = r"""<!DOCTYPE html>
       <div class="section">
         <div class="section-title">Zoom recheck</div>
         <div id="knobs-zoom"></div>
-        <button class="cfg-apply-btn" id="applyZoom" onclick="applyGroup('zoom')">▶ Apply</button>
+        <div class="btn-row">
+          <button class="cfg-apply-btn" id="applyZoom" onclick="applyGroup('zoom')">▶ Apply</button>
+          <button class="reset-btn" onclick="resetGroup('zoom')" title="Reset to defaults">↺ Reset</button>
+        </div>
         <div class="feedback" id="fb-zoom"></div>
       </div>
     </div>
@@ -954,38 +1002,52 @@ let lastMsgEl   = null;
 let _dirty      = false;
 
 // Full config schema mirrored from backend
-// [key, type, min, max, label, group]
+// [key, type, min, max, label, group, default]
 const SCHEMA = [
-  ["YOLO_BASE_THRESHOLD",         "float", 0,   1,     "YOLO base threshold",          "thresholds"],
-  ["CV_BASE_THRESHOLD",           "float", 0,   1,     "CV base threshold",            "thresholds"],
-  ["CV_DIRECT_ACCEPT_THRESHOLD",  "float", 0,   1,     "CV direct-accept threshold",   "thresholds"],
-  ["HIGH_AI_CONFIDENCE",          "float", 0,   1,     "High AI confidence",           "thresholds"],
-  ["LOW_AI_CONFIDENCE",           "float", 0,   1,     "Low AI confidence",            "thresholds"],
-  ["YOLO_FUSION_WEIGHT",          "float", 0,   1,     "YOLO fusion weight",           "fusion"],
-  ["CV_FUSION_WEIGHT",            "float", 0,   1,     "CV fusion weight",             "fusion"],
-  ["CV_WEIGHT_REDNESS",           "float", 0,   1,     "CV weight: redness",           "fusion"],
-  ["CV_WEIGHT_CIRCULARITY",       "float", 0,   1,     "CV weight: circularity",       "fusion"],
-  ["CV_WEIGHT_SIZE",              "float", 0,   1,     "CV weight: size",              "fusion"],
-  ["CV_WEIGHT_TEXTURE",           "float", 0,   1,     "CV weight: texture",           "fusion"],
-  ["PERSISTENCE_REQUIRED",        "int",   1,   20,    "Frames to confirm (AI/fused)", "tracking"],
-  ["PERSISTENCE_REQUIRED_CV_ONLY","int",   1,   20,    "Frames to confirm (CV only)",  "tracking"],
-  ["PERSISTENCE_DECAY",           "float", 0,   1,     "Confidence decay per miss",    "tracking"],
-  ["IOU_MATCH_THRESHOLD",         "float", 0,   1,     "IoU match threshold",          "tracking"],
-  ["POSSIBLE_HIT_MIN_CONF",       "float", 0,   1,     "Possible min conf (fused)",    "tracking"],
-  ["POSSIBLE_HIT_MIN_SEEN",       "int",   1,   10,    "Possible min seen (fused)",    "tracking"],
-  ["POSSIBLE_CV_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (CV only)",  "tracking"],
-  ["POSSIBLE_CV_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (CV only)",  "tracking"],
-  ["POSSIBLE_AI_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (AI only)",  "tracking"],
-  ["POSSIBLE_AI_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (AI only)",  "tracking"],
-  ["POSSIBLE_AI_CONF_WEIGHT",     "float", 0,   1,     "AI conf weight for possible",  "tracking"],
-  ["POSSIBLE_TARGET_MIN_CONF",    "float", 0,   1,     "Possible target min conf",     "tracking"],
-  ["MIN_CONTOUR_AREA",            "int",   10,  5000,  "Min contour area (px²)",       "shape"],
-  ["CONVEXITY_MIN_AREA",          "int",   100, 20000, "Watershed split min area",     "shape"],
-  ["MAX_RECHECKS",                "int",   0,   10,    "Max zoom rechecks",            "zoom"],
-  ["ZOOM_SCALE_FACTOR",           "float", 1,   4,     "Zoom scale factor",            "zoom"],
-  ["RECHECK_AI_CONF",             "float", 0,   1,     "Zoom recheck AI threshold",    "zoom"],
-  ["RECHECK_CV_CONF",             "float", 0,   1,     "Zoom recheck CV threshold",    "zoom"],
+  ["YOLO_BASE_THRESHOLD",         "float", 0,   1,     "YOLO base threshold",          "thresholds", 0.5],
+  ["CV_BASE_THRESHOLD",           "float", 0,   1,     "CV base threshold",            "thresholds", 0.4],
+  ["CV_DIRECT_ACCEPT_THRESHOLD",  "float", 0,   1,     "CV direct-accept threshold",   "thresholds", 0.75],
+  ["HIGH_AI_CONFIDENCE",          "float", 0,   1,     "High AI confidence",           "thresholds", 0.75],
+  ["LOW_AI_CONFIDENCE",           "float", 0,   1,     "Low AI confidence",            "thresholds", 0.35],
+  ["YOLO_FUSION_WEIGHT",          "float", 0,   1,     "YOLO fusion weight",           "fusion",     0.6],
+  ["CV_FUSION_WEIGHT",            "float", 0,   1,     "CV fusion weight",             "fusion",     0.4],
+  ["CV_WEIGHT_REDNESS",           "float", 0,   1,     "CV weight: redness",           "fusion",     0.4],
+  ["CV_WEIGHT_CIRCULARITY",       "float", 0,   1,     "CV weight: circularity",       "fusion",     0.3],
+  ["CV_WEIGHT_SIZE",              "float", 0,   1,     "CV weight: size",              "fusion",     0.2],
+  ["CV_WEIGHT_TEXTURE",           "float", 0,   1,     "CV weight: texture",           "fusion",     0.1],
+  ["PERSISTENCE_REQUIRED",        "int",   1,   20,    "Frames to confirm (AI/fused)", "tracking",   3],
+  ["PERSISTENCE_REQUIRED_CV_ONLY","int",   1,   20,    "Frames to confirm (CV only)",  "tracking",   5],
+  ["PERSISTENCE_DECAY",           "float", 0,   1,     "Confidence decay per miss",    "tracking",   0.3],
+  ["IOU_MATCH_THRESHOLD",         "float", 0,   1,     "IoU match threshold",          "tracking",   0.3],
+  ["POSSIBLE_HIT_MIN_CONF",       "float", 0,   1,     "Possible min conf (fused)",    "tracking",   0.25],
+  ["POSSIBLE_HIT_MIN_SEEN",       "int",   1,   10,    "Possible min seen (fused)",    "tracking",   2],
+  ["POSSIBLE_CV_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (CV only)",  "tracking",   0.3],
+  ["POSSIBLE_CV_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (CV only)",  "tracking",   3],
+  ["POSSIBLE_AI_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (AI only)",  "tracking",   0.3],
+  ["POSSIBLE_AI_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (AI only)",  "tracking",   2],
+  ["POSSIBLE_AI_CONF_WEIGHT",     "float", 0,   1,     "AI conf weight for possible",  "tracking",   0.6],
+  ["POSSIBLE_TARGET_MIN_CONF",    "float", 0,   1,     "Possible target min conf",     "tracking",   0.4],
+  ["MIN_CONTOUR_AREA",            "int",   10,  5000,  "Min contour area (px²)",       "shape",      300],
+  ["CONVEXITY_MIN_AREA",          "int",   100, 20000, "Watershed split min area",     "shape",      2000],
+  ["MAX_RECHECKS",                "int",   0,   10,    "Max zoom rechecks",            "zoom",       2],
+  ["ZOOM_SCALE_FACTOR",           "float", 1,   4,     "Zoom scale factor",            "zoom",       2.0],
+  ["RECHECK_AI_CONF",             "float", 0,   1,     "Zoom recheck AI threshold",    "zoom",       0.4],
+  ["RECHECK_CV_CONF",             "float", 0,   1,     "Zoom recheck CV threshold",    "zoom",       0.35],
 ];
+
+// HSV defaults (red preset — the startup default)
+const HSV_DEFAULTS = {
+  h1_low: 0, h1_high: 10, h2_low: 160, h2_high: 179,
+  sat_min: 80, val_min: 50, val_max: 240,
+};
+
+// CVConfig shape defaults
+const SHAPE_CV_DEFAULTS = {
+  contour_min_circularity: 0.55,
+  max_aspect_ratio:        1.6,
+  watershed_fg_thresh:     0.35,
+  nms_iou_threshold:       0.35,
+};
 
 // Live values cache
 const _cfg = {};
@@ -1065,6 +1127,62 @@ async function applyGroup(group) {
   } finally {
     if (btn) { btn.classList.remove("busy"); btn.textContent = "▶ Apply"; }
   }
+}
+
+// =============================================================================
+// RESET FUNCTIONS
+// =============================================================================
+
+function resetGroup(group) {
+  // Restore sliders to schema defaults and push to backend
+  SCHEMA.filter(s => s[5] === group).forEach(([key, typ, mn, mx, label, grp, def]) => {
+    _cfg[key] = def;
+    const slider = document.getElementById("kr-" + key);
+    const valEl  = document.getElementById("kv-" + key);
+    if (slider) slider.value = def;
+    if (valEl)  valEl.textContent = typ === "int" ? def : parseFloat(def).toFixed(2);
+  });
+  applyGroup(group);
+}
+
+function resetHSV() {
+  // Restore HSV sliders to red preset defaults
+  const map = {
+    "sl-h1l": HSV_DEFAULTS.h1_low,  "sl-h1h": HSV_DEFAULTS.h1_high,
+    "sl-h2l": HSV_DEFAULTS.h2_low,  "sl-h2h": HSV_DEFAULTS.h2_high,
+    "sl-sat": HSV_DEFAULTS.sat_min,
+    "sl-vmin": HSV_DEFAULTS.val_min, "sl-vmax": HSV_DEFAULTS.val_max,
+  };
+  for (const [id, val] of Object.entries(map)) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+  updateLabels();
+  // Highlight red preset button
+  document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector('[data-preset="red"]')?.classList.add("active");
+  applyHSV();
+}
+
+function resetShape() {
+  // Reset full_config shape knobs
+  SCHEMA.filter(s => s[5] === "shape").forEach(([key, typ, mn, mx, label, grp, def]) => {
+    _cfg[key] = def;
+    const slider = document.getElementById("kr-" + key);
+    const valEl  = document.getElementById("kv-" + key);
+    if (slider) slider.value = def;
+    if (valEl)  valEl.textContent = typ === "int" ? def : parseFloat(def).toFixed(2);
+  });
+  // Reset CVConfig shape sliders
+  document.getElementById("sl-circ").value = SHAPE_CV_DEFAULTS.contour_min_circularity;
+  document.getElementById("v-circ").textContent = SHAPE_CV_DEFAULTS.contour_min_circularity.toFixed(2);
+  document.getElementById("sl-asr").value = SHAPE_CV_DEFAULTS.max_aspect_ratio;
+  document.getElementById("v-asr").textContent = SHAPE_CV_DEFAULTS.max_aspect_ratio.toFixed(1);
+  document.getElementById("sl-wfg").value = SHAPE_CV_DEFAULTS.watershed_fg_thresh;
+  document.getElementById("v-wfg").textContent = SHAPE_CV_DEFAULTS.watershed_fg_thresh.toFixed(2);
+  document.getElementById("sl-nms").value = SHAPE_CV_DEFAULTS.nms_iou_threshold;
+  document.getElementById("v-nms").textContent = SHAPE_CV_DEFAULTS.nms_iou_threshold.toFixed(2);
+  applyShape();
 }
 
 // =============================================================================
