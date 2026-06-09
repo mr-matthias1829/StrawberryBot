@@ -48,6 +48,7 @@ import threading
 import time
 
 import motor
+import servo_status
 
 # =============================================================================
 # TUNING
@@ -116,6 +117,10 @@ def _read_sensor(channel: int) -> dict | None:
     except Exception as e:
         print(f"[lift] Sensor ch{channel} read error: {e}")
         return None
+
+def get_sensor_reading() -> dict | None:
+    """Public wrapper — returns latest arm encoder reading or None."""
+    return _read_sensor()
 
 # =============================================================================
 # STATE
@@ -239,12 +244,16 @@ def _speed_from_dy(dy_abs: int) -> int:
 def stop() -> None:
     """Post a stop command to both servos (non-blocking)."""
     _post_words(0, 0)
+    servo_status.update(SERVO_ID_A, "STOP", 0, real=_initialized)
+    servo_status.update(SERVO_ID_B, "STOP", 0, real=_initialized)
 
 
 def move_up(speed: int = SPEED_MEDIUM) -> dict:
     """Move lift UP — both servos CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CCW | speed, _DIR_CCW | speed)
+    servo_status.update(SERVO_ID_A, "UP", speed, real=_initialized)
+    servo_status.update(SERVO_ID_B, "UP", speed, real=_initialized)
     return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B],
             "speed": speed, "status": "ok"}
 
@@ -253,6 +262,8 @@ def move_down(speed: int = SPEED_MEDIUM) -> dict:
     """Move lift DOWN — both servos CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CW | speed, _DIR_CW | speed)
+    servo_status.update(SERVO_ID_A, "DOWN", speed, real=_initialized)
+    servo_status.update(SERVO_ID_B, "DOWN", speed, real=_initialized)
     return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B],
             "speed": speed, "status": "ok"}
 
@@ -271,6 +282,17 @@ def update(dy: int) -> str:
     soft travel limits before commanding movement.
     """
     if not _initialized:
+        speed = _speed_from_dy(abs(dy))
+        if dy > DEAD_ZONE:
+            servo_status.update(SERVO_ID_A, "DOWN", speed, real=False)
+            servo_status.update(SERVO_ID_B, "DOWN", speed, real=False)
+            return f"LIFT SIMULATED (dy={dy:+d})"
+        if dy < -DEAD_ZONE:
+            servo_status.update(SERVO_ID_A, "UP", speed, real=False)
+            servo_status.update(SERVO_ID_B, "UP", speed, real=False)
+            return f"LIFT SIMULATED (dy={dy:+d})"
+        servo_status.update(SERVO_ID_A, "STOP", 0, real=False)
+        servo_status.update(SERVO_ID_B, "STOP", 0, real=False)
         return f"LIFT SIMULATED (dy={dy:+d})"
 
     speed = _speed_from_dy(abs(dy))
