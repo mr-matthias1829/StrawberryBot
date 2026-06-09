@@ -20,6 +20,7 @@ import time
 
 import motor
 import servo_status
+from corner_sensors import CornerSensorManager
 
 # =============================================================================
 # TUNING
@@ -93,7 +94,7 @@ def _at_limit(direction: str) -> bool:
     reading = _read_sensor()
     if reading is None:
         return False
-    deg = reading["deg"]
+    deg = CornerSensorManager.total_position(reading)
     if direction == "forward" and deg >= MAX_DEG:
         return True
     if direction == "backward" and deg <= MIN_DEG:
@@ -246,14 +247,14 @@ def update(dz: int) -> str:
     if dz > DEAD_ZONE:
         if _at_limit("forward"):
             stop()
-            return f"ARM LIMIT FORWARD  (dz={dz:+d}, deg≥{MAX_DEG})"
+            return f"ARM LIMIT FORWARD  (dz={dz:+d}, pos≥{MAX_DEG})"
         move_forward(speed)
         return f"ARM FORWARD  (dz={dz:+d}, speed={speed})"
 
     if dz < -DEAD_ZONE:
         if _at_limit("backward"):
             stop()
-            return f"ARM LIMIT BACKWARD (dz={dz:+d}, deg≤{MIN_DEG})"
+            return f"ARM LIMIT BACKWARD (dz={dz:+d}, pos≤{MIN_DEG})"
         move_backward(speed)
         return f"ARM BACKWARD (dz={dz:+d}, speed={speed})"
 

@@ -21,6 +21,7 @@ import time
 
 import motor
 import servo_status
+from corner_sensors import CornerSensorManager
 
 # =============================================================================
 # TUNING
@@ -107,7 +108,7 @@ def _at_limit(direction: str) -> bool:
     reading = _read_sensor(SENSOR_CHANNEL_A)
     if reading is None:
         return False
-    deg = reading["deg"]
+    deg = CornerSensorManager.total_position(reading)
     if direction == "up" and deg <= MIN_DEG:
         return True
     if direction == "down" and deg >= MAX_DEG:
@@ -284,14 +285,14 @@ def update(dy: int) -> str:
     if dy > DEAD_ZONE:
         if _at_limit("down"):
             stop()
-            return f"LIFT LIMIT DOWN (dy={dy:+d}, deg≥{MAX_DEG})"
+            return f"LIFT LIMIT DOWN (dy={dy:+d}, pos≥{MAX_DEG})"
         move_down(speed)
         return f"LIFT DOWN (dy={dy:+d}, speed={speed})"
 
     if dy < -DEAD_ZONE:
         if _at_limit("up"):
             stop()
-            return f"LIFT LIMIT UP   (dy={dy:+d}, deg≤{MIN_DEG})"
+            return f"LIFT LIMIT UP   (dy={dy:+d}, pos≤{MIN_DEG})"
         move_up(speed)
         return f"LIFT UP   (dy={dy:+d}, speed={speed})"
 
