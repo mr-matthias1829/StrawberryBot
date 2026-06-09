@@ -3,35 +3,23 @@ gripper.py
 ==========
 Controls the gripper servo (AX-12A, ID 8) in wheel / continuous-rotation mode.
 
-Architecture
-------------
-- Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then gripper.init() once at startup.
-- grip() / open_gripper() fire async commands via a background thread.
-- All serial writes run on that thread so they never block the pipeline.
+State gate
+----------
+The gripper tracks whether it is currently OPEN or CLOSED (GRIPPED).
+Sending the same command twice in a row is silently ignored:
+  • grip()  while already GRIPPED → ignored
+  • open()  while already OPEN    → ignored
 
-State tracking & safety
-------------------------
-- Prevents overlapping commands (busy guard).
-- Prevents consecutive identical commands (no "open → open").
-- Current state: "OPEN", "GRIPPED", or "BUSY".
+This prevents the motor from spinning into a hard stop if the same
+command is sent on consecutive frames.
 
-Corner sensor (AS5600 via TCA9548A)
-------------------------------------
-The CornerSensorManager is imported and instantiated at init() time.
-The sensor is present in the object but its output is currently STUBBED.
+States
+------
+  OPEN     – gripper is open (default after init)
+  GRIPPED  – gripper is closed
+  BUSY     – a command is currently executing (transitioning)
 
-TODO (hardware bring-up):
-  1. Set SENSOR_CHANNEL to the correct TCA channel.
-  2. Use _read_sensor() inside _execute_grip() / _execute_open() to detect
-     stall (encoder stopped moving) and stop early instead of relying on
-     fixed GRIP_TIME / OPEN_TIME constants.
-
-Calibration
------------
-Put gripper in open position, then:
-    python gripper.py grip   → tune GRIP_TIME
-    python gripper.py open   → tune OPEN_TIME
+The BUSY state blocks new commands until the transition completes.
 """
 
 import threading
@@ -50,9 +38,7 @@ GRIP_TIME = 2.5   # seconds to spin closed — tune after testing
 OPEN_TIME = 2.5   # seconds to spin open   — tune after testing
 SPEED     = 1023  # 0–1023
 
-# TCA9548A channel wired to the gripper AS5600 encoder.
-# TODO: set to the correct channel once hardware is confirmed.
-SENSOR_CHANNEL = 3
+SENSOR_CHANNEL = 3   # TODO: set to correct TCA channel once hardware is confirmed
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -65,10 +51,11 @@ _SPEED_OPEN = 1024 + SPEED    # CW  — spin to open
 _SPEED_STOP = 0
 
 # =============================================================================
-# CORNER SENSOR  (optional — gracefully absent on non-Pi or pre-wiring)
+# CORNER SENSOR  (optional)
 # =============================================================================
 
 _sensor_mgr = None
+
 
 def _init_sensor() -> None:
     global _sensor_mgr
@@ -85,14 +72,6 @@ def _init_sensor() -> None:
 
 
 def _read_sensor() -> dict | None:
-    """
-    Return the latest gripper encoder reading, or None if unavailable.
-
-    Dict keys: channel, raw, deg, laps
-    TODO: poll this inside _execute_grip() / _execute_open() in a loop and
-    break early when the encoder stops moving (stall detection), then stop
-    the motor.  This removes the dependency on fixed GRIP_TIME / OPEN_TIME.
-    """
     if _sensor_mgr is None:
         return None
     try:
@@ -101,18 +80,25 @@ def _read_sensor() -> dict | None:
         print(f"[gripper] Sensor read error: {e}")
         return None
 
+
 def get_sensor_reading() -> dict | None:
-    """Public wrapper — returns latest arm encoder reading or None."""
     return _read_sensor()
 
 # =============================================================================
 # STATE
+#
+# _gripper_open  – True  = gripper is currently OPEN (or assumed open after init)
+#                  False = gripper is currently GRIPPED (closed)
+#
+# The state only flips once a command has COMPLETED (inside the worker thread),
+# not when it is requested.  This means the BUSY period correctly blocks
+# follow-up commands.
 # =============================================================================
 
-_initialized:  bool = False
-_state:        str  = "OPEN"
-_last_action:  str  = ""
-_pending_action: str = ""
+_initialized:    bool = False
+_state:          str  = "OPEN"   # "OPEN" | "GRIPPED" | "BUSY"
+_gripper_open:   bool = True     # mirrors _state for fast checks
+_pending_action: str  = ""
 _lock  = threading.Lock()
 _event = threading.Event()
 _stop_flag = False
@@ -123,7 +109,7 @@ _thread: threading.Thread = None  # type: ignore[assignment]
 # =============================================================================
 
 def _worker() -> None:
-    global _state, _last_action
+    global _state, _gripper_open
 
     while not _stop_flag:
         if not _event.wait(timeout=0.5):
@@ -143,24 +129,30 @@ def _worker() -> None:
             if action == "grip":
                 _execute_grip()
                 with _lock:
-                    _state = "GRIPPED"
-                    _last_action = "grip"
+                    _state       = "GRIPPED"
+                    _gripper_open = False
                 servo_status.update(SERVO_ID, "GRIPPED", 0, real=_initialized)
+                print("[gripper] State → GRIPPED")
             elif action == "open":
                 _execute_open()
                 with _lock:
-                    _state = "OPEN"
-                    _last_action = "open"
+                    _state       = "OPEN"
+                    _gripper_open = True
                 servo_status.update(SERVO_ID, "OPEN", 0, real=_initialized)
+                print("[gripper] State → OPEN")
         except Exception as e:
             print(f"[gripper] Error during {action}: {e}")
             with _lock:
-                _state = "OPEN"   # failsafe
+                _state       = "OPEN"   # failsafe — assume open
+                _gripper_open = True
             servo_status.update(SERVO_ID, "OPEN", 0, real=_initialized)
+        finally:
+            # Clear pending so the same action isn't repeated
+            with _lock:
+                _pending_action = ""
 
 
 def _execute_grip() -> None:
-    """Spin closed for GRIP_TIME seconds (or until stall — see TODO above)."""
     print(f"🤏 Gripper gripping ({GRIP_TIME}s)…")
     try:
         motor._write_word(SERVO_ID, _REG_SPEED, _SPEED_GRIP)
@@ -173,7 +165,6 @@ def _execute_grip() -> None:
 
 
 def _execute_open() -> None:
-    """Spin open for OPEN_TIME seconds (or until stall — see TODO above)."""
     print(f"✋ Gripper opening ({OPEN_TIME}s)…")
     try:
         motor._write_word(SERVO_ID, _REG_SPEED, _SPEED_OPEN)
@@ -189,14 +180,14 @@ def _execute_open() -> None:
 # =============================================================================
 
 def init() -> None:
-    """Setup servo in wheel mode and start background worker.  Idempotent."""
-    global _initialized, _stop_flag, _thread, _state
+    global _initialized, _stop_flag, _thread, _state, _gripper_open
 
     if _initialized:
         return
 
-    _stop_flag = False
-    _state     = "OPEN"
+    _stop_flag    = False
+    _state        = "OPEN"
+    _gripper_open = True
 
     motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0); time.sleep(0.05)
     motor._write_word(SERVO_ID, _REG_CW_LIMIT,  0); time.sleep(0.02)
@@ -211,11 +202,10 @@ def init() -> None:
 
     _initialized = True
     servo_status.update(SERVO_ID, "OPEN", 0, real=True)
-    print(f"✅ Gripper initialised (ID {SERVO_ID}, wheel mode).")
+    print(f"✅ Gripper initialised (ID {SERVO_ID}, wheel mode). State: OPEN")
 
 
 def shutdown() -> None:
-    """Stop motor and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -245,35 +235,55 @@ def get_state() -> str:
         return _state
 
 
+def is_open() -> bool:
+    with _lock:
+        return _gripper_open
+
+
+def is_gripped() -> bool:
+    with _lock:
+        return not _gripper_open and _state == "GRIPPED"
+
+
 def command(action: str) -> dict:
     """
     Command the gripper.  Non-blocking.
 
-    Args:
-        action: "grip" or "open"
+    Gate rules (hardware mode):
+      • "grip"  is ignored if the gripper is already GRIPPED
+      • "open"  is ignored if the gripper is already OPEN
+      • any command is ignored while BUSY (transition in progress)
+
+    Simulation mode bypasses the gate so callers always get a response.
 
     Returns:
-        {"action": action, "status": "ok" | "ignored" | "busy" | "invalid"}
+        {"action": action, "status": "ok"|"ignored"|"busy"|"invalid"|"simulated"}
     """
     global _pending_action
-
-    if not _initialized:
-        servo_status.update(SERVO_ID, action.upper(), 0, real=False)
-        return {"action": action, "status": "simulated"}
 
     action = action.lower()
     if action not in ("grip", "open"):
         return {"action": action, "status": "invalid"}
 
+    if not _initialized:
+        # Simulation — update status display but don't actually move anything
+        sim_status = "GRIPPED" if action == "grip" else "OPEN"
+        servo_status.update(SERVO_ID, sim_status, 0, real=False)
+        return {"action": action, "status": "simulated"}
+
     with _lock:
-        current_state = _state
-        last          = _last_action
+        current = _state
+        is_open_now = _gripper_open
 
-    if last == action:
-        return {"action": action, "status": "ignored", "reason": "same_as_last"}
-
-    if current_state == "BUSY":
+    # Busy guard — a transition is already happening
+    if current == "BUSY":
         return {"action": action, "status": "busy", "reason": "command_in_progress"}
+
+    # Redundant-command gate
+    if action == "grip" and not is_open_now:
+        return {"action": action, "status": "ignored", "reason": "already_gripped"}
+    if action == "open" and is_open_now:
+        return {"action": action, "status": "ignored", "reason": "already_open"}
 
     with _lock:
         _pending_action = action
@@ -283,12 +293,12 @@ def command(action: str) -> dict:
 
 
 def grip() -> dict:
-    """Request the gripper to close.  Non-blocking."""
+    """Request the gripper to close.  Non-blocking.  Ignored if already closed."""
     return command("grip")
 
 
 def open_gripper() -> dict:
-    """Request the gripper to open.  Non-blocking."""
+    """Request the gripper to open.  Non-blocking.  Ignored if already open."""
     return command("open")
 
 

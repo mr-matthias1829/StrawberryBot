@@ -24,7 +24,7 @@ class CornerSensorManager:
         self._direction: dict[int, int]   = {ch: 0 for ch in self.channels}  # +1 / -1 / 0
 
     # ------------------------------------------------------------------ #
-    #  Internal helpers                                                    #
+    #  Internal helpers                                                  #
     # ------------------------------------------------------------------ #
 
     def _select(self, ch: int) -> None:
@@ -63,10 +63,10 @@ class CornerSensorManager:
         prev = self._prev_deg[ch]
         delta = new_deg - prev
 
-        if delta > WRAP_THRESHOLD:          # wrapped backwards  (360 → 0)
+        if delta > WRAP_THRESHOLD: # wrapped backwards  (360 to 0)
             self._laps[ch] -= 1
             self._direction[ch] = -1
-        elif delta < -WRAP_THRESHOLD:       # wrapped forwards   (0 → 360)
+        elif delta < -WRAP_THRESHOLD: # wrapped forwards   (0 to 360)
             self._laps[ch] += 1
             self._direction[ch] = 1
         else:
@@ -164,9 +164,18 @@ class CornerSensorManager:
         except KeyboardInterrupt:
             print("\nStopped")
 
+    @staticmethod
+    def total_position(reading: dict) -> float:
+        laps = reading["laps"]
+        deg = reading["deg"]
+        if laps >= 0:
+            return laps * 360.0 + deg
+        else:
+            return laps * 360.0 - (360.0 - deg)
+
 
 # ------------------------------------------------------------------ #
-#  Stand-alone entry point (unchanged behaviour)                       #
+#  Stand-alone entry point                                           #
 # ------------------------------------------------------------------ #
 
 if __name__ == "__main__":
