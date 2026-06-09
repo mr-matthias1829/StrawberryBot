@@ -360,6 +360,21 @@ def api_corner_sensors():
             result[name] = {"available": False, "error": str(e)}
     return jsonify(result)
 
+@_app.route("/api/servo_status")
+def api_servo_status():
+    import servo_status
+    states = servo_status.get_all()
+    result = []
+    for s in states:
+        result.append({
+            "id":        s.id,
+            "name":      s.name,
+            "status":    s.status,
+            "speed":     s.speed,
+            "simulated": s.simulated,
+        })
+    return jsonify(result)
+
 
 @_app.route("/favicon.ico")
 def route_favicon():
@@ -674,6 +689,14 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
       <div id="sensorList"></div>
       <div style="font-size:9px;color:var(--mut);margin-top:8px">Auto-refreshes every 500 ms when active.</div>
     </div>
+    <!-- add in the sensors pane, after the AS5600 sec div -->
+    <div class="sec">
+        <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
+        Servo status
+        <button onclick="refreshServos()" style="padding:1px 7px;font-size:9px">⟳ Refresh</button>
+    </div>
+  <div id="servoList"></div>
+</div>
   </div>
 </div><!-- /panel -->
 
@@ -757,7 +780,10 @@ function switchTab(name){
   document.querySelector(`.tab[onclick*="'${name}'"]`)?.classList.add("on");
   document.getElementById("tab-"+name)?.classList.add("on");
   clearInterval(_sensorTimer);_sensorTimer=null;
-  if(name==="sensors"){refreshSensors();_sensorTimer=setInterval(refreshSensors,500);}
+  if(name==="sensors"){
+  refreshSensors(); refreshServos();
+  _sensorTimer = setInterval(() => { refreshSensors(); refreshServos(); }, 500);
+    }
 }
 
 /* ── KNOBS ── */
@@ -924,6 +950,40 @@ async function refreshSensors(){
   const c=document.getElementById("sensorList");if(!c)return;
   try{const r=await fetch("/api/corner_sensors");const d=await r.json();c.innerHTML=Object.entries(d).map(([n,i])=>_scard(n,i)).join("");}
   catch(e){c.innerHTML=`<div style="color:var(--acc);font-size:10px;padding:5px 0">Request failed: ${e}</div>`;}
+}
+const STATUS_COLORS = {
+  "STOP":"var(--mut)","FORWARD":"var(--grn)","BACKWARD":"var(--blu)",
+  "LEFT":"var(--grn)","RIGHT":"var(--blu)","UP":"var(--grn)","DOWN":"var(--blu)",
+  "GRIP":"var(--blu)","GRIPPED":"var(--blu)","OPEN":"var(--yel)",
+  "BUSY":"var(--ora)","EXTENDING":"var(--grn)",
+};
+
+function _servoCard(s) {
+  const sc = STATUS_COLORS[s.status] || "var(--txt)";
+  const hw = s.simulated
+    ? `<span style="color:var(--ora)">SIM</span>`
+    : `<span style="color:var(--grn)">REAL</span>`;
+  const speed = s.speed > 0 ? s.speed : "—";
+  const alive = s.status !== "STOP" || !s.simulated;
+  return `<div class="scard ${alive ? "live" : ""}">
+    <div class="scard-h">
+      <span class="sname">ID${String(s.id).padStart(2,"0")} – ${s.name}</span>
+      <span class="sbadge" style="color:${sc};border-color:${sc}">${s.status}</span>
+    </div>
+    <div class="srow"><span class="sk">Speed</span><span class="sv">${speed}</span></div>
+    <div class="srow"><span class="sk">Hardware</span><span class="sv">${hw}</span></div>
+  </div>`;
+}
+
+async function refreshServos() {
+  const c = document.getElementById("servoList"); if (!c) return;
+  try {
+    const r = await fetch("/api/servo_status");
+    const d = await r.json();
+    c.innerHTML = d.length ? d.map(_servoCard).join("") : `<div style="font-size:10px;color:var(--mut);padding:5px 0">No servos reported.</div>`;
+  } catch(e) {
+    c.innerHTML = `<div style="color:var(--acc);font-size:10px">Request failed: ${e}</div>`;
+  }
 }
 
 /* ── DRAG RESIZE ── */
