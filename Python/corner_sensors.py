@@ -166,6 +166,7 @@ class CornerSensorManager:
 
     @staticmethod
     def total_position(reading: dict) -> float:
+        """Give the full degrees amount by (laps * degrees), includes correction for negative numbers"""
         laps = reading["laps"]
         deg = reading["deg"]
         if laps >= 0:
