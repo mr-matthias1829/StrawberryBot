@@ -131,7 +131,7 @@ GRIPPER_AUTO_GRIP_ENABLED = True
 # GRIP DECISION
 # =============================================================================
 
-MIN_GRAB_AREA_RATIO = 0.4
+MIN_GRAB_AREA_RATIO = 0.1
 
 GRAB_CENTER_TOLERANCE_X = 15
 GRAB_CENTER_TOLERANCE_Y = 15
