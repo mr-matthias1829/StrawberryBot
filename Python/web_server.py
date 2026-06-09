@@ -2,19 +2,20 @@
 
 Publieke API
 -----------
-start(host, port)              – start Flask in een daemon-thread (eenmalig)
-push_frame(bgr)                – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
-push_log(line)                 – stuur een logregel naar alle SSE-clients
+start(host, port)   – start Flask in een daemon-thread (eenmalig)
+push_frame(bgr)     – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
+push_log(line)      – stuur een logregel naar alle SSE-clients
 
 REST API (JSON)
 ---------------
-GET  /api/cv_config            – huidige CVConfig als JSON
-POST /api/cv_config            – update CVConfig velden (partial update ok)
-GET  /api/ai_enabled           – {"enabled": true/false}
-POST /api/ai_enabled           – {"enabled": true/false}
-POST /api/cv_preset            – {"preset": "red"|"green"|"yellow"|"blue"|"orange"|"custom"}
-GET  /api/full_config          – alle config.py knobs als JSON
-POST /api/full_config          – partial update van config.py knobs (setattr live)
+GET  /api/cv_config       – huidige CVConfig als JSON
+POST /api/cv_config       – update CVConfig velden (partial update ok)
+GET  /api/ai_enabled      – {"enabled": true/false}
+POST /api/ai_enabled      – {"enabled": true/false}
+POST /api/cv_preset       – {"preset": "red"|"green"|"yellow"|"blue"|"orange"|"custom"}
+GET  /api/full_config     – alle config.py knobs als JSON
+POST /api/full_config     – partial update van config.py knobs (setattr live)
+GET  /api/corner_sensors  – latest AS5600 reading per motor
 """
 from __future__ import annotations
 
@@ -35,15 +36,12 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 _app = Flask(__name__)
 
-_frame_lock:   threading.Lock    = threading.Lock()
-_latest_jpeg:  bytes | None      = None
-
-_subs_lock:    threading.Lock    = threading.Lock()
-_subs:         List[queue.Queue] = []
-
+_frame_lock:  threading.Lock    = threading.Lock()
+_latest_jpeg: bytes | None      = None
+_subs_lock:   threading.Lock    = threading.Lock()
+_subs:        List[queue.Queue] = []
 _started    = False
 _start_lock = threading.Lock()
-
 
 # =============================================================================
 # COLOUR PRESETS
@@ -59,58 +57,52 @@ _PRESETS = {
 }
 
 # =============================================================================
-# FULL CONFIG — keys exposed to the web UI
+# FULL CONFIG SCHEMA
+# (key, type, min, max, label, group, default)
+# Groups: thresholds | fusion | tracking | shape | zoom
 # =============================================================================
-# Each entry: (key, type, min, max, label, group, default)
 
 _FULL_CONFIG_SCHEMA = [
-    # ── Thresholds ──────────────────────────────────────────────────────────
-    ("YOLO_BASE_THRESHOLD",         float, 0.0,  1.0,  "YOLO base threshold",          "thresholds", 0.5),
-    ("CV_BASE_THRESHOLD",           float, 0.0,  1.0,  "CV base threshold",            "thresholds", 0.4),
-    ("CV_DIRECT_ACCEPT_THRESHOLD",  float, 0.0,  1.0,  "CV direct-accept threshold",   "thresholds", 0.75),
-    ("HIGH_AI_CONFIDENCE",          float, 0.0,  1.0,  "High AI confidence",           "thresholds", 0.75),
-    ("LOW_AI_CONFIDENCE",           float, 0.0,  1.0,  "Low AI confidence",            "thresholds", 0.35),
-    # ── Fusion weights ───────────────────────────────────────────────────────
-    ("YOLO_FUSION_WEIGHT",          float, 0.0,  1.0,  "YOLO fusion weight",           "fusion", 0.6),
-    ("CV_FUSION_WEIGHT",            float, 0.0,  1.0,  "CV fusion weight",             "fusion", 0.4),
-    # ── CV scoring weights ───────────────────────────────────────────────────
-    ("CV_WEIGHT_REDNESS",           float, 0.0,  1.0,  "CV weight: redness",           "fusion", 0.4),
-    ("CV_WEIGHT_CIRCULARITY",       float, 0.0,  1.0,  "CV weight: circularity",       "fusion", 0.3),
-    ("CV_WEIGHT_SIZE",              float, 0.0,  1.0,  "CV weight: size",              "fusion", 0.2),
-    ("CV_WEIGHT_TEXTURE",           float, 0.0,  1.0,  "CV weight: texture",           "fusion", 0.1),
-    # ── Tracking / persistence ───────────────────────────────────────────────
-    ("PERSISTENCE_REQUIRED",        int,   1,    20,   "Frames to confirm (AI/fused)", "tracking", 3),
-    ("PERSISTENCE_REQUIRED_CV_ONLY",int,   1,    20,   "Frames to confirm (CV only)",  "tracking", 5),
-    ("PERSISTENCE_DECAY",           float, 0.0,  1.0,  "Confidence decay per miss",    "tracking", 0.3),
-    ("IOU_MATCH_THRESHOLD",         float, 0.0,  1.0,  "IoU match threshold",          "tracking", 0.3),
-    # ── Possible-hit lane ────────────────────────────────────────────────────
-    ("POSSIBLE_HIT_MIN_CONF",       float, 0.0,  1.0,  "Possible min conf (fused)",    "tracking", 0.25),
-    ("POSSIBLE_HIT_MIN_SEEN",       int,   1,    10,   "Possible min seen (fused)",    "tracking", 2),
-    ("POSSIBLE_CV_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (CV only)",  "tracking", 0.3),
-    ("POSSIBLE_CV_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (CV only)",  "tracking", 3),
-    ("POSSIBLE_AI_ONLY_MIN_CONF",   float, 0.0,  1.0,  "Possible min conf (AI only)",  "tracking", 0.3),
-    ("POSSIBLE_AI_ONLY_MIN_SEEN",   int,   1,    10,   "Possible min seen (AI only)",  "tracking", 2),
-    ("POSSIBLE_AI_CONF_WEIGHT",     float, 0.0,  1.0,  "AI conf weight for possible",  "tracking", 0.6),
-    ("POSSIBLE_TARGET_MIN_CONF",    float, 0.0,  1.0,  "Possible target min conf",     "tracking", 0.4),
-    # ── Shape / contour ──────────────────────────────────────────────────────
-    ("MIN_CONTOUR_AREA",            int,   10,   5000, "Min contour area (px²)",       "shape", 300),
-    ("CONVEXITY_MIN_AREA",          int,   100,  20000,"Watershed split min area",     "shape", 2000),
-    # ── Zoom recheck ─────────────────────────────────────────────────────────
-    ("MAX_RECHECKS",                int,   0,    10,   "Max zoom rechecks",            "zoom", 2),
-    ("ZOOM_SCALE_FACTOR",           float, 1.0,  4.0,  "Zoom scale factor",            "zoom", 2.0),
-    ("RECHECK_AI_CONF",             float, 0.0,  1.0,  "Zoom recheck AI threshold",    "zoom", 0.4),
-    ("RECHECK_CV_CONF",             float, 0.0,  1.0,  "Zoom recheck CV threshold",    "zoom", 0.35),
+    # Thresholds
+    ("YOLO_BASE_THRESHOLD",          float, 0.0, 1.0,   "YOLO base",            "thresholds", 0.5),
+    ("CV_BASE_THRESHOLD",            float, 0.0, 1.0,   "CV base",              "thresholds", 0.4),
+    ("CV_DIRECT_ACCEPT_THRESHOLD",   float, 0.0, 1.0,   "CV direct-accept",     "thresholds", 0.75),
+    ("HIGH_AI_CONFIDENCE",           float, 0.0, 1.0,   "AI high conf",         "thresholds", 0.75),
+    ("LOW_AI_CONFIDENCE",            float, 0.0, 1.0,   "AI low conf",          "thresholds", 0.35),
+    # Fusion weights
+    ("YOLO_FUSION_WEIGHT",           float, 0.0, 1.0,   "YOLO weight",          "fusion", 0.6),
+    ("CV_FUSION_WEIGHT",             float, 0.0, 1.0,   "CV weight",            "fusion", 0.4),
+    ("CV_WEIGHT_REDNESS",            float, 0.0, 1.0,   "CV: redness",          "fusion", 0.4),
+    ("CV_WEIGHT_CIRCULARITY",        float, 0.0, 1.0,   "CV: circularity",      "fusion", 0.3),
+    ("CV_WEIGHT_SIZE",               float, 0.0, 1.0,   "CV: size",             "fusion", 0.2),
+    ("CV_WEIGHT_TEXTURE",            float, 0.0, 1.0,   "CV: texture",          "fusion", 0.1),
+    # Tracking / persistence
+    ("PERSISTENCE_REQUIRED",         int,   1,   20,    "Confirm frames (fused)","tracking", 3),
+    ("PERSISTENCE_REQUIRED_CV_ONLY", int,   1,   20,    "Confirm frames (CV)",  "tracking", 5),
+    ("PERSISTENCE_DECAY",            float, 0.0, 1.0,   "Conf decay / miss",    "tracking", 0.3),
+    ("IOU_MATCH_THRESHOLD",          float, 0.0, 1.0,   "IoU match",            "tracking", 0.3),
+    ("POSSIBLE_HIT_MIN_CONF",        float, 0.0, 1.0,   "Possible conf (fused)","tracking", 0.25),
+    ("POSSIBLE_HIT_MIN_SEEN",        int,   1,   10,    "Possible seen (fused)","tracking", 2),
+    ("POSSIBLE_CV_ONLY_MIN_CONF",    float, 0.0, 1.0,   "Possible conf (CV)",   "tracking", 0.3),
+    ("POSSIBLE_CV_ONLY_MIN_SEEN",    int,   1,   10,    "Possible seen (CV)",   "tracking", 3),
+    ("POSSIBLE_AI_ONLY_MIN_CONF",    float, 0.0, 1.0,   "Possible conf (AI)",   "tracking", 0.3),
+    ("POSSIBLE_AI_ONLY_MIN_SEEN",    int,   1,   10,    "Possible seen (AI)",   "tracking", 2),
+    ("POSSIBLE_AI_CONF_WEIGHT",      float, 0.0, 1.0,   "AI conf weight",       "tracking", 0.6),
+    ("POSSIBLE_TARGET_MIN_CONF",     float, 0.0, 1.0,   "Target min conf",      "tracking", 0.4),
+    # Shape / contour
+    ("MIN_CONTOUR_AREA",             int,   10,  5000,  "Min contour (px²)",    "shape", 300),
+    ("CONVEXITY_MIN_AREA",           int,   100, 20000, "Watershed split (px²)","shape", 2000),
+    # Zoom recheck
+    ("MAX_RECHECKS",                 int,   0,   10,    "Max rechecks",         "zoom", 2),
+    ("ZOOM_SCALE_FACTOR",            float, 1.0, 4.0,   "Scale factor",         "zoom", 2.0),
+    ("RECHECK_AI_CONF",              float, 0.0, 1.0,   "Recheck AI thresh",    "zoom", 0.4),
+    ("RECHECK_CV_CONF",              float, 0.0, 1.0,   "Recheck CV thresh",    "zoom", 0.35),
 ]
 
 
 def _read_full_config() -> dict:
     import config as _cfg
-    out = {}
-    for key, typ, *_ in _FULL_CONFIG_SCHEMA:
-        val = getattr(_cfg, key, None)
-        if val is not None:
-            out[key] = typ(val)
-    return out
+    return {k: t(getattr(_cfg, k)) for k, t, *_ in _FULL_CONFIG_SCHEMA if getattr(_cfg, k, None) is not None}
 
 
 def _write_full_config(data: dict) -> dict:
@@ -120,8 +112,7 @@ def _write_full_config(data: dict) -> dict:
         if key not in data:
             continue
         try:
-            val = typ(data[key])
-            val = max(typ(mn), min(typ(mx), val))
+            val = max(typ(mn), min(typ(mx), typ(data[key])))
             setattr(_cfg, key, val)
             changed[key] = val
         except (ValueError, TypeError):
@@ -130,13 +121,7 @@ def _write_full_config(data: dict) -> dict:
 
 
 def _get_schema_defaults() -> dict:
-    """Return the hardcoded default value for every full-config key."""
-    out = {}
-    for entry in _FULL_CONFIG_SCHEMA:
-        key, typ = entry[0], entry[1]
-        default  = entry[6]          # 7th element
-        out[key] = typ(default)
-    return out
+    return {e[0]: e[1](e[6]) for e in _FULL_CONFIG_SCHEMA}
 
 
 # =============================================================================
@@ -180,13 +165,10 @@ def start(host: str = "0.0.0.0", port: int = 8080) -> None:
         if _started:
             return
         _started = True
-
     sys.stdout = _Tee(cast(io.TextIOBase, sys.stdout))
-
     t = threading.Thread(
         target=lambda: _app.run(host=host, port=port, threaded=True, use_reloader=False),
-        daemon=True,
-        name="flask-dashboard",
+        daemon=True, name="flask-dashboard",
     )
     t.start()
     time.sleep(0.4)
@@ -199,7 +181,7 @@ def start(host: str = "0.0.0.0", port: int = 8080) -> None:
 
 class _Tee(io.TextIOBase):
     def __init__(self, wrapped: io.TextIOBase) -> None:
-        self._w   = wrapped
+        self._w = wrapped
         self._buf = ""
 
     def write(self, s: str) -> int:
@@ -212,17 +194,11 @@ class _Tee(io.TextIOBase):
                 push_log(line)
         return len(s)
 
-    def flush(self) -> None:
-        self._w.flush()
-
-    def fileno(self) -> int:
-        return self._w.fileno()
-
+    def flush(self) -> None: self._w.flush()
+    def fileno(self) -> int: return self._w.fileno()
     def isatty(self) -> bool:
-        try:
-            return self._w.isatty()
-        except Exception:
-            return False
+        try: return self._w.isatty()
+        except Exception: return False
 
 
 # =============================================================================
@@ -244,9 +220,7 @@ def _gen_mjpeg():
 
 _NO_CACHE = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma":        "no-cache",
-    "Expires":       "0",
-    "X-Accel-Buffering": "no",
+    "Pragma": "no-cache", "Expires": "0", "X-Accel-Buffering": "no",
 }
 
 
@@ -288,15 +262,11 @@ def route_logs():
             with _subs_lock:
                 if q in _subs:
                     _subs.remove(q)
-
-    return Response(
-        sse_stream(),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return Response(sse_stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── CV config API ─────────────────────────────────────────────────────────────
+# ── CV config ────────────────────────────────────────────────────────────────
 
 @_app.route("/api/cv_config", methods=["GET"])
 def api_cv_config_get():
@@ -308,9 +278,7 @@ def api_cv_config_get():
 def api_cv_config_post():
     from detection import get_cv_config, set_cv_config, CVConfig
     data = request.get_json(force=True, silent=True) or {}
-    current = get_cv_config()
-    merged  = {**current.to_dict(), **data}
-    new_cfg = CVConfig.from_dict(merged)
+    new_cfg = CVConfig.from_dict({**get_cv_config().to_dict(), **data})
     set_cv_config(new_cfg)
     print(f"[WebUI] CV config updated: {new_cfg.to_dict()}")
     return jsonify({"ok": True, "config": new_cfg.to_dict()})
@@ -319,19 +287,17 @@ def api_cv_config_post():
 @_app.route("/api/cv_preset", methods=["POST"])
 def api_cv_preset():
     from detection import get_cv_config, set_cv_config, CVConfig
-    data   = request.get_json(force=True, silent=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     preset = data.get("preset", "").lower()
     if preset not in _PRESETS:
         return jsonify({"ok": False, "error": f"Unknown preset '{preset}'. Valid: {list(_PRESETS)}"}), 400
-    current = get_cv_config()
-    merged  = {**current.to_dict(), **_PRESETS[preset]}
-    new_cfg = CVConfig.from_dict(merged)
+    new_cfg = CVConfig.from_dict({**get_cv_config().to_dict(), **_PRESETS[preset]})
     set_cv_config(new_cfg)
     print(f"[WebUI] CV preset applied: {preset}")
     return jsonify({"ok": True, "preset": preset, "config": new_cfg.to_dict()})
 
 
-# ── Full config API ───────────────────────────────────────────────────────────
+# ── Full config ───────────────────────────────────────────────────────────────
 
 @_app.route("/api/full_config", methods=["GET"])
 def api_full_config_get():
@@ -340,7 +306,7 @@ def api_full_config_get():
 
 @_app.route("/api/full_config", methods=["POST"])
 def api_full_config_post():
-    data    = request.get_json(force=True, silent=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     changed = _write_full_config(data)
     print(f"[WebUI] Full config updated: {changed}")
     return jsonify({"ok": True, "changed": changed})
@@ -351,7 +317,7 @@ def api_default_config_get():
     return jsonify(_get_schema_defaults())
 
 
-# ── AI toggle API ─────────────────────────────────────────────────────────────
+# ── AI toggle ─────────────────────────────────────────────────────────────────
 
 @_app.route("/api/ai_enabled", methods=["GET"])
 def api_ai_get():
@@ -362,18 +328,42 @@ def api_ai_get():
 @_app.route("/api/ai_enabled", methods=["POST"])
 def api_ai_post():
     from fusion_engine import set_ai_enabled
-    data    = request.get_json(force=True, silent=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     enabled = bool(data.get("enabled", True))
     set_ai_enabled(enabled)
     return jsonify({"ok": True, "enabled": enabled})
 
 
+# ── Corner sensors ────────────────────────────────────────────────────────────
+
+@_app.route("/api/corner_sensors")
+def api_corner_sensors():
+    import importlib
+    _MOTORS = [
+        ("turntable", "turntable", False),
+        ("lift",      "lift",      True),
+        ("gripper",   "gripper",   False),
+        ("arm",       "arm",       False),
+        ("pivot",     "pivot",     False),
+    ]
+    result = {}
+    for name, mod_name, dual in _MOTORS:
+        try:
+            mod = importlib.import_module(mod_name)
+            if dual:
+                readings = mod.get_sensor_readings()
+                result[name] = {"available": any(v is not None for v in readings.values()), "channels": readings}
+            else:
+                r = mod.get_sensor_reading()
+                result[name] = {"available": r is not None, "data": r}
+        except Exception as e:
+            result[name] = {"available": False, "error": str(e)}
+    return jsonify(result)
+
+
 @_app.route("/favicon.ico")
 def route_favicon():
-    svg = (
-        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-        b'<text y="26" font-size="28">&#x1F353;</text></svg>'
-    )
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><text y="26" font-size="28">&#x1F353;</text></svg>'
     return Response(svg, mimetype="image/svg+xml")
 
 
@@ -383,1260 +373,632 @@ def route_index():
 
 
 # =============================================================================
-# DASHBOARD HTML
+# DASHBOARD HTML  (compact single-file)
 # =============================================================================
 
 _HTML = r"""<!DOCTYPE html>
 <html lang="nl">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Strawberry Detector</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🍓 Strawberry Detector</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080c10;--bg2:#0d1219;--sur:#111720;--brd:#1e2a38;--brd2:#243040;
+  --acc:#ff3d5a;--grn:#2ddb72;--grn-lo:rgba(45,219,114,.12);
+  --yel:#f5c842;--blu:#3da9f5;--ora:#ff8c42;
+  --txt:#c8d6e8;--mut:#5a7080;
+  --mono:'IBM Plex Mono',monospace;--sans:'Space Grotesk',system-ui,sans-serif;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font-family:var(--mono);font-size:12px}
+body{display:flex;flex-direction:column}
 
-    :root {
-      --bg:        #080c10;
-      --bg2:       #0d1219;
-      --surface:   #111720;
-      --border:    #1e2a38;
-      --border2:   #243040;
-      --accent:    #ff3d5a;
-      --green:     #2ddb72;
-      --green-lo:  rgba(45,219,114,.12);
-      --yellow:    #f5c842;
-      --blue:      #3da9f5;
-      --orange:    #ff8c42;
-      --text:      #c8d6e8;
-      --muted:     #5a7080;
-      --mono:      'IBM Plex Mono', 'Fira Code', monospace;
-      --sans:      'Space Grotesk', system-ui, sans-serif;
-      --console-w: 360px;
-      --panel-w:   300px;
-    }
+/* header */
+header{display:flex;align-items:center;gap:12px;padding:0 16px;height:48px;background:var(--sur);border-bottom:1px solid var(--brd);flex-shrink:0}
+.logo{font-size:18px}
+h1{font-family:var(--sans);font-size:13px;font-weight:700;white-space:nowrap}
+h1 span{color:var(--acc)}
+.sep{width:1px;height:24px;background:var(--brd);flex-shrink:0}
+.pill{display:flex;align-items:center;gap:5px;padding:2px 9px;border-radius:100px;border:1px solid var(--brd);background:var(--bg2);font-size:10px;color:var(--mut)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--mut);flex-shrink:0}
+.dot.on{background:var(--grn);animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.stats{display:flex;gap:5px;margin-left:auto;align-items:center;flex-wrap:wrap}
+.st{display:flex;flex-direction:column;align-items:center;padding:3px 9px;background:var(--bg2);border:1px solid var(--brd);border-radius:6px;min-width:44px}
+.st-l{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px}
+.st-v{font-family:var(--sans);font-size:15px;font-weight:700;line-height:1.3}
+#s-fps{color:var(--grn)}#s-hits{color:var(--acc)}#s-cam{font-size:11px;font-family:var(--mono)}
 
-    html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); }
-    body { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; }
+/* main layout */
+main{flex:1;display:flex;min-height:0}
 
-    /* ─── HEADER ─────────────────────────────────────────── */
-    header {
-      display: flex; align-items: center; gap: 14px;
-      padding: 0 18px; height: 52px;
-      background: var(--surface); border-bottom: 1px solid var(--border);
-      flex-shrink: 0; overflow: hidden;
-    }
+/* settings panel */
+.panel{width:280px;min-width:200px;max-width:55vw;flex-shrink:0;display:flex;flex-direction:column;background:var(--sur);border-right:1px solid var(--brd);min-height:0}
 
-    .berry-icon { font-size: 20px; filter: drop-shadow(0 0 6px rgba(255,61,90,.5)); animation: float 3s ease-in-out infinite; }
-    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-3px)} }
+/* tabs */
+.tabs{display:flex;flex-shrink:0;border-bottom:1px solid var(--brd);overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex-shrink:0;padding:0 12px;height:32px;cursor:pointer;font-family:var(--mono);font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px;background:none;border:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.tab:hover{color:var(--txt)}
+.tab.on{color:var(--txt);border-bottom-color:var(--acc)}
+.pane{display:none;flex:1;overflow-y:auto}
+.pane.on{display:block}
+.pane::-webkit-scrollbar{width:3px}
+.pane::-webkit-scrollbar-thumb{background:var(--brd2);border-radius:2px}
+.sec{padding:10px;border-bottom:1px solid var(--brd)}
+.sec-t{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
 
-    h1 { font-family: var(--sans); font-size: 14px; font-weight: 700; white-space: nowrap; }
-    h1 span { color: var(--accent); }
+/* AI toggle */
+.ai-row{display:flex;align-items:center;justify-content:space-between;padding:7px 9px;border-radius:6px;border:1px solid var(--brd);background:var(--bg2)}
+.ai-lbl small{display:block;font-size:9px;color:var(--mut);margin-top:1px}
+.sw{position:relative;width:34px;height:19px;flex-shrink:0}
+.sw input{opacity:0;width:0;height:0}
+.sw-t{position:absolute;inset:0;border-radius:10px;background:var(--brd2);cursor:pointer;transition:background .2s}
+.sw-t::after{content:'';position:absolute;width:13px;height:13px;border-radius:50%;background:var(--mut);top:3px;left:3px;transition:all .2s}
+.sw input:checked+.sw-t{background:var(--grn)}
+.sw input:checked+.sw-t::after{background:#fff;transform:translateX(15px)}
 
-    .hdivider { width: 1px; height: 26px; background: var(--border); flex-shrink: 0; }
+/* presets */
+.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.pbtn{font-family:var(--mono);font-size:10px;padding:5px 3px;border:1px solid var(--brd);border-radius:5px;background:var(--bg2);color:var(--mut);cursor:pointer;text-align:center;transition:all .15s}
+.pbtn:hover{background:var(--brd2);color:var(--txt)}
+.pbtn.on{border-color:var(--acc);color:var(--acc);background:rgba(255,61,90,.08)}
+.pdot{display:block;width:9px;height:9px;border-radius:50%;margin:0 auto 2px}
 
-    .live-pill {
-      display: flex; align-items: center; gap: 6px;
-      padding: 3px 10px; border-radius: 100px;
-      border: 1px solid var(--border); background: var(--bg2);
-      font-size: 10px; color: var(--muted); white-space: nowrap;
-    }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-    .dot.on { background: var(--green); box-shadow: 0 0 7px var(--green); animation: pulse 2s ease-in-out infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+/* sliders */
+.row{margin-bottom:7px}
+.row label{display:flex;justify-content:space-between;font-size:10px;color:var(--mut);margin-bottom:2px}
+.row label span{color:var(--txt);font-weight:600}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;outline:none;cursor:pointer;background:var(--brd2)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--blu);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;border:none;background:var(--blu);cursor:pointer}
+.ora-thumb::-webkit-slider-thumb{background:var(--ora)}
+.ora-thumb::-moz-range-thumb{background:var(--ora)}
 
-    .stats { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
-    .stat {
-      display: flex; flex-direction: column; align-items: center;
-      padding: 4px 11px 3px;
-      background: var(--bg2); border: 1px solid var(--border); border-radius: 7px;
-      min-width: 48px; transition: border-color .3s;
-    }
-    .stat.flash { border-color: var(--green); }
-    .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; line-height: 1; }
-    .stat-val  { font-family: var(--sans); font-size: 16px; font-weight: 700; line-height: 1.4; color: var(--text); }
-    #s-fps  { color: var(--green); }
-    #s-hits { color: var(--accent); }
-    #s-cam  { font-size: 11px; font-family: var(--mono); }
+/* hue band */
+.hband{height:7px;border-radius:3px;margin-bottom:8px;background:linear-gradient(to right,hsl(0,100%,50%),hsl(60,100%,50%),hsl(120,100%,50%),hsl(180,100%,50%),hsl(240,100%,50%),hsl(300,100%,50%),hsl(360,100%,50%));position:relative}
+.hmark{position:absolute;top:-2px;width:3px;height:11px;background:#fff;border-radius:2px;transform:translateX(-50%);pointer-events:none;transition:left .1s}
 
-    /* ─── MAIN LAYOUT ─────────────────────────────────────── */
-    main { flex: 1; display: flex; min-height: 0; }
+/* buttons */
+.btn-row{display:flex;gap:5px;margin-top:8px}
+.btn{flex:1;padding:6px;font-family:var(--mono);font-size:11px;font-weight:600;border-radius:5px;cursor:pointer;transition:all .15s;letter-spacing:.4px}
+.btn-g{border:1px solid var(--grn);background:var(--grn-lo);color:var(--grn)}
+.btn-g:hover{background:rgba(45,219,114,.22)}
+.btn-o{border:1px solid var(--ora);background:rgba(255,140,66,.1);color:var(--ora)}
+.btn-o:hover{background:rgba(255,140,66,.22)}
+.btn-r{border:1px solid var(--brd2);background:var(--bg2);color:var(--mut)}
+.btn-r:hover{border-color:var(--yel)!important;color:var(--yel)!important;background:rgba(245,200,66,.08)!important}
+.btn:active{transform:scale(.97)}
+.btn.busy{opacity:.5;pointer-events:none}
+.fb{font-size:9px;text-align:center;margin-top:4px;height:11px;color:var(--mut)}
+.fb.ok{color:var(--grn)}.fb.err{color:var(--acc)}
 
-    /* ─── VIDEO PANEL ─────────────────────────────────────── */
-    .video-panel {
-      flex: 1; min-width: 0; position: relative;
-      background: var(--bg); display: flex; align-items: center; justify-content: center; overflow: hidden;
-    }
-    .video-panel::after {
-      content: ''; position: absolute; inset: 0;
-      background: repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);
-      pointer-events: none; z-index: 2;
-    }
-    #feed { max-width: 100%; max-height: 100%; object-fit: contain; display: none; z-index: 1; }
-    .no-signal { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--muted); z-index: 3; pointer-events: none; }
-    .no-signal-icon { font-size: 56px; opacity: .15; animation: breathe 3s ease-in-out infinite; }
-    @keyframes breathe { 0%,100%{opacity:.15} 50%{opacity:.25} }
-    .no-signal p { font-size: 11px; letter-spacing: .5px; }
-    .corner-label { position: absolute; z-index: 3; font-size: 9px; color: rgba(255,255,255,.25); letter-spacing: .5px; text-transform: uppercase; }
-    .corner-label.tl { top: 8px; left: 10px; }
-    .corner-label.tr { top: 8px; right: 10px; }
-    .corner-label.bl { bottom: 8px; left: 10px; }
+/* knob rows */
+.krow{margin-bottom:8px}
+.krow label{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;color:var(--mut);margin-bottom:2px}
+.krow .kn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.krow .kv{color:var(--txt);font-weight:600;min-width:32px;text-align:right}
+input[type=number]{width:100%;padding:2px 5px;background:var(--bg2);border:1px solid var(--brd);border-radius:4px;color:var(--txt);font-family:var(--mono);font-size:11px;outline:none}
+input[type=number]:focus{border-color:var(--ora)}
 
-    /* ─── DRAG DIVIDERS ───────────────────────────────────── */
-    .drag-divider {
-      width: 5px; flex-shrink: 0; background: var(--border);
-      cursor: col-resize; position: relative; transition: background .15s; z-index: 10;
-    }
-    .drag-divider:hover, .drag-divider.dragging { background: var(--accent); }
-    .drag-divider::after {
-      content: ''; position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      width: 1px; height: 40px; background: rgba(255,255,255,.1); border-radius: 1px;
-    }
+/* group sub-header */
+.grp-h{font-size:9px;color:var(--blu);text-transform:uppercase;letter-spacing:.7px;margin:10px 0 5px;padding-top:8px;border-top:1px solid var(--brd)}
+.grp-h:first-child{border-top:none;margin-top:0;padding-top:0}
 
-    /* ─── SETTINGS PANEL ──────────────────────────────────── */
-    .settings-panel {
-      width: var(--panel-w); min-width: 220px; max-width: 60vw;
-      flex-shrink: 0; display: flex; flex-direction: column;
-      background: var(--surface); border-right: 1px solid var(--border); min-height: 0;
-    }
+/* sensors */
+.scard{background:var(--bg2);border:1px solid var(--brd);border-radius:6px;padding:7px 9px;margin-bottom:5px}
+.scard.live{border-color:var(--grn)}
+.scard.dead{opacity:.55}
+.scard-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.sname{font-family:var(--sans);font-size:11px;font-weight:700}
+.sbadge{font-size:9px;padding:1px 6px;border-radius:8px;background:var(--brd2);color:var(--mut)}
+.sbadge.on{background:var(--grn-lo);color:var(--grn)}
+.srow{display:flex;justify-content:space-between;font-size:10px;margin-top:2px}
+.sk{color:var(--mut)}.sv{color:var(--txt);font-weight:600}
+.sarc{height:4px;border-radius:2px;margin-top:5px;background:var(--brd2);position:relative;overflow:hidden}
+.sarc-f{position:absolute;top:0;left:0;height:100%;background:var(--grn);border-radius:2px;transition:width .25s}
 
-    /* ─── TABS ────────────────────────────────────────────── */
-    .tab-bar {
-      display: flex; flex-shrink: 0;
-      border-bottom: 1px solid var(--border);
-      overflow-x: auto; scrollbar-width: none;
-    }
-    .tab-bar::-webkit-scrollbar { display: none; }
-    .tab-btn {
-      flex-shrink: 0; padding: 0 12px; height: 34px; cursor: pointer;
-      font-family: var(--mono); font-size: 9px; color: var(--muted);
-      text-transform: uppercase; letter-spacing: .8px;
-      background: none; border: none; border-bottom: 2px solid transparent;
-      transition: color .15s, border-color .15s;
-    }
-    .tab-btn:hover { color: var(--text); }
-    .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+/* drag divider */
+.div{width:4px;flex-shrink:0;background:var(--brd);cursor:col-resize;transition:background .15s;z-index:10}
+.div:hover,.div.drag{background:var(--acc)}
 
-    .tab-pane { display: none; flex: 1; overflow-y: auto; }
-    .tab-pane.active { display: block; }
-    .tab-pane::-webkit-scrollbar { width: 3px; }
-    .tab-pane::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+/* video panel */
+.video{flex:1;min-width:0;position:relative;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.video::after{content:'';position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);pointer-events:none;z-index:2}
+#feed{max-width:100%;max-height:100%;object-fit:contain;display:none;z-index:1}
+.nosig{display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--mut);z-index:3;pointer-events:none}
+.nosig-ico{font-size:48px;opacity:.15}
+.nosig p{font-size:11px}
+.clabel{position:absolute;z-index:3;font-size:9px;color:rgba(255,255,255,.22);letter-spacing:.5px;text-transform:uppercase}
+.clabel.tl{top:7px;left:9px}.clabel.tr{top:7px;right:9px}.clabel.bl{bottom:7px;left:9px}
 
-    .section { padding: 12px; border-bottom: 1px solid var(--border); }
-    .section-title { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+/* console panel */
+.con{width:320px;min-width:160px;max-width:65vw;flex-shrink:0;display:flex;flex-direction:column;background:var(--sur);min-height:0}
+.con-bar{display:flex;align-items:center;justify-content:space-between;padding:0 9px;height:32px;border-bottom:1px solid var(--brd);flex-shrink:0}
+.con-t{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:1px}
+.btns{display:flex;gap:4px}
+button{font-family:var(--mono);font-size:10px;padding:2px 8px;border:1px solid var(--brd);border-radius:4px;background:var(--bg2);color:var(--mut);cursor:pointer;transition:all .15s}
+button:hover{background:var(--brd2);color:var(--txt)}
+button.on{border-color:var(--grn);color:var(--grn);background:var(--grn-lo)}
+#log{flex:1;overflow-y:auto;padding:5px 4px 5px 9px;min-height:0}
+#log::-webkit-scrollbar{width:3px}
+#log::-webkit-scrollbar-thumb{background:var(--brd2);border-radius:2px}
+.ll{display:grid;grid-template-columns:50px 1fr;gap:5px;line-height:1.6;white-space:pre-wrap;word-break:break-all}
+.lt{font-size:9px;color:#2a3a48;padding-top:3px}
+.lm{color:var(--txt)}
+.lm.fps{color:var(--grn)}.lm.err{color:#ff5370}.lm.warn{color:var(--yel)}.lm.info{color:var(--blu)}.lm.ok{color:var(--grn);font-weight:600}.lm.sep{color:var(--brd2)}
+.rbadge{display:inline-block;margin-left:6px;font-size:9px;padding:0 5px;border-radius:8px;background:var(--brd2);color:var(--mut);vertical-align:middle;line-height:15px}
 
-    /* AI Toggle */
-    .ai-toggle {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 8px 10px; border-radius: 7px;
-      border: 1px solid var(--border); background: var(--bg2);
-    }
-    .ai-label { font-size: 12px; color: var(--text); }
-    .ai-label small { display: block; font-size: 9px; color: var(--muted); margin-top: 1px; }
+/* footer */
+footer{display:flex;align-items:center;justify-content:space-between;padding:0 12px;height:26px;background:var(--sur);border-top:1px solid var(--brd);font-size:10px;color:var(--mut);flex-shrink:0}
+#fc{display:flex;align-items:center;gap:5px}
 
-    .toggle-switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
-    .toggle-switch input { opacity: 0; width: 0; height: 0; }
-    .toggle-track {
-      position: absolute; inset: 0; border-radius: 10px;
-      background: var(--border2); cursor: pointer; transition: background .2s;
-    }
-    .toggle-track::after {
-      content: ''; position: absolute; width: 14px; height: 14px; border-radius: 50%;
-      background: var(--muted); top: 3px; left: 3px; transition: all .2s;
-    }
-    .toggle-switch input:checked + .toggle-track { background: var(--green); }
-    .toggle-switch input:checked + .toggle-track::after {
-      background: #fff; transform: translateX(16px);
-    }
-
-    /* Presets */
-    .preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
-    .preset-btn {
-      font-family: var(--mono); font-size: 10px; padding: 5px 4px;
-      border: 1px solid var(--border); border-radius: 5px;
-      background: var(--bg2); color: var(--muted);
-      cursor: pointer; text-align: center; transition: all .15s;
-    }
-    .preset-btn:hover { background: var(--border2); color: var(--text); }
-    .preset-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(255,61,90,.08); }
-    .preset-btn .pdot { display: block; width: 10px; height: 10px; border-radius: 50%; margin: 0 auto 3px; }
-
-    /* HSV sliders */
-    .hsv-row { margin-bottom: 8px; }
-    .hsv-row label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-bottom: 3px; }
-    .hsv-row label span { color: var(--text); font-weight: 600; }
-    .hsv-row input[type=range] {
-      -webkit-appearance: none; appearance: none;
-      width: 100%; height: 4px; border-radius: 2px; outline: none; cursor: pointer;
-      background: var(--border2);
-    }
-    .hsv-row input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
-      background: var(--blue); box-shadow: 0 0 5px rgba(61,169,245,.4); cursor: pointer;
-    }
-    .hsv-row input[type=range]::-moz-range-thumb {
-      width: 13px; height: 13px; border-radius: 50%; border: none;
-      background: var(--blue); cursor: pointer;
-    }
-
-    /* Hue visual band */
-    .hue-band {
-      height: 8px; border-radius: 4px; margin-bottom: 10px;
-      background: linear-gradient(to right,
-        hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%),
-        hsl(90,100%,50%), hsl(120,100%,50%), hsl(150,100%,50%),
-        hsl(180,100%,50%), hsl(210,100%,50%), hsl(240,100%,50%),
-        hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%), hsl(360,100%,50%));
-      position: relative;
-    }
-    .hue-marker {
-      position: absolute; top: -2px; width: 4px; height: 12px;
-      background: #fff; border-radius: 2px; transform: translateX(-50%);
-      pointer-events: none; transition: left .1s;
-    }
-
-    /* Apply / Reset button row */
-    .btn-row { display: flex; gap: 6px; margin-top: 10px; }
-    .btn-row .apply-btn,
-    .btn-row .cfg-apply-btn { flex: 1; margin-top: 0; }
-
-    /* Apply button */
-    .apply-btn {
-      width: 100%; padding: 7px; margin-top: 10px;
-      font-family: var(--mono); font-size: 11px; font-weight: 600;
-      border: 1px solid var(--green); border-radius: 6px;
-      background: var(--green-lo); color: var(--green);
-      cursor: pointer; transition: all .15s; letter-spacing: .5px;
-    }
-    .apply-btn:hover { background: rgba(45,219,114,.25); }
-    .apply-btn:active { transform: scale(.97); }
-    .apply-btn.busy { opacity: .5; pointer-events: none; }
-
-    .feedback { font-size: 9px; text-align: center; margin-top: 5px; height: 12px; color: var(--muted); }
-    .feedback.ok  { color: var(--green); }
-    .feedback.err { color: var(--accent); }
-
-    /* ─── KNOB ROWS (full config) ─────────────────────────── */
-    .knob-row { margin-bottom: 10px; }
-    .knob-row label {
-      display: flex; justify-content: space-between; align-items: baseline;
-      font-size: 10px; color: var(--muted); margin-bottom: 3px;
-    }
-    .knob-row label .kname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .knob-row label .kval  { color: var(--text); font-weight: 600; min-width: 36px; text-align: right; }
-    .knob-row input[type=range] {
-      -webkit-appearance: none; appearance: none;
-      width: 100%; height: 4px; border-radius: 2px; outline: none; cursor: pointer;
-      background: var(--border2);
-    }
-    .knob-row input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
-      background: var(--orange); cursor: pointer;
-    }
-    .knob-row input[type=range]::-moz-range-thumb {
-      width: 13px; height: 13px; border-radius: 50%; border: none;
-      background: var(--orange); cursor: pointer;
-    }
-    .knob-row input[type=number] {
-      width: 100%; padding: 3px 6px; background: var(--bg2);
-      border: 1px solid var(--border); border-radius: 4px;
-      color: var(--text); font-family: var(--mono); font-size: 11px; outline: none;
-    }
-    .knob-row input[type=number]:focus { border-color: var(--orange); }
-
-    .cfg-apply-btn {
-      width: 100%; padding: 7px; margin-top: 4px;
-      font-family: var(--mono); font-size: 11px; font-weight: 600;
-      border: 1px solid var(--orange); border-radius: 6px;
-      background: rgba(255,140,66,.10); color: var(--orange);
-      cursor: pointer; transition: all .15s; letter-spacing: .5px;
-    }
-    .cfg-apply-btn:hover { background: rgba(255,140,66,.22); }
-    .cfg-apply-btn:active { transform: scale(.97); }
-    .cfg-apply-btn.busy { opacity: .5; pointer-events: none; }
-
-    /* ─── CONSOLE PANEL ───────────────────────────────────── */
-    .console-panel {
-      width: var(--console-w); min-width: 180px; max-width: 70vw;
-      flex-shrink: 0; display: flex; flex-direction: column;
-      background: var(--surface); min-height: 0;
-    }
-    .console-bar {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 10px; height: 34px;
-      border-bottom: 1px solid var(--border); flex-shrink: 0;
-    }
-    .console-title { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
-    .btns { display: flex; gap: 5px; }
-
-    button {
-      font-family: var(--mono); font-size: 10px; padding: 2px 9px;
-      border: 1px solid var(--border); border-radius: 4px;
-      background: var(--bg2); color: var(--muted); cursor: pointer; transition: all .15s;
-    }
-    button:hover  { background: var(--border2); color: var(--text); }
-    button.active { border-color: var(--green); color: var(--green); background: var(--green-lo); }
-
-    /* Reset button — must come after global `button` rule to win cascade */
-    .reset-btn {
-      padding: 7px 10px; margin-top: 0;
-      font-family: var(--mono); font-size: 11px; font-weight: 600;
-      border: 1px solid var(--border2); border-radius: 6px;
-      background: var(--bg2); color: var(--muted);
-      cursor: pointer; transition: all .15s; letter-spacing: .5px; white-space: nowrap;
-    }
-    .reset-btn:hover { border-color: var(--yellow) !important; color: var(--yellow) !important; background: rgba(245,200,66,.08) !important; }
-    .reset-btn:active { transform: scale(.97); }
-
-    #log { flex: 1; overflow-y: auto; padding: 6px 4px 6px 10px; min-height: 0; }
-    #log::-webkit-scrollbar { width: 3px; }
-    #log::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-
-    .ll { display: grid; grid-template-columns: 52px 1fr; gap: 6px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-    .lt { font-size: 9px; color: #2a3a48; padding-top: 3px; }
-    .lm { color: var(--text); }
-    .lm.fps  { color: var(--green); }
-    .lm.err  { color: #ff5370; }
-    .lm.warn { color: var(--yellow); }
-    .lm.info { color: var(--blue); }
-    .lm.ok   { color: var(--green); font-weight: 600; }
-    .lm.sep  { color: var(--border2); }
-
-    .repeat-badge {
-      display: inline-block; margin-left: 7px;
-      font-size: 9px; padding: 0 5px; border-radius: 8px;
-      background: var(--border2); color: var(--muted);
-      vertical-align: middle; line-height: 16px;
-    }
-
-    /* ─── FOOTER ──────────────────────────────────────────── */
-    footer {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 14px; height: 28px;
-      background: var(--surface); border-top: 1px solid var(--border);
-      font-size: 10px; color: var(--muted); flex-shrink: 0;
-    }
-    #fc { display: flex; align-items: center; gap: 6px; }
-
-    @media (max-width: 960px) {
-      main { flex-direction: column; }
-      .video-panel { flex: none; height: 40vh; }
-      .drag-divider { display: none; }
-      .settings-panel { width: 100% !important; min-width: unset; max-height: 280px; border-right: none; border-bottom: 1px solid var(--border); }
-      .console-panel  { width: 100% !important; min-width: unset; }
-      .stats { display: none; }
-    }
-  </style>
+@media(max-width:900px){main{flex-direction:column}.video{flex:none;height:38vh}.div{display:none}.panel{width:100%!important;min-width:unset;max-height:260px;border-right:none;border-bottom:1px solid var(--brd)}.con{width:100%!important;min-width:unset}.stats{display:none}}
+</style>
 </head>
 <body>
 
 <header>
-  <div class="berry-icon">🍓</div>
+  <div class="logo">🍓</div>
   <h1>Strawberry <span>Detector</span></h1>
-  <div class="hdivider"></div>
-  <div class="live-pill">
+  <div class="sep"></div>
+  <div class="pill">
     <div class="dot" id="liveDot"></div>
     <span id="liveText">Verbinden…</span>
   </div>
   <div class="stats">
-    <div class="stat"><span class="stat-lbl">FPS</span><span class="stat-val" id="s-fps">—</span></div>
-    <div class="stat"><span class="stat-lbl">AI</span><span class="stat-val" id="s-ai">—</span></div>
-    <div class="stat"><span class="stat-lbl">CV</span><span class="stat-val" id="s-cv">—</span></div>
-    <div class="stat"><span class="stat-lbl">Fused</span><span class="stat-val" id="s-fused">—</span></div>
-    <div class="stat"><span class="stat-lbl">Hits</span><span class="stat-val" id="s-hits">—</span></div>
-    <div class="stat"><span class="stat-lbl">Poss.</span><span class="stat-val" id="s-poss">—</span></div>
-    <div class="stat"><span class="stat-lbl">Cam</span><span class="stat-val" id="s-cam">—</span></div>
+    <div class="st"><span class="st-l">FPS</span><span class="st-v" id="s-fps">—</span></div>
+    <div class="st"><span class="st-l">AI</span><span class="st-v" id="s-ai">—</span></div>
+    <div class="st"><span class="st-l">CV</span><span class="st-v" id="s-cv">—</span></div>
+    <div class="st"><span class="st-l">Fused</span><span class="st-v" id="s-fused">—</span></div>
+    <div class="st"><span class="st-l">Hits</span><span class="st-v" id="s-hits">—</span></div>
+    <div class="st"><span class="st-l">Poss</span><span class="st-v" id="s-poss">—</span></div>
+    <div class="st"><span class="st-l">Cam</span><span class="st-v" id="s-cam">—</span></div>
   </div>
 </header>
 
 <main>
 
-  <!-- ── SETTINGS PANEL ── -->
-  <div class="settings-panel" id="settingsPanel">
-
-    <div class="tab-bar">
-      <button class="tab-btn active" onclick="switchTab('mode')">Mode</button>
-      <button class="tab-btn" onclick="switchTab('colour')">Colour</button>
-      <button class="tab-btn" onclick="switchTab('thresholds')">Thresholds</button>
-      <button class="tab-btn" onclick="switchTab('fusion')">Fusion</button>
-      <button class="tab-btn" onclick="switchTab('tracking')">Tracking</button>
-      <button class="tab-btn" onclick="switchTab('shape')">Shape</button>
-      <button class="tab-btn" onclick="switchTab('zoom')">Zoom</button>
-    </div>
-
-    <!-- ── TAB: Mode ── -->
-    <div class="tab-pane active" id="tab-mode">
-      <div class="section">
-        <div class="section-title">Detection mode</div>
-        <div class="ai-toggle">
-          <div class="ai-label">
-            AI (YOLO)
-            <small id="aiSubLabel">Loading…</small>
-          </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="aiToggle" onchange="onAiToggle(this.checked)">
-            <span class="toggle-track"></span>
-          </label>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Colour ── -->
-    <div class="tab-pane" id="tab-colour">
-      <div class="section">
-        <div class="section-title">Colour preset</div>
-        <div class="preset-grid">
-          <button class="preset-btn active" data-preset="red" onclick="applyPreset('red')">
-            <span class="pdot" style="background:#e03030"></span>Red
-          </button>
-          <button class="preset-btn" data-preset="orange" onclick="applyPreset('orange')">
-            <span class="pdot" style="background:#e07830"></span>Orange
-          </button>
-          <button class="preset-btn" data-preset="yellow" onclick="applyPreset('yellow')">
-            <span class="pdot" style="background:#d4c030"></span>Yellow
-          </button>
-          <button class="preset-btn" data-preset="green" onclick="applyPreset('green')">
-            <span class="pdot" style="background:#30c050"></span>Green
-          </button>
-          <button class="preset-btn" data-preset="blue" onclick="applyPreset('blue')">
-            <span class="pdot" style="background:#3070e0"></span>Blue
-          </button>
-          <button class="preset-btn" data-preset="purple" onclick="applyPreset('purple')">
-            <span class="pdot" style="background:#9030c0"></span>Purple
-          </button>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="section-title">HSV tuning</div>
-
-        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;">HUE BAND 1 (low-hue / wrap)</div>
-        <div class="hue-band">
-          <div class="hue-marker" id="hm1l"></div>
-          <div class="hue-marker" id="hm1h" style="background:#adf;"></div>
-        </div>
-        <div class="hsv-row">
-          <label>H1 low <span id="v-h1l">0</span></label>
-          <input type="range" min="0" max="179" value="0" id="sl-h1l" oninput="sliderChanged()">
-        </div>
-        <div class="hsv-row">
-          <label>H1 high <span id="v-h1h">10</span></label>
-          <input type="range" min="0" max="179" value="10" id="sl-h1h" oninput="sliderChanged()">
-        </div>
-
-        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;margin-top:6px;">HUE BAND 2 (high-hue / wrap)</div>
-        <div class="hue-band">
-          <div class="hue-marker" id="hm2l"></div>
-          <div class="hue-marker" id="hm2h" style="background:#adf;"></div>
-        </div>
-        <div class="hsv-row">
-          <label>H2 low <span id="v-h2l">160</span></label>
-          <input type="range" min="0" max="179" value="160" id="sl-h2l" oninput="sliderChanged()">
-        </div>
-        <div class="hsv-row">
-          <label>H2 high <span id="v-h2h">179</span></label>
-          <input type="range" min="0" max="179" value="179" id="sl-h2h" oninput="sliderChanged()">
-        </div>
-
-        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;margin-top:6px;">SATURATION / VALUE GATE</div>
-        <div class="hsv-row">
-          <label>Sat min <span id="v-sat">80</span></label>
-          <input type="range" min="0" max="255" value="80" id="sl-sat" oninput="sliderChanged()">
-        </div>
-        <div class="hsv-row">
-          <label>Val min <span id="v-vmin">50</span></label>
-          <input type="range" min="0" max="255" value="50" id="sl-vmin" oninput="sliderChanged()">
-        </div>
-        <div class="hsv-row">
-          <label>Val max <span id="v-vmax">240</span></label>
-          <input type="range" min="0" max="255" value="240" id="sl-vmax" oninput="sliderChanged()">
-        </div>
-
-        <div class="btn-row">
-          <button class="apply-btn" id="applyBtn" onclick="applyHSV()">▶ Apply HSV</button>
-          <button class="reset-btn" onclick="resetHSV()" title="Reset to red preset defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb"></div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Thresholds ── -->
-    <div class="tab-pane" id="tab-thresholds">
-      <div class="section">
-        <div class="section-title">Confidence thresholds</div>
-        <div id="knobs-thresholds"></div>
-        <div class="btn-row">
-          <button class="cfg-apply-btn" id="applyThresholds" onclick="applyGroup('thresholds')">▶ Apply</button>
-          <button class="reset-btn" onclick="resetGroup('thresholds')" title="Reset to defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb-thresholds"></div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Fusion ── -->
-    <div class="tab-pane" id="tab-fusion">
-      <div class="section">
-        <div class="section-title">Fusion & CV scoring weights</div>
-        <div id="knobs-fusion"></div>
-        <div class="btn-row">
-          <button class="cfg-apply-btn" id="applyFusion" onclick="applyGroup('fusion')">▶ Apply</button>
-          <button class="reset-btn" onclick="resetGroup('fusion')" title="Reset to defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb-fusion"></div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Tracking ── -->
-    <div class="tab-pane" id="tab-tracking">
-      <div class="section">
-        <div class="section-title">Persistence & possible-hit lane</div>
-        <div id="knobs-tracking"></div>
-        <div class="btn-row">
-          <button class="cfg-apply-btn" id="applyTracking" onclick="applyGroup('tracking')">▶ Apply</button>
-          <button class="reset-btn" onclick="resetGroup('tracking')" title="Reset to defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb-tracking"></div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Shape ── -->
-    <div class="tab-pane" id="tab-shape">
-      <div class="section">
-        <div class="section-title">Contour & shape filters</div>
-        <div id="knobs-shape"></div>
-        <!-- CVConfig shape params live here too -->
-        <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
-          <div class="section-title" style="margin-bottom:8px;">CVConfig shape params</div>
-          <div class="knob-row">
-            <label><span class="kname">Circularity min</span><span class="kval" id="v-circ">0.55</span></label>
-            <input type="range" min="0" max="1" step="0.01" value="0.55" id="sl-circ" oninput="document.getElementById('v-circ').textContent=parseFloat(this.value).toFixed(2)">
-          </div>
-          <div class="knob-row">
-            <label><span class="kname">Max aspect ratio</span><span class="kval" id="v-asr">1.6</span></label>
-            <input type="range" min="1" max="5" step="0.1" value="1.6" id="sl-asr" oninput="document.getElementById('v-asr').textContent=parseFloat(this.value).toFixed(1)">
-          </div>
-          <div class="knob-row">
-            <label><span class="kname">Watershed FG thresh</span><span class="kval" id="v-wfg">0.35</span></label>
-            <input type="range" min="0" max="1" step="0.01" value="0.35" id="sl-wfg" oninput="document.getElementById('v-wfg').textContent=parseFloat(this.value).toFixed(2)">
-          </div>
-          <div class="knob-row">
-            <label><span class="kname">NMS IoU threshold</span><span class="kval" id="v-nms">0.35</span></label>
-            <input type="range" min="0" max="1" step="0.01" value="0.35" id="sl-nms" oninput="document.getElementById('v-nms').textContent=parseFloat(this.value).toFixed(2)">
-          </div>
-        </div>
-        <div class="btn-row">
-          <button class="cfg-apply-btn" id="applyShape" onclick="applyShape()">▶ Apply</button>
-          <button class="reset-btn" onclick="resetShape()" title="Reset to defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb-shape"></div>
-      </div>
-    </div>
-
-    <!-- ── TAB: Zoom ── -->
-    <div class="tab-pane" id="tab-zoom">
-      <div class="section">
-        <div class="section-title">Zoom recheck</div>
-        <div id="knobs-zoom"></div>
-        <div class="btn-row">
-          <button class="cfg-apply-btn" id="applyZoom" onclick="applyGroup('zoom')">▶ Apply</button>
-          <button class="reset-btn" onclick="resetGroup('zoom')" title="Reset to defaults">↺ Reset</button>
-        </div>
-        <div class="feedback" id="fb-zoom"></div>
-      </div>
-    </div>
-
-  </div><!-- /settings-panel -->
-
-  <div class="drag-divider" id="dragLeft"></div>
-
-  <!-- ── VIDEO PANEL ── -->
-  <div class="video-panel">
-    <span class="corner-label tl" id="camLabel">CAM</span>
-    <span class="corner-label tr" id="resLabel"></span>
-    <span class="corner-label bl" id="timeLabel"></span>
-    <div class="no-signal" id="noSignal">
-      <div class="no-signal-icon">📷</div>
-      <p>Wachten op videostream…</p>
-    </div>
-    <img id="feed" alt="camera">
+<!-- ── SETTINGS PANEL ── -->
+<div class="panel" id="settingsPanel">
+  <div class="tabs">
+    <button class="tab on" onclick="switchTab('detect')">Detect</button>
+    <button class="tab" onclick="switchTab('thresholds')">Thresh</button>
+    <button class="tab" onclick="switchTab('tracking')">Track</button>
+    <button class="tab" onclick="switchTab('advanced')">Advanced</button>
+    <button class="tab" onclick="switchTab('sensors')">Sensors</button>
   </div>
 
-  <div class="drag-divider" id="dragRight"></div>
-
-  <!-- ── CONSOLE PANEL ── -->
-  <div class="console-panel" id="consolePanel">
-    <div class="console-bar">
-      <span class="console-title">Console output</span>
-      <div class="btns">
-        <button id="scrollBtn" class="active" onclick="toggleScroll()">↓ Auto</button>
-        <button onclick="clearLog()">Wis</button>
+  <!-- ── DETECT (mode + colour merged) ── -->
+  <div class="pane on" id="tab-detect">
+    <div class="sec">
+      <div class="sec-t">Mode</div>
+      <div class="ai-row">
+        <div class="ai-lbl">AI (YOLO)<small id="aiSub">Loading…</small></div>
+        <label class="sw"><input type="checkbox" id="aiToggle" onchange="onAiToggle(this.checked)"><span class="sw-t"></span></label>
       </div>
     </div>
-    <div id="log"></div>
+    <div class="sec">
+      <div class="sec-t">Colour preset</div>
+      <div class="presets">
+        <button class="pbtn on" data-preset="red" onclick="applyPreset('red')"><span class="pdot" style="background:#e03030"></span>Red</button>
+        <button class="pbtn" data-preset="orange" onclick="applyPreset('orange')"><span class="pdot" style="background:#e07830"></span>Orange</button>
+        <button class="pbtn" data-preset="yellow" onclick="applyPreset('yellow')"><span class="pdot" style="background:#d4c030"></span>Yellow</button>
+        <button class="pbtn" data-preset="green" onclick="applyPreset('green')"><span class="pdot" style="background:#30c050"></span>Green</button>
+        <button class="pbtn" data-preset="blue" onclick="applyPreset('blue')"><span class="pdot" style="background:#3070e0"></span>Blue</button>
+        <button class="pbtn" data-preset="purple" onclick="applyPreset('purple')"><span class="pdot" style="background:#9030c0"></span>Purple</button>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-t">HSV fine-tune</div>
+      <div style="font-size:9px;color:var(--mut);margin-bottom:3px">HUE BAND 1</div>
+      <div class="hband"><div class="hmark" id="hm1l"></div><div class="hmark" id="hm1h" style="background:#adf"></div></div>
+      <div class="row"><label>H1 low <span id="v-h1l">0</span></label><input type="range" min="0" max="179" value="0" id="sl-h1l" oninput="sliderChanged()"></div>
+      <div class="row"><label>H1 high <span id="v-h1h">10</span></label><input type="range" min="0" max="179" value="10" id="sl-h1h" oninput="sliderChanged()"></div>
+      <div style="font-size:9px;color:var(--mut);margin:5px 0 3px">HUE BAND 2</div>
+      <div class="hband"><div class="hmark" id="hm2l"></div><div class="hmark" id="hm2h" style="background:#adf"></div></div>
+      <div class="row"><label>H2 low <span id="v-h2l">160</span></label><input type="range" min="0" max="179" value="160" id="sl-h2l" oninput="sliderChanged()"></div>
+      <div class="row"><label>H2 high <span id="v-h2h">179</span></label><input type="range" min="0" max="179" value="179" id="sl-h2h" oninput="sliderChanged()"></div>
+      <div style="font-size:9px;color:var(--mut);margin:5px 0 3px">SAT / VAL</div>
+      <div class="row"><label>Sat min <span id="v-sat">80</span></label><input type="range" min="0" max="255" value="80" id="sl-sat" oninput="sliderChanged()"></div>
+      <div class="row"><label>Val min <span id="v-vmin">50</span></label><input type="range" min="0" max="255" value="50" id="sl-vmin" oninput="sliderChanged()"></div>
+      <div class="row"><label>Val max <span id="v-vmax">240</span></label><input type="range" min="0" max="255" value="240" id="sl-vmax" oninput="sliderChanged()"></div>
+      <div class="btn-row">
+        <button class="btn btn-g" id="applyHSVBtn" onclick="applyHSV()">▶ Apply</button>
+        <button class="btn btn-r" onclick="resetHSV()">↺ Reset</button>
+      </div>
+      <div class="fb" id="fb-hsv"></div>
+    </div>
   </div>
+
+  <!-- ── THRESHOLDS ── -->
+  <div class="pane" id="tab-thresholds">
+    <div class="sec">
+      <div class="sec-t">Confidence thresholds</div>
+      <div id="knobs-thresholds"></div>
+      <div class="btn-row">
+        <button class="btn btn-o" id="applyThresholds" onclick="applyGroup('thresholds')">▶ Apply</button>
+        <button class="btn btn-r" onclick="resetGroup('thresholds')">↺ Reset</button>
+      </div>
+      <div class="fb" id="fb-thresholds"></div>
+    </div>
+  </div>
+
+  <!-- ── TRACKING ── -->
+  <div class="pane" id="tab-tracking">
+    <div class="sec">
+      <div class="sec-t">Persistence & possible-hit</div>
+      <div id="knobs-tracking"></div>
+      <div class="btn-row">
+        <button class="btn btn-o" id="applyTracking" onclick="applyGroup('tracking')">▶ Apply</button>
+        <button class="btn btn-r" onclick="resetGroup('tracking')">↺ Reset</button>
+      </div>
+      <div class="fb" id="fb-tracking"></div>
+    </div>
+  </div>
+
+  <!-- ── ADVANCED (fusion + shape + zoom merged) ── -->
+  <div class="pane" id="tab-advanced">
+    <div class="sec">
+      <div class="grp-h">Fusion weights</div>
+      <div id="knobs-fusion"></div>
+      <div class="grp-h">Shape / contour</div>
+      <div id="knobs-shape"></div>
+      <div class="grp-h">CVConfig shape</div>
+      <div class="krow"><label><span class="kn">Circularity min</span><span class="kv" id="v-circ">0.55</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.55" id="sl-circ" oninput="document.getElementById('v-circ').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="krow"><label><span class="kn">Max aspect ratio</span><span class="kv" id="v-asr">1.6</span></label>
+        <input type="range" min="1" max="5" step="0.1" value="1.6" id="sl-asr" oninput="document.getElementById('v-asr').textContent=parseFloat(this.value).toFixed(1)"></div>
+      <div class="krow"><label><span class="kn">Watershed FG thresh</span><span class="kv" id="v-wfg">0.35</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.35" id="sl-wfg" oninput="document.getElementById('v-wfg').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="krow"><label><span class="kn">NMS IoU threshold</span><span class="kv" id="v-nms">0.35</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.35" id="sl-nms" oninput="document.getElementById('v-nms').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="grp-h">Zoom recheck</div>
+      <div id="knobs-zoom"></div>
+      <div class="btn-row">
+        <button class="btn btn-o" id="applyAdvanced" onclick="applyAdvanced()">▶ Apply all</button>
+        <button class="btn btn-r" onclick="resetAdvanced()">↺ Reset</button>
+      </div>
+      <div class="fb" id="fb-advanced"></div>
+    </div>
+  </div>
+
+  <!-- ── SENSORS ── -->
+  <div class="pane" id="tab-sensors">
+    <div class="sec">
+      <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
+        Corner sensors (AS5600)
+        <button onclick="refreshSensors()" style="padding:1px 7px;font-size:9px">⟳ Refresh</button>
+      </div>
+      <div id="sensorList"></div>
+      <div style="font-size:9px;color:var(--mut);margin-top:8px">Auto-refreshes every 500 ms when active.</div>
+    </div>
+  </div>
+</div><!-- /panel -->
+
+<div class="div" id="divLeft"></div>
+
+<!-- ── VIDEO ── -->
+<div class="video">
+  <span class="clabel tl" id="camLabel">CAM</span>
+  <span class="clabel tr" id="resLabel"></span>
+  <span class="clabel bl" id="timeLabel"></span>
+  <div class="nosig" id="noSignal"><div class="nosig-ico">📷</div><p>Wachten op videostream…</p></div>
+  <img id="feed" alt="camera">
+</div>
+
+<div class="div" id="divRight"></div>
+
+<!-- ── CONSOLE ── -->
+<div class="con" id="consolePanel">
+  <div class="con-bar">
+    <span class="con-t">Console</span>
+    <div class="btns">
+      <button id="scrollBtn" class="on" onclick="toggleScroll()">↓ Auto</button>
+      <button onclick="clearLog()">Wis</button>
+    </div>
+  </div>
+  <div id="log"></div>
+</div>
 
 </main>
 
 <footer>
-  <div id="fc">
-    <div class="dot" id="connDot"></div>
-    <span id="connText">Log stream verbinden…</span>
-  </div>
+  <div id="fc"><div class="dot" id="connDot"></div><span id="connText">Verbinden…</span></div>
   <span id="lc">0 regels</span>
 </footer>
 
 <script>
 "use strict";
+const MAX_LINES=600,RECONNECT_MS=3000;
+let autoScroll=true,lineCount=0,evtSrc=null,lastText=null,lastCount=1,lastMsgEl=null;
 
-const MAX_LINES    = 600;
-const RECONNECT_MS = 3000;
-
-let autoScroll  = true;
-let lineCount   = 0;
-let evtSrc      = null;
-let lastText    = null;
-let lastCount   = 1;
-let lastMsgEl   = null;
-let _dirty      = false;
-
-// Full config schema mirrored from backend
-// [key, type, min, max, label, group, default]
-const SCHEMA = [
-  ["YOLO_BASE_THRESHOLD",         "float", 0,   1,     "YOLO base threshold",          "thresholds", 0.5],
-  ["CV_BASE_THRESHOLD",           "float", 0,   1,     "CV base threshold",            "thresholds", 0.4],
-  ["CV_DIRECT_ACCEPT_THRESHOLD",  "float", 0,   1,     "CV direct-accept threshold",   "thresholds", 0.75],
-  ["HIGH_AI_CONFIDENCE",          "float", 0,   1,     "High AI confidence",           "thresholds", 0.75],
-  ["LOW_AI_CONFIDENCE",           "float", 0,   1,     "Low AI confidence",            "thresholds", 0.35],
-  ["YOLO_FUSION_WEIGHT",          "float", 0,   1,     "YOLO fusion weight",           "fusion",     0.6],
-  ["CV_FUSION_WEIGHT",            "float", 0,   1,     "CV fusion weight",             "fusion",     0.4],
-  ["CV_WEIGHT_REDNESS",           "float", 0,   1,     "CV weight: redness",           "fusion",     0.4],
-  ["CV_WEIGHT_CIRCULARITY",       "float", 0,   1,     "CV weight: circularity",       "fusion",     0.3],
-  ["CV_WEIGHT_SIZE",              "float", 0,   1,     "CV weight: size",              "fusion",     0.2],
-  ["CV_WEIGHT_TEXTURE",           "float", 0,   1,     "CV weight: texture",           "fusion",     0.1],
-  ["PERSISTENCE_REQUIRED",        "int",   1,   20,    "Frames to confirm (AI/fused)", "tracking",   3],
-  ["PERSISTENCE_REQUIRED_CV_ONLY","int",   1,   20,    "Frames to confirm (CV only)",  "tracking",   5],
-  ["PERSISTENCE_DECAY",           "float", 0,   1,     "Confidence decay per miss",    "tracking",   0.3],
-  ["IOU_MATCH_THRESHOLD",         "float", 0,   1,     "IoU match threshold",          "tracking",   0.3],
-  ["POSSIBLE_HIT_MIN_CONF",       "float", 0,   1,     "Possible min conf (fused)",    "tracking",   0.25],
-  ["POSSIBLE_HIT_MIN_SEEN",       "int",   1,   10,    "Possible min seen (fused)",    "tracking",   2],
-  ["POSSIBLE_CV_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (CV only)",  "tracking",   0.3],
-  ["POSSIBLE_CV_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (CV only)",  "tracking",   3],
-  ["POSSIBLE_AI_ONLY_MIN_CONF",   "float", 0,   1,     "Possible min conf (AI only)",  "tracking",   0.3],
-  ["POSSIBLE_AI_ONLY_MIN_SEEN",   "int",   1,   10,    "Possible min seen (AI only)",  "tracking",   2],
-  ["POSSIBLE_AI_CONF_WEIGHT",     "float", 0,   1,     "AI conf weight for possible",  "tracking",   0.6],
-  ["POSSIBLE_TARGET_MIN_CONF",    "float", 0,   1,     "Possible target min conf",     "tracking",   0.4],
-  ["MIN_CONTOUR_AREA",            "int",   10,  5000,  "Min contour area (px²)",       "shape",      300],
-  ["CONVEXITY_MIN_AREA",          "int",   100, 20000, "Watershed split min area",     "shape",      2000],
-  ["MAX_RECHECKS",                "int",   0,   10,    "Max zoom rechecks",            "zoom",       2],
-  ["ZOOM_SCALE_FACTOR",           "float", 1,   4,     "Zoom scale factor",            "zoom",       2.0],
-  ["RECHECK_AI_CONF",             "float", 0,   1,     "Zoom recheck AI threshold",    "zoom",       0.4],
-  ["RECHECK_CV_CONF",             "float", 0,   1,     "Zoom recheck CV threshold",    "zoom",       0.35],
+const SCHEMA=[
+  ["YOLO_BASE_THRESHOLD","float",0,1,"YOLO base","thresholds",0.5],
+  ["CV_BASE_THRESHOLD","float",0,1,"CV base","thresholds",0.4],
+  ["CV_DIRECT_ACCEPT_THRESHOLD","float",0,1,"CV direct-accept","thresholds",0.75],
+  ["HIGH_AI_CONFIDENCE","float",0,1,"AI high conf","thresholds",0.75],
+  ["LOW_AI_CONFIDENCE","float",0,1,"AI low conf","thresholds",0.35],
+  ["YOLO_FUSION_WEIGHT","float",0,1,"YOLO weight","fusion",0.6],
+  ["CV_FUSION_WEIGHT","float",0,1,"CV weight","fusion",0.4],
+  ["CV_WEIGHT_REDNESS","float",0,1,"CV: redness","fusion",0.4],
+  ["CV_WEIGHT_CIRCULARITY","float",0,1,"CV: circularity","fusion",0.3],
+  ["CV_WEIGHT_SIZE","float",0,1,"CV: size","fusion",0.2],
+  ["CV_WEIGHT_TEXTURE","float",0,1,"CV: texture","fusion",0.1],
+  ["PERSISTENCE_REQUIRED","int",1,20,"Confirm frames (fused)","tracking",3],
+  ["PERSISTENCE_REQUIRED_CV_ONLY","int",1,20,"Confirm frames (CV)","tracking",5],
+  ["PERSISTENCE_DECAY","float",0,1,"Conf decay/miss","tracking",0.3],
+  ["IOU_MATCH_THRESHOLD","float",0,1,"IoU match","tracking",0.3],
+  ["POSSIBLE_HIT_MIN_CONF","float",0,1,"Possible conf (fused)","tracking",0.25],
+  ["POSSIBLE_HIT_MIN_SEEN","int",1,10,"Possible seen (fused)","tracking",2],
+  ["POSSIBLE_CV_ONLY_MIN_CONF","float",0,1,"Possible conf (CV)","tracking",0.3],
+  ["POSSIBLE_CV_ONLY_MIN_SEEN","int",1,10,"Possible seen (CV)","tracking",3],
+  ["POSSIBLE_AI_ONLY_MIN_CONF","float",0,1,"Possible conf (AI)","tracking",0.3],
+  ["POSSIBLE_AI_ONLY_MIN_SEEN","int",1,10,"Possible seen (AI)","tracking",2],
+  ["POSSIBLE_AI_CONF_WEIGHT","float",0,1,"AI conf weight","tracking",0.6],
+  ["POSSIBLE_TARGET_MIN_CONF","float",0,1,"Target min conf","tracking",0.4],
+  ["MIN_CONTOUR_AREA","int",10,5000,"Min contour (px²)","shape",300],
+  ["CONVEXITY_MIN_AREA","int",100,20000,"Watershed split (px²)","shape",2000],
+  ["MAX_RECHECKS","int",0,10,"Max rechecks","zoom",2],
+  ["ZOOM_SCALE_FACTOR","float",1,4,"Scale factor","zoom",2.0],
+  ["RECHECK_AI_CONF","float",0,1,"Recheck AI thresh","zoom",0.4],
+  ["RECHECK_CV_CONF","float",0,1,"Recheck CV thresh","zoom",0.35],
 ];
+const HSV_DEF={h1_low:0,h1_high:10,h2_low:160,h2_high:179,sat_min:80,val_min:50,val_max:240};
+const SHP_DEF={contour_min_circularity:0.55,max_aspect_ratio:1.6,watershed_fg_thresh:0.35,nms_iou_threshold:0.35};
+const _cfg={};
 
-// HSV defaults (red preset — the startup default)
-const HSV_DEFAULTS = {
-  h1_low: 0, h1_high: 10, h2_low: 160, h2_high: 179,
-  sat_min: 80, val_min: 50, val_max: 240,
-};
-
-// CVConfig shape defaults
-const SHAPE_CV_DEFAULTS = {
-  contour_min_circularity: 0.55,
-  max_aspect_ratio:        1.6,
-  watershed_fg_thresh:     0.35,
-  nms_iou_threshold:       0.35,
-};
-
-// Live values cache
-const _cfg = {};
-
-// =============================================================================
-// TABS
-// =============================================================================
-
-function switchTab(name) {
-  document.querySelectorAll(".tab-btn").forEach((b, i) => {
-    const tabs = ["mode","colour","thresholds","fusion","tracking","shape","zoom"];
-    b.classList.toggle("active", tabs[i] === name);
-  });
-  document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
-  document.getElementById("tab-" + name)?.classList.add("active");
+/* ── TABS ── */
+let _sensorTimer=null;
+function switchTab(name){
+  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("on"));
+  document.querySelectorAll(".pane").forEach(p=>p.classList.remove("on"));
+  document.querySelector(`.tab[onclick*="'${name}'"]`)?.classList.add("on");
+  document.getElementById("tab-"+name)?.classList.add("on");
+  clearInterval(_sensorTimer);_sensorTimer=null;
+  if(name==="sensors"){refreshSensors();_sensorTimer=setInterval(refreshSensors,500);}
 }
 
-// =============================================================================
-// KNOB BUILDER
-// =============================================================================
-
-function buildKnobs(group) {
-  const container = document.getElementById("knobs-" + group);
-  if (!container) return;
-  container.innerHTML = "";
-  SCHEMA.filter(s => s[5] === group).forEach(([key, typ, mn, mx, label]) => {
-    const val = _cfg[key] ?? 0;
-    const step = typ === "int" ? 1 : (mx <= 1 ? 0.01 : 0.1);
-    const disp = typ === "int" ? val : parseFloat(val).toFixed(2);
-    container.insertAdjacentHTML("beforeend", `
-      <div class="knob-row" data-key="${key}" data-type="${typ}" data-min="${mn}" data-max="${mx}">
-        <label>
-          <span class="kname">${label}</span>
-          <span class="kval" id="kv-${key}">${disp}</span>
-        </label>
-        <input type="range" min="${mn}" max="${mx}" step="${step}" value="${val}"
-               id="kr-${key}"
-               oninput="onKnob('${key}','${typ}',this.value)">
-      </div>
-    `);
+/* ── KNOBS ── */
+function buildKnobs(group){
+  const c=document.getElementById("knobs-"+group);if(!c)return;c.innerHTML="";
+  SCHEMA.filter(s=>s[5]===group).forEach(([key,typ,mn,mx,label])=>{
+    const val=_cfg[key]??0;
+    const step=typ==="int"?1:(mx<=1?0.01:0.1);
+    const d=typ==="int"?val:parseFloat(val).toFixed(2);
+    c.insertAdjacentHTML("beforeend",`<div class="krow"><label><span class="kn">${label}</span><span class="kv" id="kv-${key}">${d}</span></label>
+      <input type="range" class="ora-thumb" min="${mn}" max="${mx}" step="${step}" value="${val}" id="kr-${key}" oninput="onKnob('${key}','${typ}',this.value)"></div>`);
   });
 }
-
-function onKnob(key, typ, raw) {
-  const val = typ === "int" ? parseInt(raw) : parseFloat(raw);
-  _cfg[key] = val;
-  const disp = typ === "int" ? val : val.toFixed(2);
-  const el = document.getElementById("kv-" + key);
-  if (el) el.textContent = disp;
+function onKnob(key,typ,raw){
+  const v=typ==="int"?parseInt(raw):parseFloat(raw);_cfg[key]=v;
+  const el=document.getElementById("kv-"+key);if(el)el.textContent=typ==="int"?v:v.toFixed(2);
 }
-
-function collectGroup(group) {
-  const payload = {};
-  SCHEMA.filter(s => s[5] === group).forEach(([key, typ]) => {
-    const el = document.getElementById("kr-" + key);
-    if (!el) return;
-    payload[key] = typ === "int" ? parseInt(el.value) : parseFloat(el.value);
+function collectGroup(group){
+  const p={};
+  SCHEMA.filter(s=>s[5]===group).forEach(([key,typ])=>{
+    const el=document.getElementById("kr-"+key);if(!el)return;
+    p[key]=typ==="int"?parseInt(el.value):parseFloat(el.value);
   });
-  return payload;
+  return p;
+}
+async function applyGroup(group){
+  const id="apply"+group.charAt(0).toUpperCase()+group.slice(1);
+  const btn=document.getElementById(id),fb=document.getElementById("fb-"+group);
+  if(btn){btn.classList.add("busy");btn.textContent="Sending…";}
+  try{
+    const r=await fetch("/api/full_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectGroup(group))});
+    const d=await r.json();
+    showFb(fb,d.ok?"ok":"err",d.ok?"✓ Applied":"Server error");
+  }catch{showFb(fb,"err","Request failed");}
+  finally{if(btn){btn.classList.remove("busy");btn.textContent="▶ Apply";}}
 }
 
-async function applyGroup(group) {
-  const btn = document.getElementById("apply" + group.charAt(0).toUpperCase() + group.slice(1));
-  const fbEl = document.getElementById("fb-" + group);
-  if (btn) { btn.classList.add("busy"); btn.textContent = "Sending…"; }
-  try {
-    const res  = await fetch("/api/full_config", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(collectGroup(group)),
-    });
-    const data = await res.json();
-    if (data.ok) showFeedbackEl(fbEl, "ok", "✓ Applied");
-    else showFeedbackEl(fbEl, "err", "Server error");
-  } catch(e) {
-    showFeedbackEl(fbEl, "err", "Request failed");
-  } finally {
-    if (btn) { btn.classList.remove("busy"); btn.textContent = "▶ Apply"; }
-  }
+/* ── ADVANCED (fusion+shape+zoom) ── */
+async function applyAdvanced(){
+  const btn=document.getElementById("applyAdvanced"),fb=document.getElementById("fb-advanced");
+  btn.classList.add("busy");btn.textContent="Sending…";
+  const fc={...collectGroup("fusion"),...collectGroup("shape"),...collectGroup("zoom")};
+  const cv={
+    contour_min_circularity:parseFloat(document.getElementById("sl-circ").value),
+    max_aspect_ratio:parseFloat(document.getElementById("sl-asr").value),
+    watershed_fg_thresh:parseFloat(document.getElementById("sl-wfg").value),
+    nms_iou_threshold:parseFloat(document.getElementById("sl-nms").value),
+  };
+  try{
+    const [r1,r2]=await Promise.all([
+      fetch("/api/full_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(fc)}),
+      fetch("/api/cv_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cv)}),
+    ]);
+    const [d1,d2]=await Promise.all([r1.json(),r2.json()]);
+    showFb(fb,(d1.ok&&d2.ok)?"ok":"err",(d1.ok&&d2.ok)?"✓ Applied":"Partial error");
+  }catch{showFb(fb,"err","Request failed");}
+  finally{btn.classList.remove("busy");btn.textContent="▶ Apply all";}
+}
+function resetAdvanced(){
+  ["fusion","shape","zoom"].forEach(g=>SCHEMA.filter(s=>s[5]===g).forEach(([key,typ,mn,mx,lbl,grp,def])=>{
+    _cfg[key]=def;
+    const s=document.getElementById("kr-"+key),v=document.getElementById("kv-"+key);
+    if(s)s.value=def;if(v)v.textContent=typ==="int"?def:parseFloat(def).toFixed(2);
+  }));
+  const sv=(id,val,fmt)=>{const e=document.getElementById(id);if(e)e.value=val;const v=document.getElementById("v-"+id.slice(3));if(v)v.textContent=fmt(val);};
+  sv("sl-circ",SHP_DEF.contour_min_circularity,x=>x.toFixed(2));
+  sv("sl-asr",SHP_DEF.max_aspect_ratio,x=>x.toFixed(1));
+  sv("sl-wfg",SHP_DEF.watershed_fg_thresh,x=>x.toFixed(2));
+  sv("sl-nms",SHP_DEF.nms_iou_threshold,x=>x.toFixed(2));
+  applyAdvanced();
 }
 
-// =============================================================================
-// RESET FUNCTIONS
-// =============================================================================
-
-function resetGroup(group) {
-  // Restore sliders to schema defaults and push to backend
-  SCHEMA.filter(s => s[5] === group).forEach(([key, typ, mn, mx, label, grp, def]) => {
-    _cfg[key] = def;
-    const slider = document.getElementById("kr-" + key);
-    const valEl  = document.getElementById("kv-" + key);
-    if (slider) slider.value = def;
-    if (valEl)  valEl.textContent = typ === "int" ? def : parseFloat(def).toFixed(2);
+/* ── RESET GROUP ── */
+function resetGroup(group){
+  SCHEMA.filter(s=>s[5]===group).forEach(([key,typ,mn,mx,lbl,grp,def])=>{
+    _cfg[key]=def;
+    const s=document.getElementById("kr-"+key),v=document.getElementById("kv-"+key);
+    if(s)s.value=def;if(v)v.textContent=typ==="int"?def:parseFloat(def).toFixed(2);
   });
   applyGroup(group);
 }
 
-function resetHSV() {
-  // Restore HSV sliders to red preset defaults
-  const map = {
-    "sl-h1l": HSV_DEFAULTS.h1_low,  "sl-h1h": HSV_DEFAULTS.h1_high,
-    "sl-h2l": HSV_DEFAULTS.h2_low,  "sl-h2h": HSV_DEFAULTS.h2_high,
-    "sl-sat": HSV_DEFAULTS.sat_min,
-    "sl-vmin": HSV_DEFAULTS.val_min, "sl-vmax": HSV_DEFAULTS.val_max,
-  };
-  for (const [id, val] of Object.entries(map)) {
-    const el = document.getElementById(id);
-    if (el) el.value = val;
-  }
-  updateLabels();
-  // Highlight red preset button
-  document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("active"));
-  document.querySelector('[data-preset="red"]')?.classList.add("active");
+/* ── INIT ── */
+async function initUI(){
+  try{
+    const[cr,ar,fr]=await Promise.all([fetch("/api/cv_config"),fetch("/api/ai_enabled"),fetch("/api/full_config")]);
+    const[cfg,ai,full]=await Promise.all([cr.json(),ar.json(),fr.json()]);
+    loadCVConfig(cfg);setAiUI(ai.enabled);Object.assign(_cfg,full);
+    ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
+  }catch(e){console.warn("initUI failed:",e);}
+}
+function loadCVConfig(cfg){
+  const map={"sl-h1l":cfg.h1_low,"sl-h1h":cfg.h1_high,"sl-h2l":cfg.h2_low,"sl-h2h":cfg.h2_high,"sl-sat":cfg.sat_min,"sl-vmin":cfg.val_min,"sl-vmax":cfg.val_max};
+  for(const[id,val]of Object.entries(map)){const e=document.getElementById(id);if(e)e.value=val;}
+  if(cfg.contour_min_circularity!=null){document.getElementById("sl-circ").value=cfg.contour_min_circularity;document.getElementById("v-circ").textContent=parseFloat(cfg.contour_min_circularity).toFixed(2);}
+  if(cfg.max_aspect_ratio!=null){document.getElementById("sl-asr").value=cfg.max_aspect_ratio;document.getElementById("v-asr").textContent=parseFloat(cfg.max_aspect_ratio).toFixed(1);}
+  if(cfg.watershed_fg_thresh!=null){document.getElementById("sl-wfg").value=cfg.watershed_fg_thresh;document.getElementById("v-wfg").textContent=parseFloat(cfg.watershed_fg_thresh).toFixed(2);}
+  if(cfg.nms_iou_threshold!=null){document.getElementById("sl-nms").value=cfg.nms_iou_threshold;document.getElementById("v-nms").textContent=parseFloat(cfg.nms_iou_threshold).toFixed(2);}
+  updateHSVLabels();
+}
+
+/* ── AI TOGGLE ── */
+function setAiUI(on){document.getElementById("aiToggle").checked=on;document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";}
+async function onAiToggle(on){setAiUI(on);try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
+
+/* ── PRESETS ── */
+async function applyPreset(name){
+  document.querySelectorAll(".pbtn").forEach(b=>b.classList.remove("on"));
+  document.querySelector(`[data-preset="${name}"]`)?.classList.add("on");
+  try{
+    const r=await fetch("/api/cv_preset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({preset:name})});
+    const d=await r.json();
+    if(d.ok){loadCVConfig(d.config);showFb(document.getElementById("fb-hsv"),"ok",`✓ ${name}`);}
+    else showFb(document.getElementById("fb-hsv"),"err",d.error||"Error");
+  }catch{showFb(document.getElementById("fb-hsv"),"err","Request failed");}
+}
+
+/* ── HSV ── */
+function sliderChanged(){updateHSVLabels();document.querySelectorAll(".pbtn").forEach(b=>b.classList.remove("on"));}
+function updateHSVLabels(){
+  [["sl-h1l","v-h1l","hm1l"],["sl-h1h","v-h1h","hm1h"],["sl-h2l","v-h2l","hm2l"],["sl-h2h","v-h2h","hm2h"]].forEach(([s,v,m])=>{
+    const val=+document.getElementById(s).value;
+    document.getElementById(v).textContent=val;
+    const mk=document.getElementById(m);if(mk)mk.style.left=(val/179*100)+"%";
+  });
+  document.getElementById("v-sat").textContent=document.getElementById("sl-sat").value;
+  document.getElementById("v-vmin").textContent=document.getElementById("sl-vmin").value;
+  document.getElementById("v-vmax").textContent=document.getElementById("sl-vmax").value;
+}
+async function applyHSV(){
+  const btn=document.getElementById("applyHSVBtn"),fb=document.getElementById("fb-hsv");
+  btn.classList.add("busy");btn.textContent="Sending…";
+  const p={h1_low:+document.getElementById("sl-h1l").value,h1_high:+document.getElementById("sl-h1h").value,
+            h2_low:+document.getElementById("sl-h2l").value,h2_high:+document.getElementById("sl-h2h").value,
+            sat_min:+document.getElementById("sl-sat").value,val_min:+document.getElementById("sl-vmin").value,val_max:+document.getElementById("sl-vmax").value};
+  try{
+    const r=await fetch("/api/cv_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});
+    const d=await r.json();showFb(fb,d.ok?"ok":"err",d.ok?"✓ Applied":"Server error");
+  }catch{showFb(fb,"err","Request failed");}
+  finally{btn.classList.remove("busy");btn.textContent="▶ Apply";}
+}
+function resetHSV(){
+  const m={"sl-h1l":HSV_DEF.h1_low,"sl-h1h":HSV_DEF.h1_high,"sl-h2l":HSV_DEF.h2_low,"sl-h2h":HSV_DEF.h2_high,"sl-sat":HSV_DEF.sat_min,"sl-vmin":HSV_DEF.val_min,"sl-vmax":HSV_DEF.val_max};
+  for(const[id,v]of Object.entries(m)){const e=document.getElementById(id);if(e)e.value=v;}
+  updateHSVLabels();
+  document.querySelectorAll(".pbtn").forEach(b=>b.classList.remove("on"));
+  document.querySelector('[data-preset="red"]')?.classList.add("on");
   applyHSV();
 }
 
-function resetShape() {
-  // Reset full_config shape knobs
-  SCHEMA.filter(s => s[5] === "shape").forEach(([key, typ, mn, mx, label, grp, def]) => {
-    _cfg[key] = def;
-    const slider = document.getElementById("kr-" + key);
-    const valEl  = document.getElementById("kv-" + key);
-    if (slider) slider.value = def;
-    if (valEl)  valEl.textContent = typ === "int" ? def : parseFloat(def).toFixed(2);
-  });
-  // Reset CVConfig shape sliders
-  document.getElementById("sl-circ").value = SHAPE_CV_DEFAULTS.contour_min_circularity;
-  document.getElementById("v-circ").textContent = SHAPE_CV_DEFAULTS.contour_min_circularity.toFixed(2);
-  document.getElementById("sl-asr").value = SHAPE_CV_DEFAULTS.max_aspect_ratio;
-  document.getElementById("v-asr").textContent = SHAPE_CV_DEFAULTS.max_aspect_ratio.toFixed(1);
-  document.getElementById("sl-wfg").value = SHAPE_CV_DEFAULTS.watershed_fg_thresh;
-  document.getElementById("v-wfg").textContent = SHAPE_CV_DEFAULTS.watershed_fg_thresh.toFixed(2);
-  document.getElementById("sl-nms").value = SHAPE_CV_DEFAULTS.nms_iou_threshold;
-  document.getElementById("v-nms").textContent = SHAPE_CV_DEFAULTS.nms_iou_threshold.toFixed(2);
-  applyShape();
+function showFb(el,cls,msg){if(!el)return;el.className="fb "+cls;el.textContent=msg;setTimeout(()=>{el.className="fb";el.textContent="";},3000);}
+
+/* ── SENSORS ── */
+const SLBL={turntable:"Turntable (ID 13)",lift:"Lift (ID 3+4, dual)",gripper:"Gripper (ID 8)",arm:"Arm (ID 5)",pivot:"Pivot (ID 2)"};
+function _scard(name,info){
+  const lbl=SLBL[name]||name,alive=info.available;
+  let rows="";
+  if(alive&&info.data){const d=info.data,pct=((d.deg/360)*100).toFixed(0);rows=`<div class="srow"><span class="sk">Angle</span><span class="sv">${parseFloat(d.deg).toFixed(1)}°</span></div><div class="srow"><span class="sk">Raw</span><span class="sv">${d.raw}</span></div><div class="srow"><span class="sk">Laps</span><span class="sv">${d.laps>=0?"+":""}${d.laps}</span></div><div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;}
+  else if(alive&&info.channels){for(const[ch,d]of Object.entries(info.channels)){if(!d){rows+=`<div class="srow"><span class="sk" style="color:var(--blu)">Ch${ch}</span><span class="sv" style="color:var(--mut)">—</span></div>`;continue;}const pct=((d.deg/360)*100).toFixed(0);rows+=`<div class="srow" style="margin-top:5px"><span class="sk" style="color:var(--blu);font-weight:600">Ch${ch}</span><span class="sv">${parseFloat(d.deg).toFixed(1)}° raw ${d.raw} laps ${d.laps>=0?"+":""}${d.laps}</span></div><div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;}}
+  else if(info.error)rows=`<div class="srow"><span class="sk" style="color:var(--acc)">${info.error}</span></div>`;
+  return`<div class="scard ${alive?"live":"dead"}"><div class="scard-h"><span class="sname">${lbl}</span><span class="sbadge ${alive?"on":""}">${alive?"LIVE":info.error?"ERROR":"NO SENSOR"}</span></div>${rows}</div>`;
+}
+async function refreshSensors(){
+  const c=document.getElementById("sensorList");if(!c)return;
+  try{const r=await fetch("/api/corner_sensors");const d=await r.json();c.innerHTML=Object.entries(d).map(([n,i])=>_scard(n,i)).join("");}
+  catch(e){c.innerHTML=`<div style="color:var(--acc);font-size:10px;padding:5px 0">Request failed: ${e}</div>`;}
 }
 
-// =============================================================================
-// SHAPE TAB (combo: full_config + cv_config shape params)
-// =============================================================================
-
-async function applyShape() {
-  const btn  = document.getElementById("applyShape");
-  const fbEl = document.getElementById("fb-shape");
-  btn.classList.add("busy"); btn.textContent = "Sending…";
-  try {
-    // full_config knobs (MIN_CONTOUR_AREA, CONVEXITY_MIN_AREA)
-    const fcPayload = collectGroup("shape");
-    // CVConfig shape params
-    const cvPayload = {
-      contour_min_circularity: parseFloat(document.getElementById("sl-circ").value),
-      max_aspect_ratio:        parseFloat(document.getElementById("sl-asr").value),
-      watershed_fg_thresh:     parseFloat(document.getElementById("sl-wfg").value),
-      nms_iou_threshold:       parseFloat(document.getElementById("sl-nms").value),
-    };
-    const [r1, r2] = await Promise.all([
-      fetch("/api/full_config", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(fcPayload) }),
-      fetch("/api/cv_config",   { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(cvPayload) }),
-    ]);
-    const [d1, d2] = await Promise.all([r1.json(), r2.json()]);
-    if (d1.ok && d2.ok) showFeedbackEl(fbEl, "ok", "✓ Applied");
-    else showFeedbackEl(fbEl, "err", "Partial error");
-  } catch(e) {
-    showFeedbackEl(fbEl, "err", "Request failed");
-  } finally {
-    btn.classList.remove("busy"); btn.textContent = "▶ Apply";
-  }
-}
-
-// =============================================================================
-// INIT — fetch current backend state
-// =============================================================================
-
-async function initUI() {
-  try {
-    const [cfgRes, aiRes, fullRes] = await Promise.all([
-      fetch("/api/cv_config"),
-      fetch("/api/ai_enabled"),
-      fetch("/api/full_config"),
-    ]);
-    const cfg  = await cfgRes.json();
-    const ai   = await aiRes.json();
-    const full = await fullRes.json();
-
-    loadConfig(cfg);
-    setAiUI(ai.enabled);
-    loadFullConfig(full);
-
-  } catch(e) {
-    console.warn("Could not fetch initial config:", e);
-  }
-}
-
-function loadConfig(cfg) {
-  const map = {
-    "sl-h1l": cfg.h1_low,  "sl-h1h": cfg.h1_high,
-    "sl-h2l": cfg.h2_low,  "sl-h2h": cfg.h2_high,
-    "sl-sat": cfg.sat_min,
-    "sl-vmin": cfg.val_min, "sl-vmax": cfg.val_max,
-  };
-  for (const [id, val] of Object.entries(map)) {
-    const el = document.getElementById(id);
-    if (el) el.value = val;
-  }
-  // CVConfig shape sliders
-  if (cfg.contour_min_circularity !== undefined) {
-    document.getElementById("sl-circ").value = cfg.contour_min_circularity;
-    document.getElementById("v-circ").textContent = parseFloat(cfg.contour_min_circularity).toFixed(2);
-  }
-  if (cfg.max_aspect_ratio !== undefined) {
-    document.getElementById("sl-asr").value = cfg.max_aspect_ratio;
-    document.getElementById("v-asr").textContent = parseFloat(cfg.max_aspect_ratio).toFixed(1);
-  }
-  if (cfg.watershed_fg_thresh !== undefined) {
-    document.getElementById("sl-wfg").value = cfg.watershed_fg_thresh;
-    document.getElementById("v-wfg").textContent = parseFloat(cfg.watershed_fg_thresh).toFixed(2);
-  }
-  if (cfg.nms_iou_threshold !== undefined) {
-    document.getElementById("sl-nms").value = cfg.nms_iou_threshold;
-    document.getElementById("v-nms").textContent = parseFloat(cfg.nms_iou_threshold).toFixed(2);
-  }
-  updateLabels();
-  _dirty = false;
-}
-
-function loadFullConfig(full) {
-  Object.assign(_cfg, full);
-  // Build all knob groups
-  ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
-}
-
-// =============================================================================
-// AI TOGGLE
-// =============================================================================
-
-function setAiUI(enabled) {
-  const cb  = document.getElementById("aiToggle");
-  const lbl = document.getElementById("aiSubLabel");
-  cb.checked  = enabled;
-  lbl.textContent = enabled ? "Active — fusing with CV" : "Disabled — CV only";
-}
-
-async function onAiToggle(enabled) {
-  setAiUI(enabled);
-  try {
-    await fetch("/api/ai_enabled", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({enabled}),
-    });
-  } catch(e) { console.error("AI toggle failed:", e); }
-}
-
-// =============================================================================
-// COLOUR PRESETS
-// =============================================================================
-
-async function applyPreset(name) {
-  document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("active"));
-  document.querySelector(`[data-preset="${name}"]`)?.classList.add("active");
-  try {
-    const res = await fetch("/api/cv_preset", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({preset: name}),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      loadConfig(data.config);
-      showFeedback("ok", `✓ Preset '${name}' applied`);
-    } else {
-      showFeedback("err", data.error || "Error");
-    }
-  } catch(e) {
-    showFeedback("err", "Request failed");
-  }
-}
-
-// =============================================================================
-// HSV SLIDERS
-// =============================================================================
-
-function sliderChanged() {
-  updateLabels();
-  _dirty = true;
-  document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("active"));
-}
-
-function updateLabels() {
-  const fields = [
-    ["sl-h1l","v-h1l","hm1l"], ["sl-h1h","v-h1h","hm1h"],
-    ["sl-h2l","v-h2l","hm2l"], ["sl-h2h","v-h2h","hm2h"],
-  ];
-  for (const [sId, vId, mId] of fields) {
-    const v = +document.getElementById(sId).value;
-    document.getElementById(vId).textContent = v;
-    const marker = document.getElementById(mId);
-    if (marker) marker.style.left = (v / 179 * 100) + "%";
-  }
-  document.getElementById("v-sat").textContent  = document.getElementById("sl-sat").value;
-  document.getElementById("v-vmin").textContent = document.getElementById("sl-vmin").value;
-  document.getElementById("v-vmax").textContent = document.getElementById("sl-vmax").value;
-}
-
-async function applyHSV() {
-  const btn = document.getElementById("applyBtn");
-  btn.classList.add("busy"); btn.textContent = "Sending…";
-  const payload = {
-    h1_low:  +document.getElementById("sl-h1l").value,
-    h1_high: +document.getElementById("sl-h1h").value,
-    h2_low:  +document.getElementById("sl-h2l").value,
-    h2_high: +document.getElementById("sl-h2h").value,
-    sat_min: +document.getElementById("sl-sat").value,
-    val_min: +document.getElementById("sl-vmin").value,
-    val_max: +document.getElementById("sl-vmax").value,
-  };
-  try {
-    const res  = await fetch("/api/cv_config", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (data.ok) { showFeedback("ok", "✓ Applied"); _dirty = false; }
-    else showFeedback("err", "Server error");
-  } catch(e) {
-    showFeedback("err", "Request failed");
-  } finally {
-    btn.classList.remove("busy"); btn.textContent = "▶ Apply HSV";
-  }
-}
-
-function showFeedback(cls, msg) {
-  showFeedbackEl(document.getElementById("fb"), cls, msg);
-}
-function showFeedbackEl(el, cls, msg) {
-  if (!el) return;
-  el.className = "feedback " + cls;
-  el.textContent = msg;
-  setTimeout(() => { el.className = "feedback"; el.textContent = ""; }, 3000);
-}
-
-// =============================================================================
-// DRAG RESIZE
-// =============================================================================
-
-function makeDragDivider(divId, panelId, side) {
-  const div   = document.getElementById(divId);
-  const panel = document.getElementById(panelId);
-  if (!div || !panel) return;
-
-  div.addEventListener("mousedown", e => {
-    e.preventDefault();
-    div.classList.add("dragging");
-    document.body.style.cursor     = "col-resize";
-    document.body.style.userSelect = "none";
-
-    const onMove = ev => {
-      const mainRect = document.querySelector("main").getBoundingClientRect();
-      let newW;
-      if (side === "left") {
-        newW = Math.max(220, Math.min(window.innerWidth * 0.45, ev.clientX - mainRect.left));
-      } else {
-        newW = Math.max(180, Math.min(window.innerWidth * 0.55, mainRect.right - ev.clientX));
-      }
-      panel.style.width = newW + "px";
-    };
-
-    const onUp = () => {
-      div.classList.remove("dragging");
-      document.body.style.cursor     = "";
-      document.body.style.userSelect = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup",   onUp);
-    };
-
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup",   onUp);
+/* ── DRAG RESIZE ── */
+function makeDrag(divId,panelId,side){
+  const div=document.getElementById(divId),panel=document.getElementById(panelId);
+  if(!div||!panel)return;
+  div.addEventListener("mousedown",e=>{
+    e.preventDefault();div.classList.add("drag");
+    document.body.style.cursor="col-resize";document.body.style.userSelect="none";
+    const main=document.querySelector("main").getBoundingClientRect();
+    const onMove=ev=>{let w=side==="left"?Math.max(200,Math.min(window.innerWidth*.45,ev.clientX-main.left)):Math.max(160,Math.min(window.innerWidth*.55,main.right-ev.clientX));panel.style.width=w+"px";};
+    const onUp=()=>{div.classList.remove("drag");document.body.style.cursor="";document.body.style.userSelect="";window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onUp);};
+    window.addEventListener("mousemove",onMove);window.addEventListener("mouseup",onUp);
   });
 }
+makeDrag("divLeft","settingsPanel","left");
+makeDrag("divRight","consolePanel","right");
 
-makeDragDivider("dragLeft",  "settingsPanel", "left");
-makeDragDivider("dragRight", "consolePanel",  "right");
-
-// =============================================================================
-// STATS PARSING
-// =============================================================================
-
-const RE_FPS = /FPS:\s*(\d+).*?AI:\s*(\d+).*?CV:\s*(\d+).*?Fused:\s*(\d+).*?Hits:\s*(\d+).*?Possible:\s*(\d+)/;
-const RE_CAM = /Camera mode:\s*(\w+)/;
-
-function parseStats(line) {
-  let m = RE_FPS.exec(line);
-  if (m) {
-    [["s-fps",m[1]],["s-ai",m[2]],["s-cv",m[3]],
-     ["s-fused",m[4]],["s-hits",m[5]],["s-poss",m[6]]].forEach(([id,v]) => {
-      const el = document.getElementById(id);
-      el.textContent = v;
-      const stat = el.closest(".stat");
-      stat.classList.add("flash");
-      setTimeout(() => stat.classList.remove("flash"), 400);
-    });
-  }
-  m = RE_CAM.exec(line);
-  if (m) {
-    document.getElementById("s-cam").textContent    = m[1];
-    document.getElementById("camLabel").textContent = "CAM: " + m[1].toUpperCase();
-  }
+/* ── STATS ── */
+const RE_FPS=/FPS:\s*(\d+).*?AI:\s*(\d+).*?CV:\s*(\d+).*?Fused:\s*(\d+).*?Hits:\s*(\d+).*?Possible:\s*(\d+)/;
+const RE_CAM=/Camera mode:\s*(\w+)/;
+function parseStats(line){
+  let m=RE_FPS.exec(line);
+  if(m)[["s-fps",m[1]],["s-ai",m[2]],["s-cv",m[3]],["s-fused",m[4]],["s-hits",m[5]],["s-poss",m[6]]].forEach(([id,v])=>{document.getElementById(id).textContent=v;});
+  m=RE_CAM.exec(line);if(m){document.getElementById("s-cam").textContent=m[1];document.getElementById("camLabel").textContent="CAM: "+m[1].toUpperCase();}
 }
 
-// =============================================================================
-// CONSOLE
-// =============================================================================
-
-function cls(line) {
-  if (/FPS:/i.test(line))                                  return "fps";
-  if (/verbonden!|connected|verbonden\s*$/i.test(line))    return "ok";
-  if (/error|failed|geen.*camera|not avail/i.test(line))   return "err";
-  if (/warn/i.test(line))                                  return "warn";
-  if (/Dashboard:|http:\/\//i.test(line))                  return "info";
-  if (/^──/.test(line.trim()))                             return "sep";
-  return "";
+/* ── CONSOLE ── */
+function cls(l){if(/FPS:/i.test(l))return"fps";if(/verbonden!|connected/i.test(l))return"ok";if(/error|failed/i.test(l))return"err";if(/warn/i.test(l))return"warn";if(/Dashboard:|http:\/\//i.test(l))return"info";if(/^──/.test(l.trim()))return"sep";return"";}
+const logEl=document.getElementById("log");
+function addLine(text){
+  if(text===lastText&&lastMsgEl){lastCount++;let b=lastMsgEl.querySelector(".rbadge");if(!b){b=document.createElement("span");b.className="rbadge";lastMsgEl.appendChild(b);}b.textContent="×"+lastCount;if(autoScroll)logEl.scrollTop=logEl.scrollHeight;return;}
+  while(logEl.children.length>=MAX_LINES)logEl.removeChild(logEl.firstChild);
+  const ts=new Date().toTimeString().slice(0,8),row=document.createElement("div");
+  row.className="ll";
+  const sp=document.createElement("span");sp.className="lm "+cls(text);sp.textContent=text;
+  row.innerHTML=`<span class="lt">${ts}</span>`;row.appendChild(sp);logEl.appendChild(row);
+  lastText=text;lastCount=1;lastMsgEl=sp;lineCount++;
+  document.getElementById("lc").textContent=lineCount+" regels";
+  if(autoScroll)logEl.scrollTop=logEl.scrollHeight;
 }
+function clearLog(){logEl.innerHTML="";lineCount=0;lastText=null;lastMsgEl=null;document.getElementById("lc").textContent="0 regels";}
+function toggleScroll(){autoScroll=!autoScroll;const b=document.getElementById("scrollBtn");b.textContent=autoScroll?"↓ Auto":"⏸ Gepauzeerd";b.className=autoScroll?"on":"";if(autoScroll)logEl.scrollTop=logEl.scrollHeight;}
+logEl.addEventListener("scroll",()=>{if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<40&&!autoScroll)return;if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight>=40&&autoScroll){autoScroll=false;document.getElementById("scrollBtn").textContent="⏸ Gepauzeerd";document.getElementById("scrollBtn").className="";}});
 
-const logEl = document.getElementById("log");
+/* ── LIVE DOT ── */
+function setLive(on,text){document.getElementById("liveDot").className=on?"dot on":"dot";document.getElementById("connDot").className=on?"dot on":"dot";document.getElementById("liveText").textContent=on?"LIVE":text;document.getElementById("connText").textContent=text;}
 
-function addLine(text) {
-  if (text === lastText && lastMsgEl) {
-    lastCount++;
-    let badge = lastMsgEl.querySelector(".repeat-badge");
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "repeat-badge";
-      lastMsgEl.appendChild(badge);
-    }
-    badge.textContent = "×" + lastCount;
-    if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
-    return;
-  }
+/* ── CLOCK ── */
+setInterval(()=>{document.getElementById("timeLabel").textContent=new Date().toLocaleTimeString("nl-NL");},1000);
 
-  while (logEl.children.length >= MAX_LINES) logEl.removeChild(logEl.firstChild);
-
-  const ts   = new Date().toTimeString().slice(0, 8);
-  const row  = document.createElement("div");
-  row.className = "ll";
-
-  const msgSpan = document.createElement("span");
-  msgSpan.className = "lm " + cls(text);
-  msgSpan.textContent = text;
-
-  row.innerHTML = `<span class="lt">${ts}</span>`;
-  row.appendChild(msgSpan);
-  logEl.appendChild(row);
-
-  lastText  = text;
-  lastCount = 1;
-  lastMsgEl = msgSpan;
-
-  lineCount++;
-  document.getElementById("lc").textContent = lineCount + " regels";
-  if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
-}
-
-function clearLog() {
-  logEl.innerHTML = "";
-  lineCount = 0; lastText = null; lastMsgEl = null;
-  document.getElementById("lc").textContent = "0 regels";
-}
-
-function toggleScroll() {
-  autoScroll = !autoScroll;
-  const btn = document.getElementById("scrollBtn");
-  btn.textContent = autoScroll ? "↓ Auto" : "⏸ Gepauzeerd";
-  btn.className   = autoScroll ? "active" : "";
-  if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
-}
-
-logEl.addEventListener("scroll", () => {
-  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-  if (!atBottom && autoScroll) {
-    autoScroll = false;
-    document.getElementById("scrollBtn").textContent = "⏸ Gepauzeerd";
-    document.getElementById("scrollBtn").className   = "";
-  }
-});
-
-// =============================================================================
-// LIVE DOT / CONN
-// =============================================================================
-
-function setLive(on, text) {
-  document.getElementById("liveDot").className = on ? "dot on" : "dot";
-  document.getElementById("connDot").className = on ? "dot on" : "dot";
-  document.getElementById("liveText").textContent = on ? "LIVE" : text;
-  document.getElementById("connText").textContent = text;
-}
-
-// =============================================================================
-// CLOCK
-// =============================================================================
-
-function updateClock() {
-  document.getElementById("timeLabel").textContent = new Date().toLocaleTimeString("nl-NL");
-}
-setInterval(updateClock, 1000);
-updateClock();
-
-// =============================================================================
-// VIDEO FEED
-// =============================================================================
-
-const FEED_RETRY_MS  = 3000;
-const FEED_TIMEOUT   = 12000;
-const FEED_MAX_RETRY = 15000;
-
-const feed     = document.getElementById("feed");
-const noSignal = document.getElementById("noSignal");
-
-let feedAlive      = false;
-let feedRetryTimer = null;
-let feedWatchdog   = null;
-let feedRetryDelay = FEED_RETRY_MS;
-
-function _clearFeedTimers() { clearTimeout(feedRetryTimer); clearTimeout(feedWatchdog); feedRetryTimer = feedWatchdog = null; }
-
-function _armWatchdog() {
-  clearTimeout(feedWatchdog);
-  feedWatchdog = setTimeout(() => { addLine("── feed watchdog: herverbinden ──"); loadFeed(); }, FEED_TIMEOUT);
-}
-
-function loadFeed() {
-  _clearFeedTimers();
-  requestAnimationFrame(() => {
-    feed.src = "/video_feed?" + Date.now();
-    feedRetryTimer = setTimeout(() => { if (!feedAlive) onFeedErr(); }, 10000);
-  });
-}
-
-function onFeedLoad() {
-  _clearFeedTimers();
-  feedAlive = true; feedRetryDelay = FEED_RETRY_MS;
-  feed.style.display = "block"; feed.style.opacity = "1";
-  noSignal.style.display = "none";
-  _armWatchdog();
-}
-
-function onFeedErr() {
-  _clearFeedTimers();
-  feedAlive = false;
-  feed.style.display = "block"; feed.style.opacity = "0.18";
-  noSignal.style.display = "flex";
-  feedRetryTimer = setTimeout(loadFeed, feedRetryDelay);
-  feedRetryDelay = Math.min(feedRetryDelay * 1.5, FEED_MAX_RETRY);
-}
-
-feed.addEventListener("load",  onFeedLoad);
-feed.addEventListener("error", onFeedErr);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) loadFeed(); });
-window.addEventListener("focus", () => { if (feedAlive) loadFeed(); });
+/* ── VIDEO ── */
+const feed=document.getElementById("feed"),noSignal=document.getElementById("noSignal");
+let feedAlive=false,feedRetry=null,feedDog=null,feedDelay=3000;
+function _clearFT(){clearTimeout(feedRetry);clearTimeout(feedDog);feedRetry=feedDog=null;}
+function _armDog(){clearTimeout(feedDog);feedDog=setTimeout(()=>{addLine("── feed watchdog: herverbinden ──");loadFeed();},12000);}
+function loadFeed(){_clearFT();requestAnimationFrame(()=>{feed.src="/video_feed?"+Date.now();feedRetry=setTimeout(()=>{if(!feedAlive)onFeedErr();},10000);});}
+function onFeedLoad(){_clearFT();feedAlive=true;feedDelay=3000;feed.style.display="block";feed.style.opacity="1";noSignal.style.display="none";_armDog();}
+function onFeedErr(){_clearFT();feedAlive=false;feed.style.display="block";feed.style.opacity="0.18";noSignal.style.display="flex";feedRetry=setTimeout(loadFeed,feedDelay);feedDelay=Math.min(feedDelay*1.5,15000);}
+feed.addEventListener("load",onFeedLoad);feed.addEventListener("error",onFeedErr);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)loadFeed();});
+window.addEventListener("focus",()=>{if(feedAlive)loadFeed();});
 loadFeed();
 
-// =============================================================================
-// SSE
-// =============================================================================
-
-function connect() {
-  if (evtSrc) { evtSrc.close(); evtSrc = null; }
-  evtSrc = new EventSource("/logs");
-
-  evtSrc.onopen = () => {
-    setLive(true, "Verbonden met log stream");
-    addLine("── log stream verbonden ──");
-  };
-
-  evtSrc.onmessage = (e) => { parseStats(e.data); addLine(e.data); };
-
-  evtSrc.onerror = () => {
-    setLive(false, `Verbroken – opnieuw over ${RECONNECT_MS / 1000}s…`);
-    evtSrc.close(); evtSrc = null;
-    setTimeout(connect, RECONNECT_MS);
-  };
+/* ── SSE ── */
+function connect(){
+  if(evtSrc){evtSrc.close();evtSrc=null;}
+  evtSrc=new EventSource("/logs");
+  evtSrc.onopen=()=>{setLive(true,"Verbonden met log stream");addLine("── log stream verbonden ──");};
+  evtSrc.onmessage=e=>{parseStats(e.data);addLine(e.data);};
+  evtSrc.onerror=()=>{setLive(false,`Verbroken – opnieuw over ${RECONNECT_MS/1000}s…`);evtSrc.close();evtSrc=null;setTimeout(connect,RECONNECT_MS);};
 }
-
 connect();
-
-// =============================================================================
-// BOOT
-// =============================================================================
-
 initUI();
-updateLabels();
+updateHSVLabels();
 </script>
 </body>
 </html>

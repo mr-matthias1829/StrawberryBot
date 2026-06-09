@@ -1,9 +1,8 @@
 """
 turntable.py
 ============
-Controls the turntable servo (AX-12A, ID 13) in wheel /
-continuous-rotation mode so the robot can pan left or right to track
-a strawberry on the X-axis.
+Controls the turntable servo (AX-12A, ID 13) in wheel / continuous-rotation
+mode so the robot can pan left or right to track a strawberry on the X-axis.
 
 Architecture
 ------------
@@ -43,7 +42,6 @@ import threading
 import time
 
 import motor
-import servo_status
 
 # =============================================================================
 # TUNING
@@ -106,6 +104,11 @@ def _read_sensor() -> dict | None:
     except Exception as e:
         print(f"[turntable] Sensor read error: {e}")
         return None
+
+
+def get_sensor_reading() -> dict | None:
+    """Public wrapper — returns latest turntable encoder reading or None."""
+    return _read_sensor()
 
 # =============================================================================
 # STATE
@@ -215,14 +218,12 @@ def _speed_from_dx(dx_abs: int) -> int:
 def stop() -> None:
     """Post a stop command (non-blocking)."""
     _post_word(0)
-    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def spin_left(speed: int = SPEED_MEDIUM) -> dict:
     """Spin CCW — gripper moves LEFT.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
-    servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
     return {"direction": "left", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -230,7 +231,6 @@ def spin_right(speed: int = SPEED_MEDIUM) -> dict:
     """Spin CW — gripper moves RIGHT.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
-    servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)
     return {"direction": "right", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -246,14 +246,6 @@ def update(dx: int) -> str:
     encoder zero-point and degree budget have been defined.
     """
     if not _initialized:
-        speed = _speed_from_dx(abs(dx))
-        if dx > DEAD_ZONE:
-            servo_status.update(SERVO_ID, "RIGHT", speed, real=False)
-            return f"TURNTABLE SIMULATED (dx={dx:+d})"
-        if dx < -DEAD_ZONE:
-            servo_status.update(SERVO_ID, "LEFT", speed, real=False)
-            return f"TURNTABLE SIMULATED (dx={dx:+d})"
-        servo_status.update(SERVO_ID, "STOP", 0, real=False)
         return f"TURNTABLE SIMULATED (dx={dx:+d})"
 
     speed = _speed_from_dx(abs(dx))

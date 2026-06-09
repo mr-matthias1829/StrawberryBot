@@ -22,9 +22,6 @@ Full pixel-perfect containment is no longer required; the berry just needs
 to be large enough (i.e. close enough) inside the gripper area.
 """
 
-#Matt f*cked up the servo's, so yeah.
-#Screw him
-
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple

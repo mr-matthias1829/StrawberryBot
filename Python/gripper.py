@@ -38,7 +38,6 @@ import threading
 import time
 
 import motor
-import servo_status
 
 # =============================================================================
 # TUNING
@@ -101,6 +100,11 @@ def _read_sensor() -> dict | None:
         print(f"[gripper] Sensor read error: {e}")
         return None
 
+
+def get_sensor_reading() -> dict | None:
+    """Public wrapper — returns latest gripper encoder reading or None."""
+    return _read_sensor()
+
 # =============================================================================
 # STATE
 # =============================================================================
@@ -133,7 +137,6 @@ def _worker() -> None:
 
         with _lock:
             _state = "BUSY"
-        servo_status.update(SERVO_ID, "BUSY", SPEED, real=_initialized)
 
         try:
             if action == "grip":
@@ -141,18 +144,15 @@ def _worker() -> None:
                 with _lock:
                     _state = "GRIPPED"
                     _last_action = "grip"
-                servo_status.update(SERVO_ID, "GRIPPED", 0, real=_initialized)
             elif action == "open":
                 _execute_open()
                 with _lock:
                     _state = "OPEN"
                     _last_action = "open"
-                servo_status.update(SERVO_ID, "OPEN", 0, real=_initialized)
         except Exception as e:
             print(f"[gripper] Error during {action}: {e}")
             with _lock:
                 _state = "OPEN"   # failsafe
-            servo_status.update(SERVO_ID, "OPEN", 0, real=_initialized)
 
 
 def _execute_grip() -> None:
@@ -206,7 +206,6 @@ def init() -> None:
     _init_sensor()
 
     _initialized = True
-    servo_status.update(SERVO_ID, "OPEN", 0, real=True)
     print(f"✅ Gripper initialised (ID {SERVO_ID}, wheel mode).")
 
 
@@ -254,7 +253,6 @@ def command(action: str) -> dict:
     global _pending_action
 
     if not _initialized:
-        servo_status.update(SERVO_ID, action.upper(), 0, real=False)
         return {"action": action, "status": "simulated"}
 
     action = action.lower()
