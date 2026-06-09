@@ -5,24 +5,17 @@ Controls the turntable servo (AX-12A, ID 13) in wheel /
 continuous-rotation mode so the robot can pan left or right to track
 a strawberry on the X-axis.
 
-Architecture
-------------
-- Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then turntable.init() once at startup.
-- update(dx) is the only call needed per frame from RobotController.
-- All serial writes run on a background thread so they never block the
-  vision/inference pipeline.
+Zero-point tracking
+-------------------
+At init() the current sensor reading (if available) is stored as
+_zero_deg.  A dead-reckoning accumulator (_dead_pos) tracks movement
+even when no sensor is present.
 
-Corner sensor (AS5600 via TCA9548A, TCA channel: see SENSOR_CHANNEL)
----------------------------------------------------------------------
-Travel limits are enforced in update() via MIN_DEG / MAX_DEG.
-If the sensor is unavailable the motor runs open-loop (no limit enforcement).
-
-Coordinate convention (matches robot_controller.py)
-----------------------------------------------------
-    dx > 0  → target is RIGHT of gripper → spin RIGHT (CW)
-    dx < 0  → target is LEFT  of gripper → spin LEFT  (CCW)
-    |dx| ≤ DEAD_ZONE  → aligned, stop
+_home()
+-------
+Called by motor.home_all().  Drives back to the zero position using the
+sensor if available, otherwise reverses the dead-reckoning accumulator.
+Blocks until complete.
 """
 
 import threading
@@ -30,7 +23,9 @@ import time
 
 import motor
 import servo_status
-from corner_sensors import CornerSensorManager
+from _homing_utils import (
+    home_with_sensor, home_dead_reckoning, accumulate, DR_HOME_SPEED
+)
 
 # =============================================================================
 # TUNING
@@ -48,12 +43,8 @@ THRESHOLD_MEDIUM = 150
 
 SENSOR_CHANNEL = 0   # TCA9548A channel wired to this encoder
 
-# Soft travel limits in degrees (0–360).  The turntable can rotate freely,
-# so a lap-aware limit makes more sense long-term, but degree-within-one-turn
-# is sufficient until calibration is done.
-# Set MIN_DEG = MAX_DEG = None to disable limit enforcement entirely.
-MIN_DEG: float | None = 10.0    # TODO: calibrate after hardware bring-up
-MAX_DEG: float | None = 350.0   # TODO: calibrate after hardware bring-up
+MIN_DEG: float | None = 10.0
+MAX_DEG: float | None = 350.0
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -100,17 +91,12 @@ def get_sensor_reading() -> dict | None:
 
 
 def _at_limit(direction: str) -> bool:
-    """
-    Return True if moving in *direction* ('left'/'right') would violate the
-    soft travel limits.  Returns False when the sensor is unavailable or
-    limits are disabled.
-    """
     if MIN_DEG is None or MAX_DEG is None:
         return False
     reading = _read_sensor()
     if reading is None:
         return False
-    deg = CornerSensorManager.total_position(reading)
+    deg =  _sensor_mgr.total_position(reading)
     if direction == "right" and deg >= MAX_DEG:
         return True
     if direction == "left" and deg <= MIN_DEG:
@@ -121,20 +107,25 @@ def _at_limit(direction: str) -> bool:
 # STATE
 # =============================================================================
 
-_initialized:  bool = False
-_pending_word: int  = -1
-_last_word:    int  = -1
+_initialized:  bool  = False
+_pending_word: int   = -1
+_last_word:    int   = -1
 _lock      = threading.Lock()
 _event     = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
+
+# Zero-point tracking
+_zero_deg:  float | None = None   # sensor reading at init(), or None
+_dead_pos:  list          = [0.0] # mutable accumulator: [signed_speed × dt]
+_last_write_time: float   = 0.0
 
 # =============================================================================
 # BACKGROUND WRITER THREAD
 # =============================================================================
 
 def _writer() -> None:
-    global _last_word
+    global _last_word, _last_write_time
     while not _stop_flag:
         if not _event.wait(timeout=0.1):
             continue
@@ -143,9 +134,16 @@ def _writer() -> None:
             word = _pending_word
         if word < 0 or word == _last_word:
             continue
+        if motor.is_locked():
+            continue
         try:
+            now = time.monotonic()
+            dt  = now - _last_write_time if _last_write_time else 0.0
+            if _last_word >= 0 and dt > 0:
+                accumulate(_dead_pos, _last_word, dt)
             motor._write_word(SERVO_ID, _REG_SPEED, word)
-            _last_word = word
+            _last_word       = word
+            _last_write_time = now
         except Exception as e:
             print(f"[turntable] Serial error: {e}")
 
@@ -154,7 +152,7 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    global _initialized, _stop_flag, _thread
+    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
 
     if _initialized:
         return
@@ -172,7 +170,18 @@ def init() -> None:
 
     _init_sensor()
 
-    _initialized = True
+    # Capture zero point
+    reading = _read_sensor()
+    if reading is not None:
+        _zero_deg =  _sensor_mgr.total_position(reading)
+        print(f"[turntable] Zero point: {_zero_deg:.1f}° (sensor)")
+    else:
+        _zero_deg = None
+        print("[turntable] Zero point: dead-reckoning only")
+
+    _dead_pos[0]      = 0.0
+    _last_write_time  = time.monotonic()
+    _initialized      = True
     print(f"✅ Turntable initialised (ID {SERVO_ID}, wheel mode).")
 
 
@@ -202,6 +211,8 @@ def shutdown() -> None:
 
 def _post_word(word: int) -> None:
     global _pending_word
+    if motor.is_locked():
+        return
     with _lock:
         _pending_word = word
     _event.set()
@@ -240,13 +251,6 @@ def spin_right(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def update(dx: int) -> str:
-    """
-    Main per-frame entry point.  Enforces soft travel limits when a corner
-    sensor is available.  Never blocks.
-
-    Args:
-        dx: target_x - gripper_x  (from RobotController.generate_dx)
-    """
     if not _initialized:
         speed = _speed_from_dx(abs(dx))
         if dx > DEAD_ZONE:
@@ -276,3 +280,43 @@ def update(dx: int) -> str:
 
     stop()
     return f"TURNTABLE STOP  (dx={dx:+d}, aligned)"
+
+# =============================================================================
+# HOMING  (called by motor.home_all())
+# =============================================================================
+
+def _home() -> None:
+    """Drive turntable back to its zero point.  Blocks until complete."""
+    if not _initialized:
+        print("[turntable] _home(): not initialised — skipping")
+        return
+
+    # Flush any pending command
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
+
+    if _zero_deg is not None:
+        print(f"[turntable] Homing with sensor → target {_zero_deg:.1f}°")
+        ok = home_with_sensor(
+            read_sensor_fn    = _read_sensor,
+            total_position_fn =  _sensor_mgr.total_position,
+            zero_deg          = _zero_deg,
+            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
+            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+        )
+        if ok:
+            print("[turntable] Homing complete (sensor).")
+        else:
+            print("[turntable] Homing incomplete — sensor timeout.")
+    else:
+        print("[turntable] Homing with dead-reckoning…")
+        home_dead_reckoning(
+            dead_pos_ref      = _dead_pos,
+            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
+            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+        )
+        print("[turntable] Homing complete (dead-reckoning).")
+
+    _dead_pos[0] = 0.0
+    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)

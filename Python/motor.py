@@ -16,11 +16,21 @@ Lifecycle
 Low-level helpers (_write_word, _write_byte, _send_packet) are intentionally
 private.  Sub-modules import and call them directly; nothing outside this
 package should need them.
+
+Homing
+------
+    motor.home_all()   # homes all motors sequentially, then locks out
+                       # all motor commands for 5 seconds.
+
+    motor.is_locked()  # True while the post-home lockout is active.
+                       # Sub-modules call this in _post_word / _send_packet
+                       # to silently drop commands during the lockout window.
 """
 
 import atexit
 import platform
 import time
+import threading
 
 ON_PI = platform.system() == "Linux"
 
@@ -54,10 +64,42 @@ _ser:          object = None   # serial.Serial instance
 _initialized:  bool   = False
 
 # =============================================================================
+# HOMING LOCKOUT
+# =============================================================================
+
+_locked:      bool            = False   # True during post-home lockout
+_locked_until: float          = 0.0    # monotonic timestamp when lock expires
+_lock_mutex:  threading.Lock  = threading.Lock()
+
+POST_HOME_LOCKOUT_S = 5.0   # seconds to refuse commands after home_all()
+
+
+def is_locked() -> bool:
+    """Return True if the post-home lockout is currently active."""
+    global _locked
+    with _lock_mutex:
+        if _locked and time.monotonic() >= _locked_until:
+            _locked = False
+        return _locked
+
+
+def _set_lock(duration: float) -> None:
+    global _locked, _locked_until
+    with _lock_mutex:
+        _locked       = True
+        _locked_until = time.monotonic() + duration
+
+
+def _clear_lock() -> None:
+    global _locked
+    with _lock_mutex:
+        _locked = False
+
+# =============================================================================
 # LIFECYCLE
 # =============================================================================
 
-def init() -> None: # TODO: brothar we need to make it reset when it shuts down, the zero point my guy, dewit.
+def init() -> None:
     """Open GPIO and serial port.  Call once at startup before any motor use."""
     global _h, _ser, _initialized
 
@@ -155,3 +197,60 @@ def enable_torque(servo_id: int) -> None:
 def disable_torque(servo_id: int) -> None:
     print(f"🛑 Torque OFF (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 0)
+
+# =============================================================================
+# HOMING  (sequential, blocks until all motors are zeroed)
+# =============================================================================
+
+def home_all() -> None:
+    """
+    Home every motor sequentially then lock out all motor commands for
+    POST_HOME_LOCKOUT_S seconds.
+
+    Order (safe for the physical layout):
+      1. Gripper  — open (simplest: just use existing state machine)
+      2. Pivot    — tilt to neutral
+      3. Arm      — retract fully
+      4. Lift     — move to bottom
+      5. Turntable — rotate to centre
+
+    This function blocks the calling thread until homing is complete, then
+    starts the lockout timer before returning.  During the lockout window
+    is_locked() returns True and sub-modules silently ignore commands.
+    """
+    import gripper as _gripper
+    import pivot   as _pivot
+    import arm     as _arm
+    import lift    as _lift
+    import turntable as _turntable
+
+    print("🏠 home_all(): starting sequential homing…")
+
+    # 1 ── Gripper ────────────────────────────────────────────────────────────
+    print("  [1/5] Gripper → OPEN")
+    _gripper._home()
+
+    # 2 ── Pivot ──────────────────────────────────────────────────────────────
+    print("  [2/5] Pivot → zero")
+    _pivot._home()
+
+    # 3 ── Arm ────────────────────────────────────────────────────────────────
+    print("  [3/5] Arm → zero (retract)")
+    _arm._home()
+
+    # 4 ── Lift ───────────────────────────────────────────────────────────────
+    print("  [4/5] Lift → zero (bottom)")
+    _lift._home()
+
+    # 5 ── Turntable ──────────────────────────────────────────────────────────
+    print("  [5/5] Turntable → zero (centre)")
+    _turntable._home()
+
+    print(f"🏠 home_all(): complete — locking commands for {POST_HOME_LOCKOUT_S:.0f}s")
+    _set_lock(POST_HOME_LOCKOUT_S)
+    # Spin in a background thread so we don't block the caller forever, but
+    # print a clear message when the lock expires.
+    def _log_unlock():
+        time.sleep(POST_HOME_LOCKOUT_S + 0.05)
+        print("🔓 Motor lockout expired — commands accepted again.")
+    threading.Thread(target=_log_unlock, daemon=True, name="home-lock-expire").start()

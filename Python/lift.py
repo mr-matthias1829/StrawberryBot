@@ -2,18 +2,15 @@
 lift.py
 =======
 Controls the lift mechanism using two AX-12A servos (IDs 3 and 4) in
-wheel / continuous-rotation mode so the arm can move up or down.
+wheel / continuous-rotation mode.
 
-Travel limits
--------------
-MIN_DEG / MAX_DEG apply to SENSOR_CHANNEL_A (the primary encoder).
-If that sensor is unavailable the lift runs open-loop.
+Zero-point tracking
+-------------------
+Sensor channel A is the reference encoder.  If available its reading at
+init() is stored as _zero_deg.  Both servos share a single dead-reckoning
+accumulator because they always move together.
 
-Coordinate convention
----------------------
-    dy > 0  → target is BELOW  gripper → move DOWN
-    dy < 0  → target is ABOVE  gripper → move UP
-    |dy| ≤ DEAD_ZONE  → aligned, stop
+_home() drives the lift to the top (zero/startup position).
 """
 
 import threading
@@ -21,7 +18,9 @@ import time
 
 import motor
 import servo_status
-from corner_sensors import CornerSensorManager
+from _homing_utils import (
+    home_with_sensor, home_dead_reckoning, accumulate, DR_HOME_SPEED
+)
 
 # =============================================================================
 # TUNING
@@ -39,16 +38,12 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-SENSOR_CHANNEL_A = 1   # TODO: set to correct TCA channel
-SENSOR_CHANNEL_B = 2   # TODO: set to correct TCA channel
+SENSOR_CHANNEL_A = 1
+SENSOR_CHANNEL_B = 2
 
-# Soft travel limits in degrees.  The UP direction decreases the encoder
-# reading on the physical rig; adjust the convention if it's the other way.
-# Set both to None to disable limit enforcement.
-MIN_DEG: float | None = 5.0     # fully UP limit   — TODO: calibrate
-MAX_DEG: float | None = 355.0   # fully DOWN limit  — TODO: calibrate
+MIN_DEG: float | None = 5.0
+MAX_DEG: float | None = 355.0
 
-# AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
@@ -99,16 +94,12 @@ def get_sensor_readings() -> dict[str, dict | None]:
 
 
 def _at_limit(direction: str) -> bool:
-    """
-    Return True if moving in *direction* ('up'/'down') would violate the
-    soft travel limits.  Uses channel A as the position reference.
-    """
     if MIN_DEG is None or MAX_DEG is None:
         return False
     reading = _read_sensor(SENSOR_CHANNEL_A)
     if reading is None:
         return False
-    deg = CornerSensorManager.total_position(reading)
+    deg =  _sensor_mgr.total_position(reading)
     if direction == "up" and deg <= MIN_DEG:
         return True
     if direction == "down" and deg >= MAX_DEG:
@@ -129,12 +120,17 @@ _event     = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
+# Zero-point tracking (shared accumulator; both servos move together)
+_zero_deg:        float | None = None
+_dead_pos:        list          = [0.0]
+_last_write_time: float         = 0.0
+
 # =============================================================================
 # BACKGROUND WRITER THREAD
 # =============================================================================
 
 def _writer() -> None:
-    global _last_word_a, _last_word_b
+    global _last_word_a, _last_word_b, _last_write_time
     while not _stop_flag:
         if not _event.wait(timeout=0.1):
             continue
@@ -144,8 +140,16 @@ def _writer() -> None:
             word_a = _pending_word_a
             word_b = _pending_word_b
 
+        if motor.is_locked():
+            continue
+
+        now = time.monotonic()
+        dt  = now - _last_write_time if _last_write_time else 0.0
+
         if word_a >= 0 and word_a != _last_word_a:
             try:
+                if _last_word_a >= 0 and dt > 0:
+                    accumulate(_dead_pos, _last_word_a, dt)
                 motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
                 _last_word_a = word_a
             except Exception as e:
@@ -158,12 +162,14 @@ def _writer() -> None:
             except Exception as e:
                 print(f"[lift] Serial error (servo {SERVO_ID_B}): {e}")
 
+        _last_write_time = now
+
 # =============================================================================
 # LIFECYCLE
 # =============================================================================
 
 def init() -> None:
-    global _initialized, _stop_flag, _thread
+    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
 
     if _initialized:
         return
@@ -182,7 +188,17 @@ def init() -> None:
 
     _init_sensors()
 
-    _initialized = True
+    reading = _read_sensor(SENSOR_CHANNEL_A)
+    if reading is not None:
+        _zero_deg =  _sensor_mgr.total_position(reading)
+        print(f"[lift] Zero point: {_zero_deg:.1f}° (sensor ch A)")
+    else:
+        _zero_deg = None
+        print("[lift] Zero point: dead-reckoning only")
+
+    _dead_pos[0]     = 0.0
+    _last_write_time = time.monotonic()
+    _initialized     = True
     print(f"✅ Lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
 
 
@@ -213,6 +229,8 @@ def shutdown() -> None:
 
 def _post_words(word_a: int, word_b: int) -> None:
     global _pending_word_a, _pending_word_b
+    if motor.is_locked():
+        return
     with _lock:
         _pending_word_a = word_a
         _pending_word_b = word_b
@@ -257,15 +275,6 @@ def move_down(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def update(dy: int) -> str:
-    """
-    Main per-frame entry point.  Enforces soft travel limits when a corner
-    sensor is available.  Never blocks.
-
-    Args:
-        dy: target_y - gripper_y  (from RobotController.generate_dy)
-            dy > 0 → target below → move DOWN
-            dy < 0 → target above → move UP
-    """
     if not _initialized:
         speed = _speed_from_dy(abs(dy))
         if dy > DEAD_ZONE:
@@ -298,3 +307,49 @@ def update(dy: int) -> str:
 
     stop()
     return f"LIFT STOP (dy={dy:+d}, aligned)"
+
+# =============================================================================
+# HOMING  (called by motor.home_all())
+# =============================================================================
+
+def _home() -> None:
+    """Drive lift to its zero (top / startup) position.  Blocks until complete."""
+    if not _initialized:
+        print("[lift] _home(): not initialised — skipping")
+        return
+
+    for sid in (SERVO_ID_A, SERVO_ID_B):
+        motor._write_word(sid, _REG_SPEED, 0)
+
+    # Helper to drive both servos simultaneously
+    def _both(word: int) -> None:
+        motor._write_word(SERVO_ID_A, _REG_SPEED, word)
+        motor._write_word(SERVO_ID_B, _REG_SPEED, word)
+
+    def _stop_both() -> None:
+        _both(0)
+
+    if _zero_deg is not None:
+        print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°")
+        ok = home_with_sensor(
+            read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
+            total_position_fn =  _sensor_mgr.total_position,
+            zero_deg          = _zero_deg,
+            drive_positive_fn = lambda s: _both(_DIR_CCW | s),
+            drive_negative_fn = lambda s: _both(_DIR_CW  | s),
+            stop_fn           = _stop_both,
+        )
+        print(f"[lift] Homing {'complete' if ok else 'incomplete — sensor timeout'}.")
+    else:
+        print("[lift] Homing with dead-reckoning…")
+        home_dead_reckoning(
+            dead_pos_ref      = _dead_pos,
+            drive_positive_fn = lambda s: _both(_DIR_CCW | s),
+            drive_negative_fn = lambda s: _both(_DIR_CW  | s),
+            stop_fn           = _stop_both,
+        )
+        print("[lift] Homing complete (dead-reckoning).")
+
+    _dead_pos[0] = 0.0
+    servo_status.update(SERVO_ID_A, "STOP", 0, real=_initialized)
+    servo_status.update(SERVO_ID_B, "STOP", 0, real=_initialized)

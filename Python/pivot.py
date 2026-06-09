@@ -4,16 +4,7 @@ pivot.py
 Controls the gripper-pivot servo (AX-12A, ID 2) in wheel /
 continuous-rotation mode.
 
-Travel limits
--------------
-MIN_DEG / MAX_DEG are enforced in update() when a corner sensor is available.
-Rotating down increases the encoder reading; rotating up decreases it.
-
-Coordinate convention
----------------------
-    dp > 0  → pivot DOWN  (gripper nose tilts down)
-    dp < 0  → pivot UP    (gripper nose tilts up)
-    |dp| ≤ DEAD_ZONE  → aligned, stop
+Zero-point tracking & _home() — see _homing_utils.py for full explanation.
 """
 
 import threading
@@ -21,7 +12,9 @@ import time
 
 import motor
 import servo_status
-from corner_sensors import CornerSensorManager
+from _homing_utils import (
+    home_with_sensor, home_dead_reckoning, accumulate, DR_HOME_SPEED
+)
 
 # =============================================================================
 # TUNING
@@ -37,14 +30,11 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-SENSOR_CHANNEL = 5   # TODO: set to correct TCA channel
+SENSOR_CHANNEL = 5
 
-# Soft travel limits in degrees.
-# Set both to None to disable limit enforcement.
-MIN_DEG: float | None = 10.0   # fully UP   — TODO: calibrate
-MAX_DEG: float | None = 350.0  # fully DOWN — TODO: calibrate
+MIN_DEG: float | None = 10.0
+MAX_DEG: float | None = 350.0
 
-# AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
@@ -89,13 +79,12 @@ def get_sensor_reading() -> dict | None:
 
 
 def _at_limit(direction: str) -> bool:
-    """Return True if moving in *direction* ('up'/'down') would hit a limit."""
     if MIN_DEG is None or MAX_DEG is None:
         return False
     reading = _read_sensor()
     if reading is None:
         return False
-    deg = CornerSensorManager.total_position(reading)
+    deg =  _sensor_mgr.total_position(reading)
     if direction == "down" and deg >= MAX_DEG:
         return True
     if direction == "up" and deg <= MIN_DEG:
@@ -114,12 +103,17 @@ _event     = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
+# Zero-point tracking
+_zero_deg:        float | None = None
+_dead_pos:        list          = [0.0]
+_last_write_time: float         = 0.0
+
 # =============================================================================
 # BACKGROUND WRITER THREAD
 # =============================================================================
 
 def _writer() -> None:
-    global _last_word
+    global _last_word, _last_write_time
     while not _stop_flag:
         if not _event.wait(timeout=0.1):
             continue
@@ -128,9 +122,16 @@ def _writer() -> None:
             word = _pending_word
         if word < 0 or word == _last_word:
             continue
+        if motor.is_locked():
+            continue
         try:
+            now = time.monotonic()
+            dt  = now - _last_write_time if _last_write_time else 0.0
+            if _last_word >= 0 and dt > 0:
+                accumulate(_dead_pos, _last_word, dt)
             motor._write_word(SERVO_ID, _REG_SPEED, word)
-            _last_word = word
+            _last_word       = word
+            _last_write_time = now
         except Exception as e:
             print(f"[pivot] Serial error: {e}")
 
@@ -139,7 +140,7 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    global _initialized, _stop_flag, _thread
+    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
 
     if _initialized:
         return
@@ -157,7 +158,17 @@ def init() -> None:
 
     _init_sensor()
 
-    _initialized = True
+    reading = _read_sensor()
+    if reading is not None:
+        _zero_deg =  _sensor_mgr.total_position(reading)
+        print(f"[pivot] Zero point: {_zero_deg:.1f}° (sensor)")
+    else:
+        _zero_deg = None
+        print("[pivot] Zero point: dead-reckoning only")
+
+    _dead_pos[0]     = 0.0
+    _last_write_time = time.monotonic()
+    _initialized     = True
     print(f"✅ Pivot initialised (ID {SERVO_ID}, wheel mode).")
 
 
@@ -187,6 +198,8 @@ def shutdown() -> None:
 
 def _post_word(word: int) -> None:
     global _pending_word
+    if motor.is_locked():
+        return
     with _lock:
         _pending_word = word
     _event.set()
@@ -225,13 +238,6 @@ def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def update(dp: int) -> str:
-    """
-    Per-frame entry point.  Enforces soft travel limits when a corner
-    sensor is available.  Never blocks.
-
-    Args:
-        dp: pivot error — positive = tilt down, negative = tilt up.
-    """
     if not _initialized:
         speed = _speed_from_dp(abs(dp))
         if dp > DEAD_ZONE:
@@ -261,3 +267,39 @@ def update(dp: int) -> str:
 
     stop()
     return f"PIVOT STOP (dp={dp:+d}, aligned)"
+
+# =============================================================================
+# HOMING  (called by motor.home_all())
+# =============================================================================
+
+def _home() -> None:
+    """Drive pivot to its zero (neutral/startup) position.  Blocks until complete."""
+    if not _initialized:
+        print("[pivot] _home(): not initialised — skipping")
+        return
+
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
+
+    if _zero_deg is not None:
+        print(f"[pivot] Homing with sensor → target {_zero_deg:.1f}°")
+        ok = home_with_sensor(
+            read_sensor_fn    = _read_sensor,
+            total_position_fn =  _sensor_mgr.total_position,
+            zero_deg          = _zero_deg,
+            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
+            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+        )
+        print(f"[pivot] Homing {'complete' if ok else 'incomplete — sensor timeout'}.")
+    else:
+        print("[pivot] Homing with dead-reckoning…")
+        home_dead_reckoning(
+            dead_pos_ref      = _dead_pos,
+            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
+            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+        )
+        print("[pivot] Homing complete (dead-reckoning).")
+
+    _dead_pos[0] = 0.0
+    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
