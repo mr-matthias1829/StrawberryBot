@@ -14,9 +14,6 @@ inside the gripper bounding box, regardless of apparent size / depth.
 Once the target leaves the gripper area the arm stops.
 """
 
-#Matt f*cked up the servo's, so yeah.
-#Screw him
-
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple

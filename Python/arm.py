@@ -42,7 +42,6 @@ import threading
 import time
 
 import motor
-import servo_status
 
 # =============================================================================
 # TUNING
@@ -103,6 +102,11 @@ def _read_sensor() -> dict | None:
     except Exception as e:
         print(f"[arm] Sensor read error: {e}")
         return None
+
+
+def get_sensor_reading() -> dict | None:
+    """Public wrapper — returns latest arm encoder reading or None."""
+    return _read_sensor()
 
 # =============================================================================
 # STATE
@@ -212,14 +216,12 @@ def _speed_from_dz(dz_abs: int) -> int:
 def stop() -> None:
     """Post a stop command (non-blocking)."""
     _post_word(0)
-    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def move_forward(speed: int = SPEED_MEDIUM) -> dict:
     """Extend arm forward — CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
-    servo_status.update(SERVO_ID, "FORWARD", speed, real=_initialized)
     return {"direction": "forward", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -227,7 +229,6 @@ def move_backward(speed: int = SPEED_MEDIUM) -> dict:
     """Retract arm backward — CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
-    servo_status.update(SERVO_ID, "BACKWARD", speed, real=_initialized)
     return {"direction": "backward", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -242,14 +243,6 @@ def update(dz: int) -> str:
     TODO: call _read_sensor() here to enforce soft travel limits.
     """
     if not _initialized:
-        speed = _speed_from_dz(abs(dz))
-        if dz > DEAD_ZONE:
-            servo_status.update(SERVO_ID, "FORWARD", speed, real=False)
-            return f"ARM SIMULATED (dz={dz:+d})"
-        if dz < -DEAD_ZONE:
-            servo_status.update(SERVO_ID, "BACKWARD", speed, real=False)
-            return f"ARM SIMULATED (dz={dz:+d})"
-        servo_status.update(SERVO_ID, "STOP", 0, real=False)
         return f"ARM SIMULATED (dz={dz:+d})"
 
     speed = _speed_from_dz(abs(dz))
