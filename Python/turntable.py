@@ -108,7 +108,6 @@ def _read_sensor() -> dict | None:
         return None
 
 def get_sensor_reading() -> dict | None:
-    """Public wrapper — returns latest arm encoder reading or None."""
     return _read_sensor()
 
 # =============================================================================

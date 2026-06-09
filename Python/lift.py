@@ -118,10 +118,11 @@ def _read_sensor(channel: int) -> dict | None:
         print(f"[lift] Sensor ch{channel} read error: {e}")
         return None
 
-def get_sensor_reading() -> dict | None:
-    """Public wrapper — returns latest arm encoder reading or None."""
-    return _read_sensor()
-
+def get_sensor_readings() -> dict[str, dict | None]:
+    return {
+        "A": _read_sensor(SENSOR_CHANNEL_A),
+        "B": _read_sensor(SENSOR_CHANNEL_B),
+    }
 # =============================================================================
 # STATE
 # =============================================================================
