@@ -2,40 +2,18 @@
 pivot.py
 ========
 Controls the gripper-pivot servo (AX-12A, ID 2) in wheel /
-continuous-rotation mode so the gripper mount can rotate up or down.
+continuous-rotation mode.
 
-Architecture
-------------
-- Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then pivot.init() once at startup.
-- update(dp) is the per-frame entry point for autonomous use.
-- rotate_up() / rotate_down() / stop() are used by manual_controller.
-- All serial writes run on a background thread so they never block
-  the vision/inference pipeline.
+Travel limits
+-------------
+MIN_DEG / MAX_DEG are enforced in update() when a corner sensor is available.
+Rotating down increases the encoder reading; rotating up decreases it.
 
-Coordinate convention (for autonomous use)
--------------------------------------------
+Coordinate convention
+---------------------
     dp > 0  → pivot DOWN  (gripper nose tilts down)
     dp < 0  → pivot UP    (gripper nose tilts up)
     |dp| ≤ DEAD_ZONE  → aligned, stop
-
-AX-12A wheel-mode  (MOVING_SPEED reg 32)
------------------------------------------
-    Bits 0-9  → speed magnitude  (0 = stop)
-    Bit  10   → 0 = CCW (up)  /  1 = CW (down)
-
-TODO (hardware bring-up):
-  Verify which spin direction corresponds to up/down on the physical pivot
-  and swap _DIR_CCW / _DIR_CW if needed.
-
-Corner sensor (AS5600 via TCA9548A)
-------------------------------------
-SENSOR_CHANNEL is reserved but reads are currently STUBBED.
-
-TODO:
-  1. Set SENSOR_CHANNEL to the correct TCA channel.
-  2. Define soft travel limits (MIN_DEG, MAX_DEG) to avoid over-rotation.
-  3. Use _read_sensor() in update() to enforce those limits.
 """
 
 import threading
@@ -60,17 +38,22 @@ THRESHOLD_MEDIUM = 150
 
 SENSOR_CHANNEL = 5   # TODO: set to correct TCA channel
 
+# Soft travel limits in degrees.
+# Set both to None to disable limit enforcement.
+MIN_DEG: float | None = 10.0   # fully UP   — TODO: calibrate
+MAX_DEG: float | None = 350.0  # fully DOWN — TODO: calibrate
+
 # AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
 _REG_SPEED     = 32
 
-_DIR_CCW = 0          # up
-_DIR_CW  = 1 << 10    # down
+_DIR_CCW = 0
+_DIR_CW  = 1 << 10
 
 # =============================================================================
-# CORNER SENSOR  (optional — gracefully absent on non-Pi or pre-wiring)
+# CORNER SENSOR
 # =============================================================================
 
 _sensor_mgr = None
@@ -91,11 +74,6 @@ def _init_sensor() -> None:
 
 
 def _read_sensor() -> dict | None:
-    """
-    Return the latest pivot encoder reading, or None if unavailable.
-    Dict keys: channel, raw, deg, laps
-    TODO: use in update() to enforce soft travel limits.
-    """
     if _sensor_mgr is None:
         return None
     try:
@@ -104,8 +82,24 @@ def _read_sensor() -> dict | None:
         print(f"[pivot] Sensor read error: {e}")
         return None
 
+
 def get_sensor_reading() -> dict | None:
     return _read_sensor()
+
+
+def _at_limit(direction: str) -> bool:
+    """Return True if moving in *direction* ('up'/'down') would hit a limit."""
+    if MIN_DEG is None or MAX_DEG is None:
+        return False
+    reading = _read_sensor()
+    if reading is None:
+        return False
+    deg = reading["deg"]
+    if direction == "down" and deg >= MAX_DEG:
+        return True
+    if direction == "up" and deg <= MIN_DEG:
+        return True
+    return False
 
 # =============================================================================
 # STATE
@@ -144,7 +138,6 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    """Switch servo to wheel mode and start background writer.  Idempotent."""
     global _initialized, _stop_flag, _thread
 
     if _initialized:
@@ -168,7 +161,6 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    """Stop motor and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -213,13 +205,11 @@ def _speed_from_dp(dp_abs: int) -> int:
 # =============================================================================
 
 def stop() -> None:
-    """Post a stop command (non-blocking)."""
     _post_word(0)
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
-    """Rotate pivot up — CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "UP", speed, real=_initialized)
@@ -227,7 +217,6 @@ def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
-    """Rotate pivot down — CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "DOWN", speed, real=_initialized)
@@ -236,13 +225,11 @@ def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
 
 def update(dp: int) -> str:
     """
-    Per-frame entry point for autonomous control.  Posts the appropriate
-    speed word and returns a log string.  Never blocks.
+    Per-frame entry point.  Enforces soft travel limits when a corner
+    sensor is available.  Never blocks.
 
     Args:
         dp: pivot error — positive = tilt down, negative = tilt up.
-
-    TODO: call _read_sensor() here to enforce soft travel limits.
     """
     if not _initialized:
         speed = _speed_from_dp(abs(dp))
@@ -258,10 +245,16 @@ def update(dp: int) -> str:
     speed = _speed_from_dp(abs(dp))
 
     if dp > DEAD_ZONE:
+        if _at_limit("down"):
+            stop()
+            return f"PIVOT LIMIT DOWN (dp={dp:+d}, deg≥{MAX_DEG})"
         rotate_down(speed)
         return f"PIVOT DOWN (dp={dp:+d}, speed={speed})"
 
     if dp < -DEAD_ZONE:
+        if _at_limit("up"):
+            stop()
+            return f"PIVOT LIMIT UP   (dp={dp:+d}, deg≤{MIN_DEG})"
         rotate_up(speed)
         return f"PIVOT UP   (dp={dp:+d}, speed={speed})"
 

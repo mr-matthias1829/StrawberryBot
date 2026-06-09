@@ -2,43 +2,15 @@
 lift.py
 =======
 Controls the lift mechanism using two AX-12A servos (IDs 3 and 4) in
-wheel / continuous-rotation mode so the arm can move up or down to track
-a strawberry on the Y-axis.
+wheel / continuous-rotation mode so the arm can move up or down.
 
-Architecture
-------------
-- Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then lift.init() once at startup.
-- update(dy) is the only call needed per frame from RobotController.
-- All serial writes run on a background thread so they never block
-  the vision/inference pipeline.
+Travel limits
+-------------
+MIN_DEG / MAX_DEG apply to SENSOR_CHANNEL_A (the primary encoder).
+If that sensor is unavailable the lift runs open-loop.
 
-Mechanical note
----------------
-Both servos must spin in the SAME direction to move the lift:
-
-    Lift UP   → servo 3 CCW  + servo 4 CCW
-    Lift DOWN → servo 3 CW   + servo 4 CW
-
-Corner sensor (AS5600 via TCA9548A)
-------------------------------------
-The CornerSensorManager is imported and instantiated at init() time.
-Two sensor channels are reserved — one per servo side if available.
-Reads are currently STUBBED.
-
-TODO (hardware bring-up):
-  1. Set SENSOR_CHANNEL_A / _B to the correct TCA channels.
-  2. Define travel limits in degrees (MIN_DEG, MAX_DEG).
-  3. Call _read_sensor() inside update() or a dedicated safety thread
-     to stop the lift before it hits a hard end-stop.
-
-AX-12A wheel-mode  (MOVING_SPEED reg 32)
------------------------------------------
-    Bits 0-9  → speed magnitude  (0 = stop)
-    Bit  10   → 0 = CCW  /  1 = CW
-
-Coordinate convention (matches robot_controller.py)
-----------------------------------------------------
+Coordinate convention
+---------------------
     dy > 0  → target is BELOW  gripper → move DOWN
     dy < 0  → target is ABOVE  gripper → move UP
     |dy| ≤ DEAD_ZONE  → aligned, stop
@@ -66,10 +38,14 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-# TCA9548A channels wired to the lift AS5600 encoders.
-# TODO: set to the correct channels once hardware is confirmed.
-SENSOR_CHANNEL_A = 1   # servo 3 side
-SENSOR_CHANNEL_B = 2   # servo 4 side
+SENSOR_CHANNEL_A = 1   # TODO: set to correct TCA channel
+SENSOR_CHANNEL_B = 2   # TODO: set to correct TCA channel
+
+# Soft travel limits in degrees.  The UP direction decreases the encoder
+# reading on the physical rig; adjust the convention if it's the other way.
+# Set both to None to disable limit enforcement.
+MIN_DEG: float | None = 5.0     # fully UP limit   — TODO: calibrate
+MAX_DEG: float | None = 355.0   # fully DOWN limit  — TODO: calibrate
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -81,10 +57,11 @@ _DIR_CCW = 0
 _DIR_CW  = 1 << 10
 
 # =============================================================================
-# CORNER SENSORS  (optional — gracefully absent on non-Pi or pre-wiring)
+# CORNER SENSORS
 # =============================================================================
 
 _sensor_mgr = None
+
 
 def _init_sensors() -> None:
     global _sensor_mgr
@@ -104,12 +81,6 @@ def _init_sensors() -> None:
 
 
 def _read_sensor(channel: int) -> dict | None:
-    """
-    Return the latest reading for one lift encoder, or None if unavailable.
-
-    Dict keys: channel, raw, deg, laps
-    TODO: use in update() to enforce soft travel limits (MIN_DEG / MAX_DEG).
-    """
     if _sensor_mgr is None or not _sensor_mgr.channel_has_sensor(channel):
         return None
     try:
@@ -118,11 +89,31 @@ def _read_sensor(channel: int) -> dict | None:
         print(f"[lift] Sensor ch{channel} read error: {e}")
         return None
 
+
 def get_sensor_readings() -> dict[str, dict | None]:
     return {
         "A": _read_sensor(SENSOR_CHANNEL_A),
         "B": _read_sensor(SENSOR_CHANNEL_B),
     }
+
+
+def _at_limit(direction: str) -> bool:
+    """
+    Return True if moving in *direction* ('up'/'down') would violate the
+    soft travel limits.  Uses channel A as the position reference.
+    """
+    if MIN_DEG is None or MAX_DEG is None:
+        return False
+    reading = _read_sensor(SENSOR_CHANNEL_A)
+    if reading is None:
+        return False
+    deg = reading["deg"]
+    if direction == "up" and deg <= MIN_DEG:
+        return True
+    if direction == "down" and deg >= MAX_DEG:
+        return True
+    return False
+
 # =============================================================================
 # STATE
 # =============================================================================
@@ -171,7 +162,6 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    """Switch both servos to wheel mode and start background writer.  Idempotent."""
     global _initialized, _stop_flag, _thread
 
     if _initialized:
@@ -196,7 +186,6 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    """Stop motors and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -243,14 +232,12 @@ def _speed_from_dy(dy_abs: int) -> int:
 # =============================================================================
 
 def stop() -> None:
-    """Post a stop command to both servos (non-blocking)."""
     _post_words(0, 0)
     servo_status.update(SERVO_ID_A, "STOP", 0, real=_initialized)
     servo_status.update(SERVO_ID_B, "STOP", 0, real=_initialized)
 
 
 def move_up(speed: int = SPEED_MEDIUM) -> dict:
-    """Move lift UP — both servos CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CCW | speed, _DIR_CCW | speed)
     servo_status.update(SERVO_ID_A, "UP", speed, real=_initialized)
@@ -260,7 +247,6 @@ def move_up(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def move_down(speed: int = SPEED_MEDIUM) -> dict:
-    """Move lift DOWN — both servos CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CW | speed, _DIR_CW | speed)
     servo_status.update(SERVO_ID_A, "DOWN", speed, real=_initialized)
@@ -271,16 +257,13 @@ def move_down(speed: int = SPEED_MEDIUM) -> dict:
 
 def update(dy: int) -> str:
     """
-    Main per-frame entry point.  Posts the appropriate speed words and returns
-    a log string.  Never blocks.
+    Main per-frame entry point.  Enforces soft travel limits when a corner
+    sensor is available.  Never blocks.
 
     Args:
         dy: target_y - gripper_y  (from RobotController.generate_dy)
-            dy > 0 → target below  → move DOWN
-            dy < 0 → target above  → move UP
-
-    TODO: call _read_sensor(SENSOR_CHANNEL_A) here to check position against
-    soft travel limits before commanding movement.
+            dy > 0 → target below → move DOWN
+            dy < 0 → target above → move UP
     """
     if not _initialized:
         speed = _speed_from_dy(abs(dy))
@@ -299,10 +282,16 @@ def update(dy: int) -> str:
     speed = _speed_from_dy(abs(dy))
 
     if dy > DEAD_ZONE:
+        if _at_limit("down"):
+            stop()
+            return f"LIFT LIMIT DOWN (dy={dy:+d}, deg≥{MAX_DEG})"
         move_down(speed)
         return f"LIFT DOWN (dy={dy:+d}, speed={speed})"
 
     if dy < -DEAD_ZONE:
+        if _at_limit("up"):
+            stop()
+            return f"LIFT LIMIT UP   (dy={dy:+d}, deg≤{MIN_DEG})"
         move_up(speed)
         return f"LIFT UP   (dy={dy:+d}, speed={speed})"
 

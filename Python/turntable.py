@@ -15,22 +15,8 @@ Architecture
 
 Corner sensor (AS5600 via TCA9548A, TCA channel: see SENSOR_CHANNEL)
 ---------------------------------------------------------------------
-The CornerSensorManager is imported and instantiated at init() time.
-Reads are currently STUBBED — the sensor is present in the object but its
-output is not yet wired into any control logic.
-
-TODO (hardware bring-up):
-  1. Set SENSOR_CHANNEL to the correct TCA multiplexer channel.
-  2. Decide what "zero" means for the turntable (call sensor.reset_laps()).
-  3. Use sensor.read_sensor(SENSOR_CHANNEL) in update() or a separate
-     feedback loop to implement position limits / closed-loop control.
-
-AX-12A wheel-mode register layout  (MOVING_SPEED reg 32)
----------------------------------------------------------
-    Bits 0-9  → speed magnitude  (0 = stop)
-    Bit  10   → 0 = CCW (LEFT)  /  1 = CW (RIGHT)
-
-Wheel mode is activated by setting both angle-limit registers to 0.
+Travel limits are enforced in update() via MIN_DEG / MAX_DEG.
+If the sensor is unavailable the motor runs open-loop (no limit enforcement).
 
 Coordinate convention (matches robot_controller.py)
 ----------------------------------------------------
@@ -50,7 +36,7 @@ import servo_status
 # =============================================================================
 
 SERVO_ID  = 13
-DEAD_ZONE = 25          # px — mirrors X_THRESHOLD in robot_controller.py
+DEAD_ZONE = 25
 
 SPEED_SLOW   = 150
 SPEED_MEDIUM = 300
@@ -59,9 +45,14 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-# TCA9548A channel wired to the turntable AS5600 encoder.
-# TODO: set to the correct channel once hardware is confirmed.
-SENSOR_CHANNEL = 0
+SENSOR_CHANNEL = 0   # TCA9548A channel wired to this encoder
+
+# Soft travel limits in degrees (0–360).  The turntable can rotate freely,
+# so a lap-aware limit makes more sense long-term, but degree-within-one-turn
+# is sufficient until calibration is done.
+# Set MIN_DEG = MAX_DEG = None to disable limit enforcement entirely.
+MIN_DEG: float | None = 10.0    # TODO: calibrate after hardware bring-up
+MAX_DEG: float | None = 350.0   # TODO: calibrate after hardware bring-up
 
 # AX-12A registers
 _REG_CW_LIMIT  = 6
@@ -73,10 +64,11 @@ _DIR_CCW = 0
 _DIR_CW  = 1 << 10
 
 # =============================================================================
-# CORNER SENSOR  (optional — gracefully absent on non-Pi or pre-wiring)
+# CORNER SENSOR
 # =============================================================================
 
 _sensor_mgr = None
+
 
 def _init_sensor() -> None:
     global _sensor_mgr
@@ -93,12 +85,6 @@ def _init_sensor() -> None:
 
 
 def _read_sensor() -> dict | None:
-    """
-    Return the latest sensor reading dict, or None if unavailable.
-
-    Dict keys: channel, raw, deg, laps
-    TODO: use this in update() for closed-loop / limit enforcement.
-    """
     if _sensor_mgr is None:
         return None
     try:
@@ -107,8 +93,28 @@ def _read_sensor() -> dict | None:
         print(f"[turntable] Sensor read error: {e}")
         return None
 
+
 def get_sensor_reading() -> dict | None:
     return _read_sensor()
+
+
+def _at_limit(direction: str) -> bool:
+    """
+    Return True if moving in *direction* ('left'/'right') would violate the
+    soft travel limits.  Returns False when the sensor is unavailable or
+    limits are disabled.
+    """
+    if MIN_DEG is None or MAX_DEG is None:
+        return False
+    reading = _read_sensor()
+    if reading is None:
+        return False
+    deg = reading["deg"]
+    if direction == "right" and deg >= MAX_DEG:
+        return True
+    if direction == "left" and deg <= MIN_DEG:
+        return True
+    return False
 
 # =============================================================================
 # STATE
@@ -147,7 +153,6 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    """Switch servo to wheel mode and start background writer.  Idempotent."""
     global _initialized, _stop_flag, _thread
 
     if _initialized:
@@ -171,7 +176,6 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    """Stop motor and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -216,13 +220,11 @@ def _speed_from_dx(dx_abs: int) -> int:
 # =============================================================================
 
 def stop() -> None:
-    """Post a stop command (non-blocking)."""
     _post_word(0)
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def spin_left(speed: int = SPEED_MEDIUM) -> dict:
-    """Spin CCW — gripper moves LEFT.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
@@ -230,7 +232,6 @@ def spin_left(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def spin_right(speed: int = SPEED_MEDIUM) -> dict:
-    """Spin CW — gripper moves RIGHT.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)
@@ -239,14 +240,11 @@ def spin_right(speed: int = SPEED_MEDIUM) -> dict:
 
 def update(dx: int) -> str:
     """
-    Main per-frame entry point.  Posts the appropriate speed word and returns
-    a log string.  Never blocks.
+    Main per-frame entry point.  Enforces soft travel limits when a corner
+    sensor is available.  Never blocks.
 
     Args:
         dx: target_x - gripper_x  (from RobotController.generate_dx)
-
-    TODO: call _read_sensor() here to enforce soft travel limits once the
-    encoder zero-point and degree budget have been defined.
     """
     if not _initialized:
         speed = _speed_from_dx(abs(dx))
@@ -262,10 +260,16 @@ def update(dx: int) -> str:
     speed = _speed_from_dx(abs(dx))
 
     if dx > DEAD_ZONE:
+        if _at_limit("right"):
+            stop()
+            return f"TURNTABLE LIMIT RIGHT (dx={dx:+d}, deg≥{MAX_DEG})"
         spin_right(speed)
         return f"TURNTABLE RIGHT (dx={dx:+d}, speed={speed})"
 
     if dx < -DEAD_ZONE:
+        if _at_limit("left"):
+            stop()
+            return f"TURNTABLE LIMIT LEFT  (dx={dx:+d}, deg≤{MIN_DEG})"
         spin_left(speed)
         return f"TURNTABLE LEFT  (dx={dx:+d}, speed={speed})"
 

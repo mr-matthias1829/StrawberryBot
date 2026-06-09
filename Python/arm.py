@@ -1,41 +1,18 @@
 """
 arm.py
 ======
-Controls the arm servo (AX-12A, ID 5) in wheel / continuous-rotation mode
-so the arm can extend forward or retract backward.
+Controls the arm servo (AX-12A, ID 5) in wheel / continuous-rotation mode.
 
-Architecture
-------------
-- Does NOT open serial/GPIO — motor.py owns those resources.
-- Call motor.init() then arm.init() once at startup.
-- update(dz) is the per-frame entry point for autonomous use.
-- move_forward() / move_backward() / stop() are used by manual_controller.
-- All serial writes run on a background thread so they never block
-  the vision/inference pipeline.
+Travel limits
+-------------
+MIN_DEG / MAX_DEG are enforced in update() when a corner sensor is available.
+Forward (extend) is blocked at MAX_DEG; backward (retract) is blocked at MIN_DEG.
 
-Coordinate convention (for autonomous use)
--------------------------------------------
+Coordinate convention
+---------------------
     dz > 0  → target is FAR    → extend  (forward)
     dz < 0  → target is CLOSE  → retract (backward)
     |dz| ≤ DEAD_ZONE  → aligned, stop
-
-AX-12A wheel-mode  (MOVING_SPEED reg 32)
------------------------------------------
-    Bits 0-9  → speed magnitude  (0 = stop)
-    Bit  10   → 0 = CCW (forward)  /  1 = CW (backward)
-
-TODO (hardware bring-up):
-  Verify which spin direction (CCW/CW) corresponds to forward/backward
-  on the physical arm and swap _DIR_CCW / _DIR_CW if needed.
-
-Corner sensor (AS5600 via TCA9548A)
-------------------------------------
-SENSOR_CHANNEL is reserved but reads are currently STUBBED.
-
-TODO:
-  1. Set SENSOR_CHANNEL to the correct TCA channel.
-  2. Define soft travel limits (MIN_DEG, MAX_DEG).
-  3. Use _read_sensor() in update() to enforce those limits.
 """
 
 import threading
@@ -60,17 +37,22 @@ THRESHOLD_MEDIUM = 150
 
 SENSOR_CHANNEL = 4   # TODO: set to correct TCA channel
 
+# Soft travel limits in degrees.  Forward (extend) increases the reading.
+# Set both to None to disable limit enforcement.
+MIN_DEG: float | None = 10.0   # fully retracted — TODO: calibrate
+MAX_DEG: float | None = 340.0  # fully extended  — TODO: calibrate
+
 # AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
 _REG_SPEED     = 32
 
-_DIR_CCW = 0          # forward
-_DIR_CW  = 1 << 10    # backward
+_DIR_CCW = 0
+_DIR_CW  = 1 << 10
 
 # =============================================================================
-# CORNER SENSOR  (optional — gracefully absent on non-Pi or pre-wiring)
+# CORNER SENSOR
 # =============================================================================
 
 _sensor_mgr = None
@@ -91,11 +73,6 @@ def _init_sensor() -> None:
 
 
 def _read_sensor() -> dict | None:
-    """
-    Return the latest arm encoder reading, or None if unavailable.
-    Dict keys: channel, raw, deg, laps
-    TODO: use in update() to enforce soft travel limits.
-    """
     if _sensor_mgr is None:
         return None
     try:
@@ -104,8 +81,24 @@ def _read_sensor() -> dict | None:
         print(f"[arm] Sensor read error: {e}")
         return None
 
+
 def get_sensor_reading() -> dict | None:
     return _read_sensor()
+
+
+def _at_limit(direction: str) -> bool:
+    """Return True if moving in *direction* ('forward'/'backward') would hit a limit."""
+    if MIN_DEG is None or MAX_DEG is None:
+        return False
+    reading = _read_sensor()
+    if reading is None:
+        return False
+    deg = reading["deg"]
+    if direction == "forward" and deg >= MAX_DEG:
+        return True
+    if direction == "backward" and deg <= MIN_DEG:
+        return True
+    return False
 
 # =============================================================================
 # STATE
@@ -144,7 +137,6 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    """Switch servo to wheel mode and start background writer.  Idempotent."""
     global _initialized, _stop_flag, _thread
 
     if _initialized:
@@ -168,7 +160,6 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    """Stop motor and disable torque."""
     global _initialized, _stop_flag
 
     if not _initialized:
@@ -213,13 +204,11 @@ def _speed_from_dz(dz_abs: int) -> int:
 # =============================================================================
 
 def stop() -> None:
-    """Post a stop command (non-blocking)."""
     _post_word(0)
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def move_forward(speed: int = SPEED_MEDIUM) -> dict:
-    """Extend arm forward — CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "FORWARD", speed, real=_initialized)
@@ -227,7 +216,6 @@ def move_forward(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def move_backward(speed: int = SPEED_MEDIUM) -> dict:
-    """Retract arm backward — CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "BACKWARD", speed, real=_initialized)
@@ -236,13 +224,11 @@ def move_backward(speed: int = SPEED_MEDIUM) -> dict:
 
 def update(dz: int) -> str:
     """
-    Per-frame entry point for autonomous control.  Posts the appropriate
-    speed word and returns a log string.  Never blocks.
+    Per-frame entry point.  Enforces soft travel limits when a corner
+    sensor is available.  Never blocks.
 
     Args:
-        dz: depth error — positive = too far, negative = too close.
-
-    TODO: call _read_sensor() here to enforce soft travel limits.
+        dz: depth error — positive = too far (extend), negative = too close (retract).
     """
     if not _initialized:
         speed = _speed_from_dz(abs(dz))
@@ -258,10 +244,16 @@ def update(dz: int) -> str:
     speed = _speed_from_dz(abs(dz))
 
     if dz > DEAD_ZONE:
+        if _at_limit("forward"):
+            stop()
+            return f"ARM LIMIT FORWARD  (dz={dz:+d}, deg≥{MAX_DEG})"
         move_forward(speed)
         return f"ARM FORWARD  (dz={dz:+d}, speed={speed})"
 
     if dz < -DEAD_ZONE:
+        if _at_limit("backward"):
+            stop()
+            return f"ARM LIMIT BACKWARD (dz={dz:+d}, deg≤{MIN_DEG})"
         move_backward(speed)
         return f"ARM BACKWARD (dz={dz:+d}, speed={speed})"
 
