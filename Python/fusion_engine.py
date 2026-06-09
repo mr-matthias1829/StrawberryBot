@@ -582,7 +582,7 @@ class FusionEngine:
         cv2.putText(out, f"Robot: {movement_text}",
             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)
 
-        FusionEngine._draw_servo_panel(out)
+        # FusionEngine._draw_servo_panel(out) #(servo debug ui (uitgeschakeld)
         return out
 
     # ------------------------------------------------------------------
