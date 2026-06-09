@@ -12,6 +12,14 @@ Arm logic (autonomous mode)
 The arm extends forward whenever the current target is **fully contained**
 inside the gripper bounding box, regardless of apparent size / depth.
 Once the target leaves the gripper area the arm stops.
+
+Grip logic
+----------
+The gripper fires when the strawberry's bounding-box area fills at least
+config.MIN_GRAB_AREA_RATIO of the gripper bounding box AND the target has
+been stable for config.GRIPPER_CONTAINMENT_FRAMES consecutive frames.
+Full pixel-perfect containment is no longer required; the berry just needs
+to be large enough (i.e. close enough) inside the gripper area.
 """
 
 #Matt f*cked up the servo's, so yeah.
@@ -292,6 +300,7 @@ class RobotController:
         )
 
     def object_fill_ratio(self) -> float:
+        """Fraction of the gripper bbox area that the target berry occupies."""
         if self.current_target is None:
             return 0.0
         det          = self.current_target.detection
@@ -299,25 +308,66 @@ class RobotController:
         gripper_area = config.GRIPPER_BB_WIDTH * config.GRIPPER_BB_HEIGHT
         return target_area / max(1, gripper_area)
 
+    def overlap_ratio(self, gripper_x: int, gripper_y: int) -> float:
+        """
+        Fraction of the target berry's area that overlaps with the gripper bbox.
+
+        This is the primary grip-readiness signal: it measures how much of the
+        berry is already inside the gripper area, regardless of the berry's
+        absolute size.  When the arm closes in on a berry the value climbs
+        toward 1.0; grip fires once it crosses config.MIN_GRAB_AREA_RATIO.
+        """
+        if self.current_target is None:
+            return 0.0
+
+        det = self.current_target.detection
+        bx1, by1, bx2, by2 = self.get_gripper_bbox(gripper_x, gripper_y)
+
+        ix1 = max(det.x1, bx1)
+        iy1 = max(det.y1, by1)
+        ix2 = min(det.x2, bx2)
+        iy2 = min(det.y2, by2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+        target_area = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
+        return inter / target_area
+
     def ready_to_grab(self, gripper_x: int, gripper_y: int) -> bool:
+        """
+        Returns True when the berry is close enough to grip.
+
+        Trigger conditions (all must hold):
+          1. There is an active target.
+          2. At least config.MIN_GRAB_AREA_RATIO of the berry's bounding box
+             overlaps with the gripper bounding box.
+          3. The target center is within GRAB_CENTER_TOLERANCE of the gripper
+             center (berry is roughly aligned, not just clipping one corner).
+          4. The target has been stable for config.GRIPPER_CONTAINMENT_FRAMES
+             consecutive frames (checked separately in update_gripper_containment).
+
+        Note: full pixel-perfect containment is intentionally NOT required.
+        The old is_detection_fully_contained check was too strict — a berry
+        that fills the gripper area well is close enough to grab even if a
+        corner pixel sticks out.
+        """
         if self.current_target is None:
             return False
 
-        det       = self.current_target.detection
-        bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
-        contained = self.is_detection_fully_contained(det, bbox)
-        ratio     = self.object_fill_ratio()
-
-        dx = self.generate_dx(gripper_x)
-        dy = self.generate_dy(gripper_y)
+        ratio   = self.overlap_ratio(gripper_x, gripper_y)
+        dx      = self.generate_dx(gripper_x)
+        dy      = self.generate_dy(gripper_y)
         centered = (
             abs(dx) <= config.GRAB_CENTER_TOLERANCE_X
             and abs(dy) <= config.GRAB_CENTER_TOLERANCE_Y
         )
 
-        return contained and centered and ratio >= config.MIN_GRAB_AREA_RATIO
+        return ratio >= config.MIN_GRAB_AREA_RATIO and centered
 
     def update_gripper_containment(self, gripper_x: int, gripper_y: int) -> None:
+        """
+        Increment the stable-frames counter when the berry is grip-ready,
+        reset it when it leaves or the target changes.
+        """
         if self.current_target is None:
             self._gripper_containment_frames = 0
             self._last_target_id = None
@@ -328,8 +378,9 @@ class RobotController:
             self._gripper_containment_frames = 0
             self._last_target_id = target_id
 
-        bbox = self.get_gripper_bbox(gripper_x, gripper_y)
-        if self.is_detection_fully_contained(self.current_target.detection, bbox):
+        # Use overlap_ratio instead of full containment so the counter
+        # starts accumulating before the berry is pixel-perfectly inside.
+        if self.ready_to_grab(gripper_x, gripper_y):
             self._gripper_containment_frames += 1
         else:
             self._gripper_containment_frames = 0
@@ -479,18 +530,17 @@ class RobotController:
             gripper_msg = self.generate_gripperstring()
 
             if config.GRIPPER_AUTO_GRIP_ENABLED:
-                if (
-                    self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES
-                    and self.ready_to_grab(gripper_x, gripper_y)
-                ):
-                    ratio = self.object_fill_ratio()
+                if self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES:
+                    ratio = self.overlap_ratio(gripper_x, gripper_y)
                     print(
                         f"[GRAB CHECK] "
-                        f"ratio={ratio:.2f} "
-                        f"frames={self._gripper_containment_frames}"
+                        f"overlap={ratio:.2f} "
+                        f"frames={self._gripper_containment_frames} "
+                        f"fill={self.object_fill_ratio():.2f}"
                     )
                     result = _gripper.grip()
                     if result["status"] == "ok":
+                        self._gripper_containment_frames = 0
                         gripper_msg = "GRIPPER: GRIPPING"
         else:
             gripper_msg = "GRIPPER SIMULATED"
