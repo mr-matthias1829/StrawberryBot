@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 import config
+import servo_status
 from detection import AIDetector, CVDectector, Detection, CLASS_COLORS, CLASS_NAMES, iou
 from robot_controller import RobotController
 
@@ -563,6 +564,122 @@ class FusionEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _draw_servo_panel(frame: np.ndarray) -> None:
+        """
+        Draw a servo status panel in the bottom-right corner of the frame.
+
+        Shows every known servo ID with its name, current action, speed,
+        and whether it is running on real hardware or simulated.
+        Works without any hardware connected.
+        """
+        states = servo_status.get_all()
+        if not states:
+            return
+
+        font       = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.42
+        thickness  = 1
+        row_h      = 18
+        padding    = 6
+        col_gap    = 8
+
+        # ── Measure column widths ─────────────────────────────────────────────
+        # Columns: ID | Name | Status | Speed | SIM/REAL
+        col_texts = []
+        for s in states:
+            speed_str = f"{s.speed}" if s.speed > 0 else "—"
+            hw_str    = "SIM" if s.simulated else "REAL"
+            col_texts.append((
+                f"ID{s.id:02d}",
+                s.name,
+                s.status,
+                speed_str,
+                hw_str,
+            ))
+
+        header = ("ID", "Name", "Status", "Speed", "HW")
+        all_rows = [header] + col_texts
+        n_cols = len(header)
+
+        col_widths = []
+        for c in range(n_cols):
+            max_w = 0
+            for row in all_rows:
+                (tw, _), _ = cv2.getTextSize(row[c], font, font_scale, thickness)
+                max_w = max(max_w, tw)
+            col_widths.append(max_w + col_gap)
+
+        panel_w = sum(col_widths) + padding * 2
+        panel_h = (len(states) + 2) * row_h + padding * 2   # +2 for header + gap
+
+        fh, fw = frame.shape[:2]
+        x0 = fw - panel_w - 4
+        y0 = fh - panel_h - 4
+
+        # ── Background ────────────────────────────────────────────────────────
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h),
+                      (20, 20, 20), cv2.FILLED)
+        cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr_y = y0 + padding + row_h
+        x_cursor = x0 + padding
+        for c, hdr in enumerate(header):
+            cv2.putText(frame, hdr,
+                        (x_cursor, hdr_y),
+                        font, font_scale, (200, 200, 200), thickness, cv2.LINE_AA)
+            x_cursor += col_widths[c]
+
+        # Divider under header
+        div_y = hdr_y + 4
+        cv2.line(frame,
+                 (x0 + padding, div_y),
+                 (x0 + panel_w - padding, div_y),
+                 (80, 80, 80), 1)
+
+        # ── Rows ──────────────────────────────────────────────────────────────
+        # Status → colour mapping
+        STATUS_COLORS = {
+            "STOP":     (160, 160, 160),
+            "FORWARD":  (0,   220,   0),
+            "BACKWARD": (0,   140, 220),
+            "LEFT":     (0,   220,   0),
+            "RIGHT":    (0,   140, 220),
+            "UP":       (0,   220,   0),
+            "DOWN":     (0,   140, 220),
+            "GRIP":     (0,   200, 255),
+            "GRIPPED":  (0,   200, 255),
+            "OPEN":     (180, 180,   0),
+            "BUSY":     (0,   165, 255),
+            "EXTENDING":(0,   220,   0),
+        }
+        HW_COLOR_SIM  = (120, 120, 120)
+        HW_COLOR_REAL = (0,   220, 100)
+
+        row_y = div_y + row_h
+        for s, cols in zip(states, col_texts):
+            x_cursor = x0 + padding
+            status_color = STATUS_COLORS.get(s.status, (220, 220, 220))
+            hw_color     = HW_COLOR_SIM if s.simulated else HW_COLOR_REAL
+
+            for c_idx, text in enumerate(cols):
+                # Status column gets colour-coded; HW column too
+                if c_idx == 2:
+                    color = status_color
+                elif c_idx == 4:
+                    color = hw_color
+                else:
+                    color = (220, 220, 220)
+
+                cv2.putText(frame, text,
+                            (x_cursor, row_y),
+                            font, font_scale, color, thickness, cv2.LINE_AA)
+                x_cursor += col_widths[c_idx]
+
+            row_y += row_h
+
+    @staticmethod
     def draw_annotations(
             frame: np.ndarray,
             ai_dets: List[Detection],
@@ -821,6 +938,11 @@ class FusionEngine:
             (0, 165, 255),
             2,
         )
+
+        # ------------------------------------------------------------------
+        # Servo status panel (bottom-right)
+        # ------------------------------------------------------------------
+        FusionEngine._draw_servo_panel(out)
 
         return out
 

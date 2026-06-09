@@ -42,6 +42,7 @@ import threading
 import time
 
 import motor
+import servo_status
 
 # =============================================================================
 # TUNING
@@ -211,12 +212,14 @@ def _speed_from_dp(dp_abs: int) -> int:
 def stop() -> None:
     """Post a stop command (non-blocking)."""
     _post_word(0)
+    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
 def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
     """Rotate pivot up — CCW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
+    servo_status.update(SERVO_ID, "UP", speed, real=_initialized)
     return {"direction": "up", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -224,6 +227,7 @@ def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
     """Rotate pivot down — CW.  Non-blocking."""
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
+    servo_status.update(SERVO_ID, "DOWN", speed, real=_initialized)
     return {"direction": "down", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
 
 
@@ -238,6 +242,14 @@ def update(dp: int) -> str:
     TODO: call _read_sensor() here to enforce soft travel limits.
     """
     if not _initialized:
+        speed = _speed_from_dp(abs(dp))
+        if dp > DEAD_ZONE:
+            servo_status.update(SERVO_ID, "DOWN", speed, real=False)
+            return f"PIVOT SIMULATED (dp={dp:+d})"
+        if dp < -DEAD_ZONE:
+            servo_status.update(SERVO_ID, "UP", speed, real=False)
+            return f"PIVOT SIMULATED (dp={dp:+d})"
+        servo_status.update(SERVO_ID, "STOP", 0, real=False)
         return f"PIVOT SIMULATED (dp={dp:+d})"
 
     speed = _speed_from_dp(abs(dp))
