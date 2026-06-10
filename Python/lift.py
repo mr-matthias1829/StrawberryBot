@@ -41,7 +41,7 @@ THRESHOLD_MEDIUM = 150
 SENSOR_CHANNEL_A = 1
 SENSOR_CHANNEL_B = 2
 
-MIN_DEG: float | None = 5.0
+MIN_DEG: float | None = 0.0
 MAX_DEG: float | None = 355.0
 
 _REG_CW_LIMIT  = 6

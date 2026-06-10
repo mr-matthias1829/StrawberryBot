@@ -49,11 +49,11 @@ _start_lock = threading.Lock()
 
 _PRESETS = {
     "red":    dict(h1_low=0,   h1_high=10,  h2_low=160, h2_high=179, sat_min=80,  val_min=50,  val_max=240),
-    "orange": dict(h1_low=8,   h1_high=25,  h2_low=0,   h2_high=0,   sat_min=100, val_min=60,  val_max=240),
-    "yellow": dict(h1_low=22,  h1_high=38,  h2_low=0,   h2_high=0,   sat_min=80,  val_min=60,  val_max=240),
-    "green":  dict(h1_low=35,  h1_high=85,  h2_low=0,   h2_high=0,   sat_min=60,  val_min=40,  val_max=240),
-    "blue":   dict(h1_low=100, h1_high=130, h2_low=0,   h2_high=0,   sat_min=60,  val_min=40,  val_max=240),
-    "purple": dict(h1_low=125, h1_high=155, h2_low=0,   h2_high=0,   sat_min=60,  val_min=40,  val_max=240),
+    "orange": dict(h1_low=8,   h1_high=25,  h2_low=8,   h2_high=8,   sat_min=100, val_min=60,  val_max=240),
+    "yellow": dict(h1_low=22,  h1_high=38,  h2_low=22,   h2_high=22,   sat_min=80,  val_min=60,  val_max=240),
+    "green":  dict(h1_low=35,  h1_high=85,  h2_low=35,   h2_high=35,   sat_min=60,  val_min=40,  val_max=240),
+    "blue":   dict(h1_low=100, h1_high=130, h2_low=100,   h2_high=100,   sat_min=60,  val_min=40,  val_max=240),
+    "purple": dict(h1_low=125, h1_high=155, h2_low=125,   h2_high=125,   sat_min=60,  val_min=40,  val_max=240),
 }
 
 # =============================================================================
