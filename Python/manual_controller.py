@@ -246,10 +246,10 @@ def _listener() -> None:
             print(f"[manual] Ongeldig pakket: {e}")
             continue
 
-        lx   = int(payload.get("lx",   0))
-        ly   = int(payload.get("ly",   0))
-        rx   = int(payload.get("rx",   0))
-        ry   = int(payload.get("ry",   0))
+        lx   = -int(payload.get("lx",   0))
+        ly   = -int(payload.get("ly",   0))
+        rx   = -int(payload.get("rx",   0))
+        ry   = -int(payload.get("ry",   0))
         grip = int(bool(payload.get("grip", 0)))
 
         try:
