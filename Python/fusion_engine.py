@@ -590,6 +590,14 @@ class FusionEngine:
     # ------------------------------------------------------------------
 
     def process_frame(self, frame: np.ndarray):
+        # Kill switch
+        try:
+            from web_server import is_killed
+            if is_killed():
+                return frame.copy(), [], self._last_debug, self._last_mask
+        except ImportError:
+            pass
+
         self.frame_count += 1
         small = cv2.resize(frame, (0,0), fx=INFER_SCALE, fy=INFER_SCALE,
                            interpolation=cv2.INTER_LINEAR)

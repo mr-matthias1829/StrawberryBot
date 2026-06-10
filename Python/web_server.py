@@ -375,6 +375,44 @@ def api_servo_status():
         })
     return jsonify(result)
 
+# ── Home / Kill switch ────────────────────────────────────────────────────────
+
+_kill_active = False
+_kill_lock   = threading.Lock()
+
+def is_killed() -> bool:
+    with _kill_lock:
+        return _kill_active
+
+@_app.route("/api/home", methods=["POST"])
+def api_home():
+    try:
+        import motor
+        threading.Thread(target=motor.home_all, daemon=True, name="home-trigger").start()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@_app.route("/api/kill", methods=["POST"])
+def api_kill():
+    global _kill_active
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    with _kill_lock:
+        _kill_active = enabled
+    if enabled:
+        try:
+            import turntable, lift, arm, pivot, gripper
+            for mod in (turntable, lift, arm, pivot):
+                try: mod.stop()
+                except: pass
+        except: pass
+    print(f"[WebUI] Kill switch: {'ACTIVE' if enabled else 'RELEASED'}")
+    return jsonify({"ok": True, "kill_active": enabled})
+
+@_app.route("/api/kill", methods=["GET"])
+def api_kill_get():
+    return jsonify({"kill_active": is_killed()})
 
 @_app.route("/favicon.ico")
 def route_favicon():
@@ -570,6 +608,9 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     <div class="st"><span class="st-l">Hits</span><span class="st-v" id="s-hits">—</span></div>
     <div class="st"><span class="st-l">Poss</span><span class="st-v" id="s-poss">—</span></div>
     <div class="st"><span class="st-l">Cam</span><span class="st-v" id="s-cam">—</span></div>
+    <div class="sep"></div>
+    <button id="homeBtn" onclick="triggerHome()" style="padding:3px 10px;border-color:var(--yel);color:var(--yel);background:rgba(245,200,66,.08)">🏠 Home</button>
+    <button id="killBtn" onclick="toggleKill()" style="padding:3px 10px;border-color:var(--acc);color:var(--acc);background:rgba(255,61,90,.08)">☠ KILL</button>
   </div>
 </header>
 
@@ -1059,6 +1100,34 @@ function connect(){
 connect();
 initUI();
 updateHSVLabels();
+
+let _killActive = false;
+
+async function triggerHome() {
+  const btn = document.getElementById("homeBtn");
+  btn.textContent = "⏳ Homing…"; btn.disabled = true;
+  try {
+    await fetch("/api/home", { method: "POST" });
+    addLine("── home_all() triggered ──");
+    setTimeout(() => { btn.textContent = "🏠 Home"; btn.disabled = false; }, 8000);
+  } catch(e) {
+    btn.textContent = "🏠 Home"; btn.disabled = false;
+    addLine("ERROR: home request failed");
+  }
+}
+
+async function toggleKill() {
+  _killActive = !_killActive;
+  const btn = document.getElementById("killBtn");
+  try {
+    await fetch("/api/kill", { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ enabled: _killActive }) });
+    btn.textContent = _killActive ? "💀 KILLED" : "☠ KILL";
+    btn.style.background = _killActive ? "rgba(255,61,90,.3)" : "rgba(255,61,90,.08)";
+    addLine(_killActive ? "── KILL SWITCH ACTIVE ──" : "── kill switch released ──");
+  } catch(e) { _killActive = !_killActive; addLine("ERROR: kill request failed"); }
+}
+
 </script>
 </body>
 </html>
