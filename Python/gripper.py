@@ -94,7 +94,7 @@ _thread: threading.Thread = None  # type: ignore[assignment]
 # =============================================================================
 
 def _worker() -> None:
-    global _state, _gripper_open
+    global _state, _gripper_open, _pending_action
 
     while not _stop_flag:
         if not _event.wait(timeout=0.5):
