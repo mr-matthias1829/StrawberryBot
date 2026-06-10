@@ -391,7 +391,7 @@ def run_webcam() -> None:
 
                 if not headless:
                     try:
-                        cv2.imshow("Strawberry Detection", display)
+                        #cv2.imshow("Strawberry Detection", display)
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord("q"):
                             break
@@ -453,12 +453,12 @@ def run_webcam() -> None:
 
             if not headless:
                 try:
-                    cv2.imshow("Strawberry Detection", display)
-                    if show_mask and mask is not None:
-                        cv2.imshow(
-                            "CV Mask",
-                            cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)),
-                        )
+                    #cv2.imshow("Strawberry Detection", display)
+                    #if show_mask and mask is not None:
+                        #cv2.imshow(
+                         #   "CV Mask",
+                           # cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)),
+                        #)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
                         break
@@ -548,9 +548,9 @@ def run_image(image_path: Optional[str] = None) -> None:
             print(f"    P{obj.id}: conf={obj.fused_confidence:.3f}, seen={obj.seen_count}, source={det.source}")
 
     try:
-        cv2.imshow("Result", annotated)
-        if mask is not None:
-            cv2.imshow("Mask", mask)
+        #cv2.imshow("Result", annotated)
+        #if mask is not None:
+            #cv2.imshow("Mask", mask)
         cv2.waitKey(0)
     except Exception as e:
         print(f"GUI unavailable: {e}")
