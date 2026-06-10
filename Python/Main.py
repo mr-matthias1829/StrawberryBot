@@ -16,6 +16,30 @@ from typing import Optional, cast
 import cv2
 import numpy as np
 
+import signal
+
+def _sigterm_handler(signum, frame):
+    print("[main] SIGTERM received — shutting down cleanly…", flush=True)
+    if ON_PI:
+        try: manual_controller.stop()
+        except Exception: pass
+        try: gripper.shutdown()
+        except Exception: pass
+        try: arm.shutdown()
+        except Exception: pass
+        try: pivot.shutdown()
+        except Exception: pass
+        try: lift.shutdown()
+        except Exception: pass
+        try: turntable.shutdown()
+        except Exception: pass
+        try: motor.shutdown()
+        except Exception: pass
+    import sys
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+
 ON_PI = platform.system() == "Linux"
 
 # =============================================================================

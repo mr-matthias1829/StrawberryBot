@@ -398,21 +398,16 @@ def api_kill():
     global _kill_active
     data = request.get_json(force=True, silent=True) or {}
     enabled = bool(data.get("enabled", True))
+    if enabled:
+        print("[WebUI] Kill switch: ACTIVE — shutting down process")
+        def _do_kill():
+            time.sleep(0.3)  # let the HTTP response go out first
+            import os, signal
+            os.kill(os.getpid(), signal.SIGTERM)
+        threading.Thread(target=_do_kill, daemon=True).start()
     with _kill_lock:
         _kill_active = enabled
-    if enabled:
-        try:
-            import turntable, lift, arm, pivot, gripper
-            for mod in (turntable, lift, arm, pivot):
-                try: mod.stop()
-                except: pass
-        except: pass
-    print(f"[WebUI] Kill switch: {'ACTIVE' if enabled else 'RELEASED'}")
     return jsonify({"ok": True, "kill_active": enabled})
-
-@_app.route("/api/kill", methods=["GET"])
-def api_kill_get():
-    return jsonify({"kill_active": is_killed()})
 
 @_app.route("/favicon.ico")
 def route_favicon():
