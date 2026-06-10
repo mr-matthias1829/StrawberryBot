@@ -39,10 +39,10 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-SENSOR_CHANNEL = 4
+SENSOR_CHANNEL = 0
 
-MIN_DEG: float | None = 0.0
-MAX_DEG: float | None = 340.0
+MIN_DEG: float | None = -45.0
+MAX_DEG: float | None = 45.0
 
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
