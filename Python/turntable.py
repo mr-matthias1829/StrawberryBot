@@ -41,7 +41,7 @@ SPEED_FAST   = 500
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
-SENSOR_CHANNEL = -1   # TCA9548A channel wired to this encoder
+SENSOR_CHANNEL = 1   # TCA9548A channel wired to this encoder
 
 MIN_DEG: float | None = -45.0
 MAX_DEG: float | None = 45.0
