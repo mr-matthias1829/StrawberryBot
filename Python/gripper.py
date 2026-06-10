@@ -27,8 +27,8 @@ import servo_status
 
 SERVO_ID  = 8
 
-GRIP_TIME = 3.6
-OPEN_TIME = 3.6
+GRIP_TIME = 4
+OPEN_TIME = 4
 SPEED     = 1023
 
 SENSOR_CHANNEL = 3
