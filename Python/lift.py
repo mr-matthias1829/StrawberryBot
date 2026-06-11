@@ -44,6 +44,11 @@ SENSOR_CHANNEL_B = 0
 MIN_DEG: float | None = -45.0
 MAX_DEG: float | None = 45.0
 
+# Dead-reckoning limit conversion: degrees per (speed-unit × second).
+# Only used when sensor read fails despite being wired.
+# Tune by running at a known speed for a known time and measuring degrees moved.
+SPEED_TO_DEG = 0.3
+
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
@@ -96,13 +101,24 @@ def get_sensor_readings() -> dict[str, dict | None]:
 def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
-    reading = _read_sensor(SENSOR_CHANNEL_A)
-    if reading is None:
-        return False
-    deg =  _sensor_mgr.total_position(reading)
-    if direction == "up" and deg <= MIN_DEG:
+
+    # --- Sensor path ---
+    if _sensor_mgr is not None:
+        reading = _read_sensor(SENSOR_CHANNEL_A)
+        if reading is not None:
+            deg = _sensor_mgr.total_position(reading)
+            if direction == "up"   and deg <= MIN_DEG:
+                return True
+            if direction == "down" and deg >= MAX_DEG:
+                return True
+            return False
+        # sensor present but read failed — fall through to DR
+
+    # --- Dead-reckoning path ---
+    estimated_deg = _dead_pos[0] * SPEED_TO_DEG
+    if direction == "up"   and estimated_deg <= MIN_DEG:
         return True
-    if direction == "down" and deg >= MAX_DEG:
+    if direction == "down" and estimated_deg >= MAX_DEG:
         return True
     return False
 

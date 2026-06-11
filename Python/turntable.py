@@ -46,6 +46,11 @@ SENSOR_CHANNEL = 1   # TCA9548A channel wired to this encoder
 MIN_DEG: float | None = -45.0
 MAX_DEG: float | None = 45.0
 
+# Dead-reckoning limit conversion: degrees per (speed-unit × second).
+# Only used when the sensor read fails despite being wired.
+# Tune by running at a known speed for a known time and measuring degrees moved.
+SPEED_TO_DEG = 0.3
+
 # AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
@@ -93,13 +98,24 @@ def get_sensor_reading() -> dict | None:
 def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
-    reading = _read_sensor()
-    if reading is None:
-        return False
-    deg =  _sensor_mgr.total_position(reading)
-    if direction == "right" and deg >= MAX_DEG:
+
+    # --- Sensor path ---
+    if _sensor_mgr is not None:
+        reading = _read_sensor()
+        if reading is not None:
+            deg = _sensor_mgr.total_position(reading)
+            if direction == "right" and deg >= MAX_DEG:
+                return True
+            if direction == "left"  and deg <= MIN_DEG:
+                return True
+            return False
+        # sensor present but read failed — fall through to DR
+
+    # --- Dead-reckoning path ---
+    estimated_deg = _dead_pos[0] * SPEED_TO_DEG
+    if direction == "right" and estimated_deg >= MAX_DEG:
         return True
-    if direction == "left" and deg <= MIN_DEG:
+    if direction == "left"  and estimated_deg <= MIN_DEG:
         return True
     return False
 
