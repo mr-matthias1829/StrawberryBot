@@ -58,7 +58,7 @@ SENSOR_CHANNEL_A = 0
 SENSOR_CHANNEL_B = 0
 
 MIN_DEG: float | None = -5.0
-MAX_DEG: float | None = 320.0
+MAX_DEG: float | None = 350.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
 SPEED_TO_DEG = 0.3
