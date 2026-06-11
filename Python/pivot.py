@@ -255,9 +255,7 @@ def stop() -> None:
 
 
 def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("up"):
-        stop()
-        return {"direction": "up", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "UP", speed, real=_initialized)
@@ -265,9 +263,7 @@ def rotate_up(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def rotate_down(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("down"):
-        stop()
-        return {"direction": "down", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "DOWN", speed, real=_initialized)

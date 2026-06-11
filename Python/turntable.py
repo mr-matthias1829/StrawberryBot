@@ -267,9 +267,7 @@ def stop() -> None:
 
 
 def spin_left(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("left"):
-        stop()
-        return {"direction": "left", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
@@ -277,9 +275,7 @@ def spin_left(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def spin_right(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("right"):
-        stop()
-        return {"direction": "right", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)

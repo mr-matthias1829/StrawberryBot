@@ -264,9 +264,7 @@ def stop() -> None:
 
 
 def move_forward(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("forward"):
-        stop()
-        return {"direction": "forward", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "FORWARD", speed, real=_initialized)
@@ -274,9 +272,7 @@ def move_forward(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def move_backward(speed: int = SPEED_MEDIUM) -> dict:
-    if _at_limit("backward"):
-        stop()
-        return {"direction": "backward", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
+
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "BACKWARD", speed, real=_initialized)
