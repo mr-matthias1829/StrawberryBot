@@ -22,6 +22,21 @@ The gripper fires when:
      Example: 0.4 = berry bbox is 40% of the 500x500 gripper area.
   3. The above has been true for config.GRIPPER_CONTAINMENT_FRAMES
      consecutive frames.
+
+Smoothing
+---------
+Raw dx/dy offsets are passed through an EMA (Exponential Moving Average)
+filter before reaching the servos.  This absorbs single-frame detection
+blinks and prevents micro-jitter on the turntable and lift axes.
+
+A dead-zone gate then zeroes out any smoothed offset that is still below
+the X/Y threshold, so the servos hold position instead of hunting around
+the centre.
+
+Tune EMA_ALPHA in the CONFIG section:
+  0.4  — responsive, mild smoothing
+  0.25 — balanced (default)
+  0.1  — very smooth, noticeable lag on fast moves
 """
 
 import math
@@ -69,6 +84,11 @@ X_THRESHOLD = 25
 Y_THRESHOLD = 25
 
 PRIORITIZE_Y = True
+
+# ── EMA smoothing ──────────────────────────────────────────────────────────────
+# Applied to dx/dy before they reach the servos.
+# Lower = smoother but laggier.  Higher = more responsive but more jitter.
+EMA_ALPHA = 0.25
 
 # ── Lock hysteresis ────────────────────────────────────────────────────────────
 LOCK_HYSTERESIS_BASE  = 40
@@ -119,6 +139,10 @@ class RobotController:
         self._gripper_containment_frames = 0
         self._last_target_id = None
         self._arm_extending: bool = False
+
+        # EMA state — smoothed dx/dy sent to the servos
+        self._smooth_dx: float = 0.0
+        self._smooth_dy: float = 0.0
 
     # =========================================================================
     # GEOMETRY
@@ -350,7 +374,7 @@ class RobotController:
             self._gripper_containment_frames = 0
 
     # =========================================================================
-    # OFFSETS
+    # OFFSETS  (raw — used by HUD and as EMA input)
     # =========================================================================
 
     def generate_dx(self, gripper_x: int) -> int:
@@ -362,6 +386,30 @@ class RobotController:
         if self.current_target is None:
             return 0
         return self.current_target.center_y - gripper_y
+
+    # =========================================================================
+    # SMOOTHING
+    # =========================================================================
+
+    def _update_ema(self, raw_dx: int, raw_dy: int) -> Tuple[int, int]:
+        """
+        Feed raw pixel offsets through the EMA filter and apply dead-zone
+        gating.  Returns the (dx, dy) that should be sent to the servos.
+
+        When there is no target the EMA state decays toward zero so the
+        servos ramp down smoothly rather than snapping to a stop.
+        """
+        self._smooth_dx = EMA_ALPHA * raw_dx + (1.0 - EMA_ALPHA) * self._smooth_dx
+        self._smooth_dy = EMA_ALPHA * raw_dy + (1.0 - EMA_ALPHA) * self._smooth_dy
+
+        # Dead-zone: swallow sub-threshold residual noise
+        dx = int(self._smooth_dx) if abs(self._smooth_dx) >= X_THRESHOLD else 0
+        dy = int(self._smooth_dy) if abs(self._smooth_dy) >= Y_THRESHOLD else 0
+        return dx, dy
+
+    def _reset_ema(self) -> None:
+        self._smooth_dx = 0.0
+        self._smooth_dy = 0.0
 
     # =========================================================================
     # HUD
@@ -458,10 +506,15 @@ class RobotController:
             if _HAS_ARM:
                 _arm.stop()
             self._arm_extending = False
+            # Let EMA decay naturally toward zero rather than hard-resetting,
+            # so servos ramp down smoothly on target loss.
+            self._update_ema(0, 0)
             return
 
-        dx = self.generate_dx(gripper_x)
-        dy = self.generate_dy(gripper_y)
+        # ── Smooth the raw pixel offsets ──────────────────────────────────────
+        raw_dx = self.generate_dx(gripper_x)
+        raw_dy = self.generate_dy(gripper_y)
+        dx, dy = self._update_ema(raw_dx, raw_dy)
 
         # ── Turntable (horizontal) ────────────────────────────────────────────
         if _HAS_TURNTABLE:
