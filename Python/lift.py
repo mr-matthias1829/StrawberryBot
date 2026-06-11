@@ -11,6 +11,22 @@ init() is stored as _zero_deg.  Both servos share a single dead-reckoning
 accumulator because they always move together.
 
 _home() drives the lift to the top (zero/startup position).
+
+Holding torque
+--------------
+When the lift is idle (commanded speed = 0) and the corner sensor is
+available, the background writer monitors for gravitational sag.  If the
+position drops more than HOLD_DRIFT_THRESH degrees below the last known
+idle position a short upward pulse (HOLD_SPEED, HOLD_PULSE_SEC) is fired
+to bring it back.  The reference is then reset to the corrected position.
+
+Set HOLD_ENABLED = False to disable during testing / without load.
+
+Tuning guide (1 kg load):
+  • Still sags  → increase HOLD_SPEED (try +20 steps) or lower HOLD_DRIFT_THRESH
+  • Overshoots up → decrease HOLD_SPEED or shorten HOLD_PULSE_SEC
+  • Corrects too late → lower HOLD_DRIFT_THRESH (e.g. 0.8)
+  • Servo hums → shorten HOLD_PULSE_SEC; do NOT use continuous low speed
 """
 
 import threading
@@ -54,6 +70,12 @@ _REG_SPEED     = 32
 
 _DIR_CCW = 0
 _DIR_CW  = 1 << 10
+
+# ── Holding torque ─────────────────────────────────────────────────────────────
+HOLD_ENABLED      = True   # set False to disable entirely
+HOLD_DRIFT_THRESH = 1.5    # degrees of sag before a corrective pulse fires
+HOLD_SPEED        = 80     # upward pulse strength  (0–1023, same scale as SPEED_*)
+HOLD_PULSE_SEC    = 0.08   # duration of each corrective pulse in seconds
 
 # =============================================================================
 # CORNER SENSORS
@@ -117,20 +139,19 @@ def _at_limit(direction: str) -> bool:
         reading = _read_sensor(SENSOR_CHANNEL_A)
         if reading is not None:
             abs_deg = _sensor_mgr.total_position(reading)
-            # Position relative to our zero point captured at init()
             deg = abs_deg - (_zero_deg)
-            if direction == "down"   and deg <= MIN_DEG:
+            if direction == "down" and deg <= MIN_DEG:
                 return True
-            if direction == "up" and deg >= MAX_DEG:
+            if direction == "up"   and deg >= MAX_DEG:
                 return True
             return False
         # sensor present but read failed — fall through to DR
 
     # --- Dead-reckoning path ---
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "down"   and estimated_deg <= MIN_DEG:
+    if direction == "down" and estimated_deg <= MIN_DEG:
         return True
-    if direction == "up" and estimated_deg >= MAX_DEG:
+    if direction == "up"   and estimated_deg >= MAX_DEG:
         return True
     return False
 
@@ -159,6 +180,9 @@ _last_write_time: float         = 0.0
 
 def _writer() -> None:
     global _last_word_a, _last_word_b, _last_write_time
+
+    _hold_ref_deg: float | None = None   # position captured when we went idle
+
     while not _stop_flag:
         time.sleep(0.05)
 
@@ -175,8 +199,43 @@ def _writer() -> None:
             word_b = _pending_word_b
 
         if motor.is_locked():
+            _hold_ref_deg = None
             continue
 
+        idle = (word_a == 0 and word_b == 0)
+
+        # ── Holding torque ────────────────────────────────────────────────────
+        if HOLD_ENABLED and idle and _initialized:
+            reading = _read_sensor(SENSOR_CHANNEL_A)
+            if reading is not None and _sensor_mgr is not None:
+                current_deg = _sensor_mgr.total_position(reading) - (_zero_deg or 0.0)
+
+                # Capture reference the moment we go idle
+                if _hold_ref_deg is None:
+                    _hold_ref_deg = current_deg
+
+                sag = _hold_ref_deg - current_deg   # positive = dropped below ref
+                if sag >= HOLD_DRIFT_THRESH:
+                    # Brief upward pulse then release back to 0
+                    pulse = _DIR_CCW | HOLD_SPEED
+                    try:
+                        motor._write_word(SERVO_ID_A, _REG_SPEED, pulse)
+                        motor._write_word(SERVO_ID_B, _REG_SPEED, pulse)
+                        time.sleep(HOLD_PULSE_SEC)
+                        motor._write_word(SERVO_ID_A, _REG_SPEED, 0)
+                        motor._write_word(SERVO_ID_B, _REG_SPEED, 0)
+                    except Exception as e:
+                        print(f"[lift] Hold pulse error: {e}")
+                    _hold_ref_deg = current_deg   # reset ref after correcting
+                    continue   # skip normal write this cycle
+            else:
+                # No sensor available — holding torque not possible
+                _hold_ref_deg = None
+        else:
+            # Not idle — clear ref so it is recaptured next time we go idle
+            _hold_ref_deg = None
+
+        # ── Normal write ──────────────────────────────────────────────────────
         if word_a >= 0 and word_a != _last_word_a:
             try:
                 motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
@@ -217,7 +276,7 @@ def init() -> None:
 
     reading = _read_sensor(SENSOR_CHANNEL_A)
     if reading is not None:
-        _zero_deg =  _sensor_mgr.total_position(reading)
+        _zero_deg = _sensor_mgr.total_position(reading)
         print(f"[lift] Zero point: {_zero_deg:.1f}° (sensor ch A)")
     else:
         _zero_deg = None
@@ -227,6 +286,11 @@ def init() -> None:
     _last_write_time = time.monotonic()
     _initialized     = True
     print(f"✅ Lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
+    if HOLD_ENABLED:
+        print(f"   Holding torque ON  — speed={HOLD_SPEED}, "
+              f"thresh={HOLD_DRIFT_THRESH}°, pulse={HOLD_PULSE_SEC}s")
+    else:
+        print("   Holding torque OFF.")
 
 
 def shutdown() -> None:
@@ -242,7 +306,7 @@ def shutdown() -> None:
 
     for sid in (SERVO_ID_A, SERVO_ID_B):
         try:
-            motor._write_word(sid, _REG_SPEED,    0)
+            motor._write_word(sid, _REG_SPEED,     0)
             motor._write_word(sid, _REG_TORQUE_EN, 0)
         except Exception:
             pass
@@ -365,7 +429,7 @@ def _home() -> None:
         print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°")
         ok = home_with_sensor(
             read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
-            total_position_fn =  _sensor_mgr.total_position,
+            total_position_fn = _sensor_mgr.total_position,
             zero_deg          = _zero_deg,
             drive_positive_fn = lambda s: _both(_DIR_CCW | s),
             drive_negative_fn = lambda s: _both(_DIR_CW  | s),
