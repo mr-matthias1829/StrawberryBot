@@ -46,6 +46,22 @@ def is_ai_enabled() -> bool:
         return _ai_enabled
 
 # ---------------------------------------------------------------------------
+# CV toggle
+# ---------------------------------------------------------------------------
+_cv_enabled      = True
+_cv_enabled_lock = threading.Lock()
+
+def set_cv_enabled(enabled: bool) -> None:
+    global _cv_enabled
+    with _cv_enabled_lock:
+        _cv_enabled = bool(enabled)
+    print(f"[FusionEngine] CV detector {'ENABLED' if enabled else 'DISABLED'}")
+
+def is_cv_enabled() -> bool:
+    with _cv_enabled_lock:
+        return _cv_enabled
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -220,7 +236,7 @@ class DetectionWorker:
 
     def _process_frame(self, job: _FrameJob) -> None:
         ai_dets = self.ai.detect(job.small) if is_ai_enabled() else []
-        cv_dets, mask = self.cv.detect(job.small)
+        cv_dets, mask = (self.cv.detect(job.small) if is_cv_enabled() else ([], None))
         inv = 1.0 / INFER_SCALE
         ai_dets = [_scale_det(d, inv) for d in ai_dets]
         cv_dets = [_scale_det(d, inv) for d in cv_dets]
@@ -243,7 +259,7 @@ class DetectionWorker:
         scale  = config.ZOOM_SCALE_FACTOR
         roi_up = cv2.resize(roi, (int(roi.shape[1] * scale), int(roi.shape[0] * scale)))
         ai_res = self.ai.detect(roi_up, conf_threshold=config.RECHECK_AI_CONF) if is_ai_enabled() else []
-        cv_res, _ = self.cv.detect(roi_up)
+        cv_res, _ = (self.cv.detect(roi_up) if is_cv_enabled() else ([], None))
         sx, sy = roi.shape[1] / roi_up.shape[1], roi.shape[0] / roi_up.shape[0]
 
         best_det, best_conf = None, 0.0
@@ -255,13 +271,14 @@ class DetectionWorker:
                 best_conf = fused
                 best_det  = Detection(ox1, oy1, ox2, oy2, fused, f"zoomed_{job.source}",
                                       label=det.label, class_id=det.class_id)
-        for det in cv_res:
-            ox1, oy1 = int(rx1 + det.x1*sx), int(ry1 + det.y1*sy)
-            ox2, oy2 = int(rx1 + det.x2*sx), int(ry1 + det.y2*sy)
-            if det.confidence > best_conf:
-                best_conf = det.confidence
-                best_det  = Detection(ox1, oy1, ox2, oy2, det.confidence, "zoomed_cv",
-                                      label="Strawberry", class_id=0)
+        if cv_res:
+            for det in cv_res:
+                ox1, oy1 = int(rx1 + det.x1*sx), int(ry1 + det.y1*sy)
+                ox2, oy2 = int(rx1 + det.x2*sx), int(ry1 + det.y2*sy)
+                if det.confidence > best_conf:
+                    best_conf = det.confidence
+                    best_det  = Detection(ox1, oy1, ox2, oy2, det.confidence, "zoomed_cv",
+                                          label="Strawberry", class_id=0)
         if best_det and best_conf >= config.RECHECK_CV_CONF:
             with self._lock:
                 self._zoom_results.append(best_det)
@@ -575,9 +592,10 @@ class FusionEngine:
 
         # HUD
         ai_badge   = "AI:ON" if is_ai_enabled() else "AI:OFF"
+        cv_badge   = "CV:ON" if is_cv_enabled() else "CV:OFF"
         pred_badge = " [PRED]" if use_predicted else ""
         cv2.putText(out,
-            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)} | {ai_badge}{pred_badge}",
+            f"Frame {frame_count} | Hits:{len(confirmed)} | Possible:{len(possible)} | {ai_badge} {cv_badge}{pred_badge}",
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
         cv2.putText(out, f"Robot: {movement_text}",
             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)

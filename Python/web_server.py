@@ -12,6 +12,8 @@ GET  /api/cv_config       – huidige CVConfig als JSON
 POST /api/cv_config       – update CVConfig velden (partial update ok)
 GET  /api/ai_enabled      – {"enabled": true/false}
 POST /api/ai_enabled      – {"enabled": true/false}
+GET  /api/cv_enabled      – {"enabled": true/false}
+POST /api/cv_enabled      – {"enabled": true/false}
 POST /api/cv_preset       – {"preset": "red"|"green"|"yellow"|"blue"|"orange"|"custom"}
 GET  /api/full_config     – alle config.py knobs als JSON
 POST /api/full_config     – partial update van config.py knobs (setattr live)
@@ -334,6 +336,23 @@ def api_ai_post():
     return jsonify({"ok": True, "enabled": enabled})
 
 
+# ── CV toggle ─────────────────────────────────────────────────────────────────
+
+@_app.route("/api/cv_enabled", methods=["GET"])
+def api_cv_get():
+    from fusion_engine import is_cv_enabled
+    return jsonify({"enabled": is_cv_enabled()})
+
+
+@_app.route("/api/cv_enabled", methods=["POST"])
+def api_cv_post():
+    from fusion_engine import set_cv_enabled
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    set_cv_enabled(enabled)
+    return jsonify({"ok": True, "enabled": enabled})
+
+
 # ── Corner sensors ────────────────────────────────────────────────────────────
 
 @_app.route("/api/corner_sensors")
@@ -477,8 +496,9 @@ main{flex:1;display:flex;min-height:0}
 .sec{padding:10px;border-bottom:1px solid var(--brd)}
 .sec-t{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
 
-/* AI toggle */
-.ai-row{display:flex;align-items:center;justify-content:space-between;padding:7px 9px;border-radius:6px;border:1px solid var(--brd);background:var(--bg2)}
+/* toggle rows */
+.ai-row{display:flex;align-items:center;justify-content:space-between;padding:7px 9px;border-radius:6px;border:1px solid var(--brd);background:var(--bg2);margin-bottom:6px}
+.ai-row:last-child{margin-bottom:0}
 .ai-lbl small{display:block;font-size:9px;color:var(--mut);margin-top:1px}
 .sw{position:relative;width:34px;height:19px;flex-shrink:0}
 .sw input{opacity:0;width:0;height:0}
@@ -486,6 +506,14 @@ main{flex:1;display:flex;min-height:0}
 .sw-t::after{content:'';position:absolute;width:13px;height:13px;border-radius:50%;background:var(--mut);top:3px;left:3px;transition:all .2s}
 .sw input:checked+.sw-t{background:var(--grn)}
 .sw input:checked+.sw-t::after{background:#fff;transform:translateX(15px)}
+
+/* combined toggle button */
+.combo-btn{width:100%;padding:8px 12px;font-family:var(--mono);font-size:11px;font-weight:600;border-radius:6px;cursor:pointer;transition:all .15s;letter-spacing:.4px;display:flex;align-items:center;justify-content:space-between;margin-top:2px}
+.combo-btn .cb-lbl small{display:block;font-size:9px;font-weight:400;margin-top:1px;text-align:left}
+.combo-btn .cb-state{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid currentColor;opacity:.8}
+.combo-both-on{border:1px solid var(--grn);background:var(--grn-lo);color:var(--grn)}
+.combo-mixed{border:1px solid var(--yel);background:rgba(245,200,66,.08);color:var(--yel)}
+.combo-both-off{border:1px solid var(--brd2);background:var(--bg2);color:var(--mut)}
 
 /* presets */
 .presets{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
@@ -624,11 +652,25 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
   <!-- ── DETECT (mode + colour merged) ── -->
   <div class="pane on" id="tab-detect">
     <div class="sec">
-      <div class="sec-t">Mode</div>
+      <div class="sec-t">Detector mode</div>
+
+      <!-- AI toggle -->
       <div class="ai-row">
         <div class="ai-lbl">AI (YOLO)<small id="aiSub">Loading…</small></div>
         <label class="sw"><input type="checkbox" id="aiToggle" onchange="onAiToggle(this.checked)"><span class="sw-t"></span></label>
       </div>
+
+      <!-- CV toggle -->
+      <div class="ai-row">
+        <div class="ai-lbl">CV (OpenCV)<small id="cvSub">Loading…</small></div>
+        <label class="sw"><input type="checkbox" id="cvToggle" onchange="onCvToggle(this.checked)"><span class="sw-t"></span></label>
+      </div>
+
+      <!-- Combined AI+CV toggle -->
+      <button class="combo-btn combo-both-off" id="comboBtn" onclick="onComboToggle()">
+        <div class="cb-lbl">AI + CV<small id="comboSub">Both off</small></div>
+        <span class="cb-state" id="comboState">OFF</span>
+      </button>
     </div>
     <div class="sec">
       <div class="sec-t">Colour preset</div>
@@ -725,14 +767,13 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
       <div id="sensorList"></div>
       <div style="font-size:9px;color:var(--mut);margin-top:8px">Auto-refreshes every 500 ms when active.</div>
     </div>
-    <!-- add in the sensors pane, after the AS5600 sec div -->
     <div class="sec">
-        <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
+      <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
         Servo status
         <button onclick="refreshServos()" style="padding:1px 7px;font-size:9px">⟳ Refresh</button>
+      </div>
+      <div id="servoList"></div>
     </div>
-  <div id="servoList"></div>
-</div>
   </div>
 </div><!-- /panel -->
 
@@ -808,6 +849,10 @@ const HSV_DEF={h1_low:0,h1_high:10,h2_low:160,h2_high:179,sat_min:80,val_min:50,
 const SHP_DEF={contour_min_circularity:0.55,max_aspect_ratio:1.6,watershed_fg_thresh:0.35,nms_iou_threshold:0.35};
 const _cfg={};
 
+// Track current detector states
+let _aiOn = true;
+let _cvOn = true;
+
 /* ── TABS ── */
 let _sensorTimer=null;
 function switchTab(name){
@@ -817,9 +862,9 @@ function switchTab(name){
   document.getElementById("tab-"+name)?.classList.add("on");
   clearInterval(_sensorTimer);_sensorTimer=null;
   if(name==="sensors"){
-  refreshSensors(); refreshServos();
-  _sensorTimer = setInterval(() => { refreshSensors(); refreshServos(); }, 500);
-    }
+    refreshSensors(); refreshServos();
+    _sensorTimer = setInterval(() => { refreshSensors(); refreshServos(); }, 500);
+  }
 }
 
 /* ── KNOBS ── */
@@ -905,9 +950,18 @@ function resetGroup(group){
 /* ── INIT ── */
 async function initUI(){
   try{
-    const[cr,ar,fr]=await Promise.all([fetch("/api/cv_config"),fetch("/api/ai_enabled"),fetch("/api/full_config")]);
-    const[cfg,ai,full]=await Promise.all([cr.json(),ar.json(),fr.json()]);
-    loadCVConfig(cfg);setAiUI(ai.enabled);Object.assign(_cfg,full);
+    const[cr,ar,cvr,fr]=await Promise.all([
+      fetch("/api/cv_config"),
+      fetch("/api/ai_enabled"),
+      fetch("/api/cv_enabled"),
+      fetch("/api/full_config")
+    ]);
+    const[cfg,ai,cv,full]=await Promise.all([cr.json(),ar.json(),cvr.json(),fr.json()]);
+    loadCVConfig(cfg);
+    setAiUI(ai.enabled);
+    setCvUI(cv.enabled);
+    updateComboBtn();
+    Object.assign(_cfg,full);
     ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
   }catch(e){console.warn("initUI failed:",e);}
 }
@@ -922,8 +976,63 @@ function loadCVConfig(cfg){
 }
 
 /* ── AI TOGGLE ── */
-function setAiUI(on){document.getElementById("aiToggle").checked=on;document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";}
-async function onAiToggle(on){setAiUI(on);try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
+function setAiUI(on){
+  _aiOn = on;
+  document.getElementById("aiToggle").checked=on;
+  document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";
+  updateComboBtn();
+}
+async function onAiToggle(on){
+  setAiUI(on);
+  try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}
+  catch(e){console.error(e);}
+}
+
+/* ── CV TOGGLE ── */
+function setCvUI(on){
+  _cvOn = on;
+  document.getElementById("cvToggle").checked=on;
+  document.getElementById("cvSub").textContent=on?"Active — colour detection":"Disabled — AI only";
+  updateComboBtn();
+}
+async function onCvToggle(on){
+  setCvUI(on);
+  try{await fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}
+  catch(e){console.error(e);}
+}
+
+/* ── COMBINED AI+CV TOGGLE ── */
+function updateComboBtn(){
+  const btn=document.getElementById("comboBtn");
+  const state=document.getElementById("comboState");
+  const sub=document.getElementById("comboSub");
+  btn.className="combo-btn";
+  if(_aiOn && _cvOn){
+    btn.classList.add("combo-both-on");
+    state.textContent="BOTH ON";
+    sub.textContent="Click to disable both";
+  } else if(_aiOn || _cvOn){
+    btn.classList.add("combo-mixed");
+    state.textContent=_aiOn?"AI only":"CV only";
+    sub.textContent="Mixed — click to disable both";
+  } else {
+    btn.classList.add("combo-both-off");
+    state.textContent="BOTH OFF";
+    sub.textContent="Click to enable both";
+  }
+}
+async function onComboToggle(){
+  // if either is on → turn both off; if both off → turn both on
+  const targetState = !(_aiOn || _cvOn);
+  try{
+    await Promise.all([
+      fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:targetState})}),
+      fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:targetState})}),
+    ]);
+    setAiUI(targetState);
+    setCvUI(targetState);
+  }catch(e){console.error(e);}
+}
 
 /* ── PRESETS ── */
 async function applyPreset(name){
@@ -993,33 +1102,20 @@ const STATUS_COLORS = {
   "GRIP":"var(--blu)","GRIPPED":"var(--blu)","OPEN":"var(--yel)",
   "BUSY":"var(--ora)","EXTENDING":"var(--grn)",
 };
-
-function _servoCard(s) {
-  const sc = STATUS_COLORS[s.status] || "var(--txt)";
-  const hw = s.simulated
-    ? `<span style="color:var(--ora)">SIM</span>`
-    : `<span style="color:var(--grn)">REAL</span>`;
-  const speed = s.speed > 0 ? s.speed : "—";
-  const alive = s.status !== "STOP" || !s.simulated;
-  return `<div class="scard ${alive ? "live" : ""}">
-    <div class="scard-h">
-      <span class="sname">ID${String(s.id).padStart(2,"0")} – ${s.name}</span>
-      <span class="sbadge" style="color:${sc};border-color:${sc}">${s.status}</span>
-    </div>
-    <div class="srow"><span class="sk">Speed</span><span class="sv">${speed}</span></div>
-    <div class="srow"><span class="sk">Hardware</span><span class="sv">${hw}</span></div>
-  </div>`;
+function _servoCard(s){
+  const sc=STATUS_COLORS[s.status]||"var(--txt)";
+  const hw=s.simulated?`<span style="color:var(--ora)">SIM</span>`:`<span style="color:var(--grn)">REAL</span>`;
+  const speed=s.speed>0?s.speed:"—";
+  const alive=s.status!=="STOP"||!s.simulated;
+  return`<div class="scard ${alive?"live":""}"><div class="scard-h"><span class="sname">ID${String(s.id).padStart(2,"0")} – ${s.name}</span><span class="sbadge" style="color:${sc};border-color:${sc}">${s.status}</span></div><div class="srow"><span class="sk">Speed</span><span class="sv">${speed}</span></div><div class="srow"><span class="sk">Hardware</span><span class="sv">${hw}</span></div></div>`;
 }
-
-async function refreshServos() {
-  const c = document.getElementById("servoList"); if (!c) return;
-  try {
-    const r = await fetch("/api/servo_status");
-    const d = await r.json();
-    c.innerHTML = d.length ? d.map(_servoCard).join("") : `<div style="font-size:10px;color:var(--mut);padding:5px 0">No servos reported.</div>`;
-  } catch(e) {
-    c.innerHTML = `<div style="color:var(--acc);font-size:10px">Request failed: ${e}</div>`;
-  }
+async function refreshServos(){
+  const c=document.getElementById("servoList");if(!c)return;
+  try{
+    const r=await fetch("/api/servo_status");
+    const d=await r.json();
+    c.innerHTML=d.length?d.map(_servoCard).join(""):`<div style="font-size:10px;color:var(--mut);padding:5px 0">No servos reported.</div>`;
+  }catch(e){c.innerHTML=`<div style="color:var(--acc);font-size:10px">Request failed: ${e}</div>`;}
 }
 
 /* ── DRAG RESIZE ── */
