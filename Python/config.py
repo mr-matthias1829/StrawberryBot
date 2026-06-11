@@ -135,3 +135,6 @@ MIN_GRAB_AREA_RATIO = 0.1
 
 GRAB_CENTER_TOLERANCE_X = 15
 GRAB_CENTER_TOLERANCE_Y = 15
+
+# Auto-mode control: when False, arm won't extend AND gripper won't auto-grip
+AUTO_MODE_ALLOW_MOVE = True

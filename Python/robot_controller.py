@@ -474,6 +474,14 @@ class RobotController:
             self._arm_extending = False
             return False, "ARM: no target"
 
+        if not config.AUTO_MODE_ALLOW_MOVE:
+            if _HAS_ARM:
+                _arm.stop()
+            if self._arm_extending:
+                print("[ARM] Auto-move disabled — arm stopped")
+                self._arm_extending = False
+            return False, "ARM: DISABLED (auto-move off)"
+
         bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
         contained = self.is_detection_fully_contained(
             self.current_target.detection, bbox
@@ -535,22 +543,22 @@ class RobotController:
         if _HAS_GRIPPER:
             self.update_gripper_containment(gripper_x, gripper_y)
             gripper_msg = self.generate_gripperstring()
-
-            if config.GRIPPER_AUTO_GRIP_ENABLED:
-                if self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES:
-                    fill = self.object_fill_ratio()
-                    print(
-                        f"[GRAB CHECK] "
-                        f"fill={fill:.2f} (need {config.MIN_GRAB_AREA_RATIO:.2f}) "
-                        f"frames={self._gripper_containment_frames}"
-                    )
-                    if fill >= config.MIN_GRAB_AREA_RATIO:
-                        result = _gripper.grip()
-                        if result["status"] == "ok":
-                            self._gripper_containment_frames = 0
-                            gripper_msg = "GRIPPER: GRIPPING"
-        else:
-            gripper_msg = "GRIPPER SIMULATED"
+            if config.GRIPPER_AUTO_GRIP_ENABLED and config.AUTO_MODE_ALLOW_MOVE:
+                if config.GRIPPER_AUTO_GRIP_ENABLED:
+                    if self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES:
+                        fill = self.object_fill_ratio()
+                        print(
+                            f"[GRAB CHECK] "
+                            f"fill={fill:.2f} (need {config.MIN_GRAB_AREA_RATIO:.2f}) "
+                            f"frames={self._gripper_containment_frames}"
+                        )
+                        if fill >= config.MIN_GRAB_AREA_RATIO:
+                            result = _gripper.grip()
+                            if result["status"] == "ok":
+                                self._gripper_containment_frames = 0
+                                gripper_msg = "GRIPPER: GRIPPING"
+            else:
+                gripper_msg = "GRIPPER SIMULATED"
 
         if do_log:
             print(

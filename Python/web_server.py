@@ -19,6 +19,8 @@ GET  /api/full_config     – alle config.py knobs als JSON
 POST /api/full_config     – partial update van config.py knobs (setattr live)
 GET  /api/corner_sensors  – latest AS5600 reading per motor
 GET  /api/dead_reckoning  – dead-reckoning position accumulators per motor
+GET  /api/auto_move       – {"enabled": true/false} (arm extension + auto-grip)
+POST /api/auto_move       – {"enabled": true/false}
 """
 from __future__ import annotations
 
@@ -475,6 +477,22 @@ def api_kill():
         _kill_active = enabled
     return jsonify({"ok": True, "kill_active": enabled})
 
+# ── Auto-move toggle (arm + gripper) ──────────────────────────────────────────
+
+@_app.route("/api/auto_move", methods=["GET"])
+def api_auto_move_get():
+    import config
+    return jsonify({"enabled": getattr(config, "AUTO_MODE_ALLOW_MOVE", True)})
+
+@_app.route("/api/auto_move", methods=["POST"])
+def api_auto_move_post():
+    import config
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    setattr(config, "AUTO_MODE_ALLOW_MOVE", enabled)
+    print(f"[WebUI] Auto-move set to: {enabled} (arm + gripper)")
+    return jsonify({"ok": True, "enabled": enabled})
+
 @_app.route("/favicon.ico")
 def route_favicon():
     svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><text y="26" font-size="28">&#x1F353;</text></svg>'
@@ -722,6 +740,13 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
         <div class="cb-lbl">AI + CV<small id="comboSub">Both off</small></div>
         <span class="cb-state" id="comboState">OFF</span>
       </button>
+    </div>
+    <div class="sec">
+      <div class="sec-t">Autonomous mode</div>
+      <div class="ai-row">
+        <div class="ai-lbl">Allow movement<small>Arm extension + auto-grip</small></div>
+        <label class="sw"><input type="checkbox" id="autoMoveToggle" onchange="onAutoMoveToggle(this.checked)"><span class="sw-t"></span></label>
+      </div>
     </div>
     <div class="sec">
       <div class="sec-t">Colour preset</div>
@@ -994,6 +1019,30 @@ function resetGroup(group){
   applyGroup(group);
 }
 
+/* ── AUTO-MOVE TOGGLE ── */
+let _autoMoveEnabled = true;
+
+async function onAutoMoveToggle(enabled) {
+  _autoMoveEnabled = enabled;
+  try {
+    await fetch("/api/auto_move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: enabled })
+    });
+    addLine(`Auto-move ${enabled ? "enabled" : "disabled"} (arm + gripper)`);
+  } catch(e) { console.error(e); }
+}
+
+async function loadAutoMoveState() {
+  try {
+    const r = await fetch("/api/auto_move");
+    const d = await r.json();
+    _autoMoveEnabled = d.enabled;
+    document.getElementById("autoMoveToggle").checked = _autoMoveEnabled;
+  } catch(e) { console.warn("Failed to load auto-move state:", e); }
+}
+
 /* ── INIT ── */
 async function initUI(){
   try{
@@ -1004,6 +1053,7 @@ async function initUI(){
     loadCVConfig(cfg);setAiUI(ai.enabled);setCvUI(cv.enabled);updateComboBtn();
     Object.assign(_cfg,full);
     ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
+    await loadAutoMoveState();
   }catch(e){console.warn("initUI failed:",e);}
 }
 function loadCVConfig(cfg){
