@@ -78,11 +78,12 @@ def home_with_sensor(
     read_sensor_fn:     Callable[[], Optional[dict]],
     total_position_fn:  Callable[[dict], float],
     zero_deg:           float,
-    drive_positive_fn:  Callable[[int], None],   # moves toward increasing angle
-    drive_negative_fn:  Callable[[int], None],   # moves toward decreasing angle
+    drive_positive_fn:  Callable[[int], None],
+    drive_negative_fn:  Callable[[int], None],
     stop_fn:            Callable[[], None],
     speed:              int = DR_HOME_SPEED,
     timeout:            float = SENSOR_HOME_TIMEOUT,
+    ignore_laps:        bool = False,
 ) -> bool:
     """
     Drive the motor toward zero_deg using sensor feedback.
@@ -97,8 +98,12 @@ def home_with_sensor(
             print("    [home_with_sensor] sensor lost mid-home — aborting")
             return False
 
-        pos   = total_position_fn(reading)
-        error = zero_deg - pos
+        pos = total_position_fn(reading)
+
+        if ignore_laps:
+            error = ((zero_deg - pos + 180.0) % 360.0) - 180.0
+        else:
+            error = zero_deg - pos
 
         if abs(error) <= SENSOR_DEADBAND:
             stop_fn()

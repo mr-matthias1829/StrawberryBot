@@ -332,12 +332,13 @@ def _home() -> None:
     if _zero_deg is not None:
         print(f"[turntable] Homing with sensor → target {_zero_deg:.1f}°")
         ok = home_with_sensor(
-            read_sensor_fn    = _read_sensor,
-            total_position_fn =  _sensor_mgr.total_position,
-            zero_deg          = _zero_deg,
-            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
-            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
-            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+            read_sensor_fn=_read_sensor,
+            total_position_fn=_sensor_mgr.total_position,
+            zero_deg=_zero_deg,
+            drive_positive_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | s),
+            stop_fn=lambda: motor._write_word(SERVO_ID, _REG_SPEED, 0),
+            ignore_laps=True,
         )
         if ok:
             print("[turntable] Homing complete (sensor).")
