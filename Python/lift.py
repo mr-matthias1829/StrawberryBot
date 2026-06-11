@@ -114,23 +114,22 @@ def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
 
-    # --- Sensor path ---
     if _sensor_mgr is not None:
-        reading = _read_sensor(SENSOR_CHANNEL_A)
+        reading = _read_sensor()
         if reading is not None:
-            deg = _sensor_mgr.total_position(reading)
-            if direction == "up"   and deg <= MIN_DEG:
+            abs_deg = _sensor_mgr.total_position(reading)
+            # Make position relative to our zero point
+            deg = abs_deg - (_zero_deg or 0)
+            if direction == "forward" and deg >= MAX_DEG:
                 return True
-            if direction == "down" and deg >= MAX_DEG:
+            if direction == "backward" and deg <= MIN_DEG:
                 return True
             return False
-        # sensor present but read failed — fall through to DR
 
-    # --- Dead-reckoning path ---
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "up"   and estimated_deg <= MIN_DEG:
+    if direction == "forward" and estimated_deg >= MAX_DEG:
         return True
-    if direction == "down" and estimated_deg >= MAX_DEG:
+    if direction == "backward" and estimated_deg <= MIN_DEG:
         return True
     return False
 
