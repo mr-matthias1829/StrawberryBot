@@ -45,8 +45,6 @@ MIN_DEG: float | None = -45.0
 MAX_DEG: float | None = 45.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
-# Tune by running at a known speed for a known time and measuring degrees moved.
-# Start conservative (small value = limits trigger sooner).
 SPEED_TO_DEG = 0.3
 
 _REG_CW_LIMIT  = 6
@@ -108,20 +106,23 @@ def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
 
+    # --- Sensor path ---
     if _sensor_mgr is not None:
         reading = _read_sensor()
         if reading is not None:
             abs_deg = _sensor_mgr.total_position(reading)
-            # Make position relative to our zero point
+            # Position relative to our zero point captured at init()
             deg = abs_deg - (_zero_deg or 0)
-            if direction == "forward" and deg >= MAX_DEG:
+            if direction == "forward"  and deg >= MAX_DEG:
                 return True
             if direction == "backward" and deg <= MIN_DEG:
                 return True
             return False
+        # sensor present but read failed — fall through to DR
 
+    # --- Dead-reckoning path ---
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "forward" and estimated_deg >= MAX_DEG:
+    if direction == "forward"  and estimated_deg >= MAX_DEG:
         return True
     if direction == "backward" and estimated_deg <= MIN_DEG:
         return True
@@ -260,6 +261,9 @@ def stop() -> None:
 
 
 def move_forward(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("forward"):
+        stop()
+        return {"direction": "forward", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "FORWARD", speed, real=_initialized)
@@ -267,6 +271,9 @@ def move_forward(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def move_backward(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("backward"):
+        stop()
+        return {"direction": "backward", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "BACKWARD", speed, real=_initialized)

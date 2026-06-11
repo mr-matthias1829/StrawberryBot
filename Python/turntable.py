@@ -47,8 +47,6 @@ MIN_DEG: float | None = -999999999
 MAX_DEG: float | None = 999999999
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
-# Only used when the sensor read fails despite being wired.
-# Tune by running at a known speed for a known time and measuring degrees moved.
 SPEED_TO_DEG = 0.3
 
 # AX-12A registers
@@ -111,22 +109,25 @@ def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
 
+    # --- Sensor path ---
     if _sensor_mgr is not None:
         reading = _read_sensor()
         if reading is not None:
             abs_deg = _sensor_mgr.total_position(reading)
-            # Make position relative to our zero point
+            # Position relative to our zero point captured at init()
             deg = abs_deg - (_zero_deg or 0)
-            if direction == "forward" and deg >= MAX_DEG:
+            if direction == "right" and deg >= MAX_DEG:
                 return True
-            if direction == "backward" and deg <= MIN_DEG:
+            if direction == "left"  and deg <= MIN_DEG:
                 return True
             return False
+        # sensor present but read failed — fall through to DR
 
+    # --- Dead-reckoning path ---
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "forward" and estimated_deg >= MAX_DEG:
+    if direction == "right" and estimated_deg >= MAX_DEG:
         return True
-    if direction == "backward" and estimated_deg <= MIN_DEG:
+    if direction == "left"  and estimated_deg <= MIN_DEG:
         return True
     return False
 
@@ -143,8 +144,8 @@ _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
 # Zero-point tracking
-_zero_deg:  float | None = None   # sensor reading at init(), or None
-_dead_pos:  list          = [0.0] # mutable accumulator: [signed_speed × dt]
+_zero_deg:  float | None = None
+_dead_pos:  list          = [0.0]
 _last_write_time: float   = 0.0
 
 # =============================================================================
@@ -197,7 +198,6 @@ def init() -> None:
 
     _init_sensor()
 
-    # Capture zero point
     reading = _read_sensor()
     if reading is not None:
         _zero_deg =  _sensor_mgr.total_position(reading)
@@ -264,6 +264,9 @@ def stop() -> None:
 
 
 def spin_left(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("left"):
+        stop()
+        return {"direction": "left", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
@@ -271,6 +274,9 @@ def spin_left(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def spin_right(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("right"):
+        stop()
+        return {"direction": "right", "servo_id": SERVO_ID, "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)
@@ -318,7 +324,6 @@ def _home() -> None:
         print("[turntable] _home(): not initialised — skipping")
         return
 
-    # Flush any pending command
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
 
     if _zero_deg is not None:

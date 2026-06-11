@@ -45,8 +45,6 @@ MIN_DEG: float | None = -45.0
 MAX_DEG: float | None = 45.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
-# Only used when sensor read fails despite being wired.
-# Tune by running at a known speed for a known time and measuring degrees moved.
 SPEED_TO_DEG = 0.3
 
 _REG_CW_LIMIT  = 6
@@ -114,22 +112,25 @@ def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
 
+    # --- Sensor path ---
     if _sensor_mgr is not None:
-        reading = _read_sensor()
+        reading = _read_sensor(SENSOR_CHANNEL_A)
         if reading is not None:
             abs_deg = _sensor_mgr.total_position(reading)
-            # Make position relative to our zero point
+            # Position relative to our zero point captured at init()
             deg = abs_deg - (_zero_deg or 0)
-            if direction == "forward" and deg >= MAX_DEG:
+            if direction == "up"   and deg <= MIN_DEG:
                 return True
-            if direction == "backward" and deg <= MIN_DEG:
+            if direction == "down" and deg >= MAX_DEG:
                 return True
             return False
+        # sensor present but read failed — fall through to DR
 
+    # --- Dead-reckoning path ---
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "forward" and estimated_deg >= MAX_DEG:
+    if direction == "up"   and estimated_deg <= MIN_DEG:
         return True
-    if direction == "backward" and estimated_deg <= MIN_DEG:
+    if direction == "down" and estimated_deg >= MAX_DEG:
         return True
     return False
 
@@ -284,6 +285,9 @@ def stop() -> None:
 
 
 def move_up(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("up"):
+        stop()
+        return {"direction": "up", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CCW | speed, _DIR_CCW | speed)
     servo_status.update(SERVO_ID_A, "UP", speed, real=_initialized)
@@ -293,6 +297,9 @@ def move_up(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def move_down(speed: int = SPEED_MEDIUM) -> dict:
+    if _at_limit("down"):
+        stop()
+        return {"direction": "down", "servo_ids": [SERVO_ID_A, SERVO_ID_B], "speed": 0, "status": "limit"}
     speed = max(0, min(1023, speed))
     _post_words(_DIR_CW | speed, _DIR_CW | speed)
     servo_status.update(SERVO_ID_A, "DOWN", speed, real=_initialized)
@@ -348,7 +355,6 @@ def _home() -> None:
     for sid in (SERVO_ID_A, SERVO_ID_B):
         motor._write_word(sid, _REG_SPEED, 0)
 
-    # Helper to drive both servos simultaneously
     def _both(word: int) -> None:
         motor._write_word(SERVO_ID_A, _REG_SPEED, word)
         motor._write_word(SERVO_ID_B, _REG_SPEED, word)
