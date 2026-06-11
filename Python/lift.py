@@ -74,7 +74,7 @@ _DIR_CW  = 1 << 10
 # ── Holding torque ─────────────────────────────────────────────────────────────
 HOLD_ENABLED      = True   # set False to disable entirely
 HOLD_DRIFT_THRESH = 1.5    # degrees of sag before a corrective pulse fires
-HOLD_SPEED        = 80     # upward pulse strength  (0–1023, same scale as SPEED_*)
+HOLD_SPEED        = 120     # upward pulse strength  (0–1023, same scale as SPEED_*)
 HOLD_PULSE_SEC    = 0.08   # duration of each corrective pulse in seconds
 
 # =============================================================================
