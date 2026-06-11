@@ -83,6 +83,18 @@ def get_sensor_reading() -> dict | None:
     return _read_sensor()
 
 
+def get_dead_reckoning() -> dict:
+    """Return dead-reckoning state for dashboard display."""
+    return {
+        "accumulator": round(_dead_pos[0], 3),
+        "estimated_deg": round(_dead_pos[0] * SPEED_TO_DEG, 2),
+        "zero_deg": round(_zero_deg, 2) if _zero_deg is not None else None,
+        "sensor_active": _sensor_mgr is not None,
+        "min_deg": MIN_DEG,
+        "max_deg": MAX_DEG,
+    }
+
+
 def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False

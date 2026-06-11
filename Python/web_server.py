@@ -18,6 +18,7 @@ POST /api/cv_preset       – {"preset": "red"|"green"|"yellow"|"blue"|"orange"|
 GET  /api/full_config     – alle config.py knobs als JSON
 POST /api/full_config     – partial update van config.py knobs (setattr live)
 GET  /api/corner_sensors  – latest AS5600 reading per motor
+GET  /api/dead_reckoning  – dead-reckoning position accumulators per motor
 """
 from __future__ import annotations
 
@@ -60,25 +61,20 @@ _PRESETS = {
 
 # =============================================================================
 # FULL CONFIG SCHEMA
-# (key, type, min, max, label, group, default)
-# Groups: thresholds | fusion | tracking | shape | zoom
 # =============================================================================
 
 _FULL_CONFIG_SCHEMA = [
-    # Thresholds
     ("YOLO_BASE_THRESHOLD",          float, 0.0, 1.0,   "YOLO base",            "thresholds", 0.5),
     ("CV_BASE_THRESHOLD",            float, 0.0, 1.0,   "CV base",              "thresholds", 0.4),
     ("CV_DIRECT_ACCEPT_THRESHOLD",   float, 0.0, 1.0,   "CV direct-accept",     "thresholds", 0.75),
     ("HIGH_AI_CONFIDENCE",           float, 0.0, 1.0,   "AI high conf",         "thresholds", 0.75),
     ("LOW_AI_CONFIDENCE",            float, 0.0, 1.0,   "AI low conf",          "thresholds", 0.35),
-    # Fusion weights
     ("YOLO_FUSION_WEIGHT",           float, 0.0, 1.0,   "YOLO weight",          "fusion", 0.6),
     ("CV_FUSION_WEIGHT",             float, 0.0, 1.0,   "CV weight",            "fusion", 0.4),
     ("CV_WEIGHT_REDNESS",            float, 0.0, 1.0,   "CV: redness",          "fusion", 0.4),
     ("CV_WEIGHT_CIRCULARITY",        float, 0.0, 1.0,   "CV: circularity",      "fusion", 0.3),
     ("CV_WEIGHT_SIZE",               float, 0.0, 1.0,   "CV: size",             "fusion", 0.2),
     ("CV_WEIGHT_TEXTURE",            float, 0.0, 1.0,   "CV: texture",          "fusion", 0.1),
-    # Tracking / persistence
     ("PERSISTENCE_REQUIRED",         int,   1,   20,    "Confirm frames (fused)","tracking", 3),
     ("PERSISTENCE_REQUIRED_CV_ONLY", int,   1,   20,    "Confirm frames (CV)",  "tracking", 5),
     ("PERSISTENCE_DECAY",            float, 0.0, 1.0,   "Conf decay / miss",    "tracking", 0.3),
@@ -91,10 +87,8 @@ _FULL_CONFIG_SCHEMA = [
     ("POSSIBLE_AI_ONLY_MIN_SEEN",    int,   1,   10,    "Possible seen (AI)",   "tracking", 2),
     ("POSSIBLE_AI_CONF_WEIGHT",      float, 0.0, 1.0,   "AI conf weight",       "tracking", 0.6),
     ("POSSIBLE_TARGET_MIN_CONF",     float, 0.0, 1.0,   "Target min conf",      "tracking", 0.4),
-    # Shape / contour
     ("MIN_CONTOUR_AREA",             int,   10,  5000,  "Min contour (px²)",    "shape", 300),
     ("CONVEXITY_MIN_AREA",           int,   100, 20000, "Watershed split (px²)","shape", 2000),
-    # Zoom recheck
     ("MAX_RECHECKS",                 int,   0,   10,    "Max rechecks",         "zoom", 2),
     ("ZOOM_SCALE_FACTOR",            float, 1.0, 4.0,   "Scale factor",         "zoom", 2.0),
     ("RECHECK_AI_CONF",              float, 0.0, 1.0,   "Recheck AI thresh",    "zoom", 0.4),
@@ -379,6 +373,59 @@ def api_corner_sensors():
             result[name] = {"available": False, "error": str(e)}
     return jsonify(result)
 
+
+# ── Dead-reckoning positions ──────────────────────────────────────────────────
+
+@_app.route("/api/dead_reckoning")
+def api_dead_reckoning():
+    """
+    Returns the current dead-reckoning accumulator state for every motor
+    that tracks open-loop position.  When a sensor IS present the motor
+    still maintains the accumulator as a fallback, so both are returned.
+
+    Response shape per motor:
+        dead_pos      – raw accumulator value (speed-units × seconds)
+        estimated_deg – dead_pos × SPEED_TO_DEG  (approximate degrees)
+        speed_to_deg  – the calibration constant used for conversion
+        has_sensor    – true when an AS5600 is wired and detected
+        zero_deg      – sensor reading captured at init() (null if no sensor)
+        min_deg       – soft travel limit (null if unlimited)
+        max_deg       – soft travel limit (null if unlimited)
+    """
+    import importlib
+    _MOTORS_DR = [
+        ("turntable", "turntable"),
+        ("lift",      "lift"),
+        ("arm",       "arm"),
+        ("pivot",     "pivot"),
+    ]
+    result = {}
+    for name, mod_name in _MOTORS_DR:
+        try:
+            mod = importlib.import_module(mod_name)
+            dead_pos   = getattr(mod, "_dead_pos",    [0.0])[0]
+            s2d        = getattr(mod, "SPEED_TO_DEG", None)
+            has_sensor = getattr(mod, "_sensor_mgr",  None) is not None
+            zero_deg   = getattr(mod, "_zero_deg",    None)
+            min_deg    = getattr(mod, "MIN_DEG",      None)
+            max_deg    = getattr(mod, "MAX_DEG",      None)
+            est_deg    = round(dead_pos * s2d, 2) if s2d is not None else None
+            result[name] = {
+                "dead_pos":      round(dead_pos, 3),
+                "estimated_deg": est_deg,
+                "speed_to_deg":  s2d,
+                "has_sensor":    has_sensor,
+                "zero_deg":      round(zero_deg, 2) if zero_deg is not None else None,
+                "min_deg":       min_deg,
+                "max_deg":       max_deg,
+            }
+        except Exception as e:
+            result[name] = {"error": str(e)}
+    return jsonify(result)
+
+
+# ── Servo status ──────────────────────────────────────────────────────────────
+
 @_app.route("/api/servo_status")
 def api_servo_status():
     import servo_status
@@ -420,7 +467,7 @@ def api_kill():
     if enabled:
         print("[WebUI] Kill switch: ACTIVE — shutting down process")
         def _do_kill():
-            time.sleep(0.3)  # let the HTTP response go out first
+            time.sleep(0.3)
             import os, signal
             os.kill(os.getpid(), signal.SIGTERM)
         threading.Thread(target=_do_kill, daemon=True).start()
@@ -440,7 +487,7 @@ def route_index():
 
 
 # =============================================================================
-# DASHBOARD HTML  (compact single-file)
+# DASHBOARD HTML
 # =============================================================================
 
 _HTML = r"""<!DOCTYPE html>
@@ -454,7 +501,7 @@ _HTML = r"""<!DOCTYPE html>
 :root{
   --bg:#080c10;--bg2:#0d1219;--sur:#111720;--brd:#1e2a38;--brd2:#243040;
   --acc:#ff3d5a;--grn:#2ddb72;--grn-lo:rgba(45,219,114,.12);
-  --yel:#f5c842;--blu:#3da9f5;--ora:#ff8c42;
+  --yel:#f5c842;--blu:#3da9f5;--ora:#ff8c42;--pur:#b06cff;
   --txt:#c8d6e8;--mut:#5a7080;
   --mono:'IBM Plex Mono',monospace;--sans:'Space Grotesk',system-ui,sans-serif;
 }
@@ -562,18 +609,28 @@ input[type=number]:focus{border-color:var(--ora)}
 .grp-h{font-size:9px;color:var(--blu);text-transform:uppercase;letter-spacing:.7px;margin:10px 0 5px;padding-top:8px;border-top:1px solid var(--brd)}
 .grp-h:first-child{border-top:none;margin-top:0;padding-top:0}
 
-/* sensors */
+/* sensor cards */
 .scard{background:var(--bg2);border:1px solid var(--brd);border-radius:6px;padding:7px 9px;margin-bottom:5px}
 .scard.live{border-color:var(--grn)}
+.scard.dr{border-color:var(--pur)}
 .scard.dead{opacity:.55}
 .scard-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
 .sname{font-family:var(--sans);font-size:11px;font-weight:700}
 .sbadge{font-size:9px;padding:1px 6px;border-radius:8px;background:var(--brd2);color:var(--mut)}
 .sbadge.on{background:var(--grn-lo);color:var(--grn)}
+.sbadge.dr{background:rgba(176,108,255,.15);color:var(--pur)}
 .srow{display:flex;justify-content:space-between;font-size:10px;margin-top:2px}
 .sk{color:var(--mut)}.sv{color:var(--txt);font-weight:600}
 .sarc{height:4px;border-radius:2px;margin-top:5px;background:var(--brd2);position:relative;overflow:hidden}
 .sarc-f{position:absolute;top:0;left:0;height:100%;background:var(--grn);border-radius:2px;transition:width .25s}
+.sarc-f.dr{background:var(--pur)}
+/* DR position bar uses min/max range; neutral (zero) centred */
+.sarc-dr{height:4px;border-radius:2px;margin-top:5px;background:var(--brd2);position:relative;overflow:hidden}
+.sarc-dr-f{position:absolute;top:0;height:100%;background:var(--pur);border-radius:2px;transition:left .2s,width .2s}
+/* zero tick */
+.sarc-dr::after{content:'';position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.2);left:50%}
+.dr-section{margin-top:6px;padding-top:6px;border-top:1px dashed var(--brd2)}
+.dr-label{font-size:9px;color:var(--pur);text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}
 
 /* drag divider */
 .div{width:4px;flex-shrink:0;background:var(--brd);cursor:col-resize;transition:background .15s;z-index:10}
@@ -649,24 +706,18 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     <button class="tab" onclick="switchTab('sensors')">Sensors</button>
   </div>
 
-  <!-- ── DETECT (mode + colour merged) ── -->
+  <!-- ── DETECT ── -->
   <div class="pane on" id="tab-detect">
     <div class="sec">
       <div class="sec-t">Detector mode</div>
-
-      <!-- AI toggle -->
       <div class="ai-row">
         <div class="ai-lbl">AI (YOLO)<small id="aiSub">Loading…</small></div>
         <label class="sw"><input type="checkbox" id="aiToggle" onchange="onAiToggle(this.checked)"><span class="sw-t"></span></label>
       </div>
-
-      <!-- CV toggle -->
       <div class="ai-row">
         <div class="ai-lbl">CV (OpenCV)<small id="cvSub">Loading…</small></div>
         <label class="sw"><input type="checkbox" id="cvToggle" onchange="onCvToggle(this.checked)"><span class="sw-t"></span></label>
       </div>
-
-      <!-- Combined AI+CV toggle -->
       <button class="combo-btn combo-both-off" id="comboBtn" onclick="onComboToggle()">
         <div class="cb-lbl">AI + CV<small id="comboSub">Both off</small></div>
         <span class="cb-state" id="comboState">OFF</span>
@@ -731,7 +782,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  <!-- ── ADVANCED (fusion + shape + zoom merged) ── -->
+  <!-- ── ADVANCED ── -->
   <div class="pane" id="tab-advanced">
     <div class="sec">
       <div class="grp-h">Fusion weights</div>
@@ -849,9 +900,7 @@ const HSV_DEF={h1_low:0,h1_high:10,h2_low:160,h2_high:179,sat_min:80,val_min:50,
 const SHP_DEF={contour_min_circularity:0.55,max_aspect_ratio:1.6,watershed_fg_thresh:0.35,nms_iou_threshold:0.35};
 const _cfg={};
 
-// Track current detector states
-let _aiOn = true;
-let _cvOn = true;
+let _aiOn=true,_cvOn=true;
 
 /* ── TABS ── */
 let _sensorTimer=null;
@@ -862,8 +911,8 @@ function switchTab(name){
   document.getElementById("tab-"+name)?.classList.add("on");
   clearInterval(_sensorTimer);_sensorTimer=null;
   if(name==="sensors"){
-    refreshSensors(); refreshServos();
-    _sensorTimer = setInterval(() => { refreshSensors(); refreshServos(); }, 500);
+    refreshSensors();refreshServos();
+    _sensorTimer=setInterval(()=>{refreshSensors();refreshServos();},500);
   }
 }
 
@@ -902,7 +951,7 @@ async function applyGroup(group){
   finally{if(btn){btn.classList.remove("busy");btn.textContent="▶ Apply";}}
 }
 
-/* ── ADVANCED (fusion+shape+zoom) ── */
+/* ── ADVANCED ── */
 async function applyAdvanced(){
   const btn=document.getElementById("applyAdvanced"),fb=document.getElementById("fb-advanced");
   btn.classList.add("busy");btn.textContent="Sending…";
@@ -914,11 +963,11 @@ async function applyAdvanced(){
     nms_iou_threshold:parseFloat(document.getElementById("sl-nms").value),
   };
   try{
-    const [r1,r2]=await Promise.all([
+    const[r1,r2]=await Promise.all([
       fetch("/api/full_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(fc)}),
       fetch("/api/cv_config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cv)}),
     ]);
-    const [d1,d2]=await Promise.all([r1.json(),r2.json()]);
+    const[d1,d2]=await Promise.all([r1.json(),r2.json()]);
     showFb(fb,(d1.ok&&d2.ok)?"ok":"err",(d1.ok&&d2.ok)?"✓ Applied":"Partial error");
   }catch{showFb(fb,"err","Request failed");}
   finally{btn.classList.remove("busy");btn.textContent="▶ Apply all";}
@@ -936,8 +985,6 @@ function resetAdvanced(){
   sv("sl-nms",SHP_DEF.nms_iou_threshold,x=>x.toFixed(2));
   applyAdvanced();
 }
-
-/* ── RESET GROUP ── */
 function resetGroup(group){
   SCHEMA.filter(s=>s[5]===group).forEach(([key,typ,mn,mx,lbl,grp,def])=>{
     _cfg[key]=def;
@@ -951,16 +998,10 @@ function resetGroup(group){
 async function initUI(){
   try{
     const[cr,ar,cvr,fr]=await Promise.all([
-      fetch("/api/cv_config"),
-      fetch("/api/ai_enabled"),
-      fetch("/api/cv_enabled"),
-      fetch("/api/full_config")
+      fetch("/api/cv_config"),fetch("/api/ai_enabled"),fetch("/api/cv_enabled"),fetch("/api/full_config")
     ]);
     const[cfg,ai,cv,full]=await Promise.all([cr.json(),ar.json(),cvr.json(),fr.json()]);
-    loadCVConfig(cfg);
-    setAiUI(ai.enabled);
-    setCvUI(cv.enabled);
-    updateComboBtn();
+    loadCVConfig(cfg);setAiUI(ai.enabled);setCvUI(cv.enabled);updateComboBtn();
     Object.assign(_cfg,full);
     ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
   }catch(e){console.warn("initUI failed:",e);}
@@ -976,61 +1017,29 @@ function loadCVConfig(cfg){
 }
 
 /* ── AI TOGGLE ── */
-function setAiUI(on){
-  _aiOn = on;
-  document.getElementById("aiToggle").checked=on;
-  document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";
-  updateComboBtn();
-}
-async function onAiToggle(on){
-  setAiUI(on);
-  try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}
-  catch(e){console.error(e);}
-}
+function setAiUI(on){_aiOn=on;document.getElementById("aiToggle").checked=on;document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";updateComboBtn();}
+async function onAiToggle(on){setAiUI(on);try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
 
 /* ── CV TOGGLE ── */
-function setCvUI(on){
-  _cvOn = on;
-  document.getElementById("cvToggle").checked=on;
-  document.getElementById("cvSub").textContent=on?"Active — colour detection":"Disabled — AI only";
-  updateComboBtn();
-}
-async function onCvToggle(on){
-  setCvUI(on);
-  try{await fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}
-  catch(e){console.error(e);}
-}
+function setCvUI(on){_cvOn=on;document.getElementById("cvToggle").checked=on;document.getElementById("cvSub").textContent=on?"Active — colour detection":"Disabled — AI only";updateComboBtn();}
+async function onCvToggle(on){setCvUI(on);try{await fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
 
-/* ── COMBINED AI+CV TOGGLE ── */
+/* ── COMBO TOGGLE ── */
 function updateComboBtn(){
-  const btn=document.getElementById("comboBtn");
-  const state=document.getElementById("comboState");
-  const sub=document.getElementById("comboSub");
+  const btn=document.getElementById("comboBtn"),state=document.getElementById("comboState"),sub=document.getElementById("comboSub");
   btn.className="combo-btn";
-  if(_aiOn && _cvOn){
-    btn.classList.add("combo-both-on");
-    state.textContent="BOTH ON";
-    sub.textContent="Click to disable both";
-  } else if(_aiOn || _cvOn){
-    btn.classList.add("combo-mixed");
-    state.textContent=_aiOn?"AI only":"CV only";
-    sub.textContent="Mixed — click to disable both";
-  } else {
-    btn.classList.add("combo-both-off");
-    state.textContent="BOTH OFF";
-    sub.textContent="Click to enable both";
-  }
+  if(_aiOn&&_cvOn){btn.classList.add("combo-both-on");state.textContent="BOTH ON";sub.textContent="Click to disable both";}
+  else if(_aiOn||_cvOn){btn.classList.add("combo-mixed");state.textContent=_aiOn?"AI only":"CV only";sub.textContent="Mixed — click to disable both";}
+  else{btn.classList.add("combo-both-off");state.textContent="BOTH OFF";sub.textContent="Click to enable both";}
 }
 async function onComboToggle(){
-  // if either is on → turn both off; if both off → turn both on
-  const targetState = !(_aiOn || _cvOn);
+  const t=!(_aiOn||_cvOn);
   try{
     await Promise.all([
-      fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:targetState})}),
-      fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:targetState})}),
+      fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:t})}),
+      fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:t})}),
     ]);
-    setAiUI(targetState);
-    setCvUI(targetState);
+    setAiUI(t);setCvUI(t);
   }catch(e){console.error(e);}
 }
 
@@ -1078,25 +1087,118 @@ function resetHSV(){
   document.querySelector('[data-preset="red"]')?.classList.add("on");
   applyHSV();
 }
-
 function showFb(el,cls,msg){if(!el)return;el.className="fb "+cls;el.textContent=msg;setTimeout(()=>{el.className="fb";el.textContent="";},3000);}
 
-/* ── SENSORS ── */
+/* ── SENSORS: dead-reckoning bar helper ── */
+function _drBar(estDeg, minDeg, maxDeg) {
+  // Draw a centred bar: left half = negative travel, right half = positive
+  // If no limits, use ±90° as display range
+  const lo = minDeg ?? -90, hi = maxDeg ?? 90;
+  const range = Math.max(hi - lo, 1);
+  const zero_pct = (-lo / range) * 100;          // where 0° sits on the bar
+  const cur_pct  = ((estDeg - lo) / range) * 100; // where current pos sits
+  // bar goes from zero to current (might go left or right)
+  const left  = Math.min(zero_pct, cur_pct);
+  const width = Math.abs(cur_pct - zero_pct);
+  return `<div class="sarc-dr">
+    <div class="sarc-dr-f" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%"></div>
+  </div>`;
+}
+
+/* ── SENSORS: build one card (sensor + optional DR section) ── */
 const SLBL={turntable:"Turntable (ID 13)",lift:"Lift (ID 3+4, dual)",gripper:"Gripper (ID 8)",arm:"Arm (ID 5)",pivot:"Pivot (ID 2)"};
-function _scard(name,info){
-  const lbl=SLBL[name]||name,alive=info.available;
-  let rows="";
-  if(alive&&info.data){const d=info.data,pct=((d.deg/360)*100).toFixed(0);rows=`<div class="srow"><span class="sk">Angle</span><span class="sv">${parseFloat(d.deg).toFixed(1)}°</span></div><div class="srow"><span class="sk">Raw</span><span class="sv">${d.raw}</span></div><div class="srow"><span class="sk">Laps</span><span class="sv">${d.laps>=0?"+":""}${d.laps}</span></div><div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;}
-  else if(alive&&info.channels){for(const[ch,d]of Object.entries(info.channels)){if(!d){rows+=`<div class="srow"><span class="sk" style="color:var(--blu)">Ch${ch}</span><span class="sv" style="color:var(--mut)">—</span></div>`;continue;}const pct=((d.deg/360)*100).toFixed(0);rows+=`<div class="srow" style="margin-top:5px"><span class="sk" style="color:var(--blu);font-weight:600">Ch${ch}</span><span class="sv">${parseFloat(d.deg).toFixed(1)}° raw ${d.raw} laps ${d.laps>=0?"+":""}${d.laps}</span></div><div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;}}
-  else if(info.error)rows=`<div class="srow"><span class="sk" style="color:var(--acc)">${info.error}</span></div>`;
-  return`<div class="scard ${alive?"live":"dead"}"><div class="scard-h"><span class="sname">${lbl}</span><span class="sbadge ${alive?"on":""}">${alive?"LIVE":info.error?"ERROR":"NO SENSOR"}</span></div>${rows}</div>`;
+
+function _scard(name, sensorInfo, drInfo) {
+  const lbl   = SLBL[name] || name;
+  const alive = sensorInfo.available;
+
+  // ── sensor portion ──
+  let rows = "";
+  if (alive && sensorInfo.data) {
+    const d = sensorInfo.data, pct = ((d.deg / 360) * 100).toFixed(0);
+    rows = `<div class="srow"><span class="sk">Angle</span><span class="sv">${parseFloat(d.deg).toFixed(1)}°</span></div>
+            <div class="srow"><span class="sk">Raw</span><span class="sv">${d.raw}</span></div>
+            <div class="srow"><span class="sk">Laps</span><span class="sv">${d.laps >= 0 ? "+" : ""}${d.laps}</span></div>
+            <div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;
+  } else if (alive && sensorInfo.channels) {
+    for (const [ch, d] of Object.entries(sensorInfo.channels)) {
+      if (!d) { rows += `<div class="srow"><span class="sk" style="color:var(--blu)">Ch${ch}</span><span class="sv" style="color:var(--mut)">—</span></div>`; continue; }
+      const pct = ((d.deg / 360) * 100).toFixed(0);
+      rows += `<div class="srow" style="margin-top:5px"><span class="sk" style="color:var(--blu);font-weight:600">Ch${ch}</span>
+               <span class="sv">${parseFloat(d.deg).toFixed(1)}° raw ${d.raw} laps ${d.laps >= 0 ? "+" : ""}${d.laps}</span></div>
+               <div class="sarc"><div class="sarc-f" style="width:${pct}%"></div></div>`;
+    }
+  } else if (sensorInfo.error) {
+    rows = `<div class="srow"><span class="sk" style="color:var(--acc)">${sensorInfo.error}</span></div>`;
+  }
+
+  // ── dead-reckoning portion (only for motors that have DR data) ──
+  let drHtml = "";
+  if (drInfo && !drInfo.error) {
+    const estDeg  = drInfo.estimated_deg;
+    const rawAcc  = drInfo.dead_pos;
+    const zeroDeg = drInfo.zero_deg;
+    const minDeg  = drInfo.min_deg;
+    const maxDeg  = drInfo.max_deg;
+    const s2d     = drInfo.speed_to_deg;
+
+    // Only show DR section when sensor is absent (it's the primary position source then)
+    // but always show it so the user can see accumulator drift
+    const estStr  = estDeg !== null ? `${estDeg >= 0 ? "+" : ""}${estDeg.toFixed(1)}°` : "—";
+    const rangeStr = (minDeg !== null && maxDeg !== null) ? `${minDeg}° … ${maxDeg}°` : "unlimited";
+
+    let posBar = "";
+    if (estDeg !== null) posBar = _drBar(estDeg, minDeg, maxDeg);
+
+    drHtml = `<div class="dr-section">
+      <div class="dr-label">Dead-reckoning${drInfo.has_sensor ? " (sensor primary)" : " (open-loop)"}</div>
+      <div class="srow"><span class="sk">Est. position</span><span class="sv" style="color:var(--pur)">${estStr}</span></div>
+      <div class="srow"><span class="sk">Accumulator</span><span class="sv">${rawAcc.toFixed(3)}</span></div>
+      ${zeroDeg !== null ? `<div class="srow"><span class="sk">Zero point</span><span class="sv">${zeroDeg >= 0 ? "+" : ""}${zeroDeg.toFixed(1)}°</span></div>` : ""}
+      <div class="srow"><span class="sk">Travel range</span><span class="sv" style="font-size:9px">${rangeStr}</span></div>
+      ${s2d !== null ? `<div class="srow"><span class="sk">speed_to_deg</span><span class="sv">${s2d}</span></div>` : ""}
+      ${posBar}
+    </div>`;
+  }
+
+  // card class: sensor live → green border; DR-only → purple border; nothing → dead
+  const cardCls = alive ? "live" : (drInfo && !drInfo.error && !alive) ? "dr" : "dead";
+  const badgeCls = alive ? "on" : (drInfo && !drInfo.error && !alive) ? "dr" : "";
+  const badgeTxt = alive ? "LIVE" : (drInfo && !drInfo.error) ? "DR ONLY" : (sensorInfo.error ? "ERROR" : "NO SENSOR");
+
+  return `<div class="scard ${cardCls}">
+    <div class="scard-h">
+      <span class="sname">${lbl}</span>
+      <span class="sbadge ${badgeCls}">${badgeTxt}</span>
+    </div>
+    ${rows}${drHtml}
+  </div>`;
 }
-async function refreshSensors(){
-  const c=document.getElementById("sensorList");if(!c)return;
-  try{const r=await fetch("/api/corner_sensors");const d=await r.json();c.innerHTML=Object.entries(d).map(([n,i])=>_scard(n,i)).join("");}
-  catch(e){c.innerHTML=`<div style="color:var(--acc);font-size:10px;padding:5px 0">Request failed: ${e}</div>`;}
+
+async function refreshSensors() {
+  const c = document.getElementById("sensorList"); if (!c) return;
+  try {
+    const [sr, dr] = await Promise.all([
+      fetch("/api/corner_sensors"),
+      fetch("/api/dead_reckoning"),
+    ]);
+    const [sensors, deadReckon] = await Promise.all([sr.json(), dr.json()]);
+
+    // Merge: all motors that appear in either response
+    const allNames = new Set([...Object.keys(sensors), ...Object.keys(deadReckon)]);
+    let html = "";
+    for (const name of allNames) {
+      const sInfo = sensors[name]     || { available: false };
+      const dInfo = deadReckon[name]  || null;
+      html += _scard(name, sInfo, dInfo);
+    }
+    c.innerHTML = html || `<div style="font-size:10px;color:var(--mut);padding:5px 0">No sensors found.</div>`;
+  } catch(e) {
+    c.innerHTML = `<div style="color:var(--acc);font-size:10px;padding:5px 0">Request failed: ${e}</div>`;
+  }
 }
-const STATUS_COLORS = {
+
+const STATUS_COLORS={
   "STOP":"var(--mut)","FORWARD":"var(--grn)","BACKWARD":"var(--blu)",
   "LEFT":"var(--grn)","RIGHT":"var(--blu)","UP":"var(--grn)","DOWN":"var(--blu)",
   "GRIP":"var(--blu)","GRIPPED":"var(--blu)","OPEN":"var(--yel)",
@@ -1192,33 +1294,21 @@ connect();
 initUI();
 updateHSVLabels();
 
-let _killActive = false;
-
-async function triggerHome() {
-  const btn = document.getElementById("homeBtn");
-  btn.textContent = "⏳ Homing…"; btn.disabled = true;
-  try {
-    await fetch("/api/home", { method: "POST" });
-    addLine("── home_all() triggered ──");
-    setTimeout(() => { btn.textContent = "🏠 Home"; btn.disabled = false; }, 8000);
-  } catch(e) {
-    btn.textContent = "🏠 Home"; btn.disabled = false;
-    addLine("ERROR: home request failed");
-  }
+let _killActive=false;
+async function triggerHome(){
+  const btn=document.getElementById("homeBtn");btn.textContent="⏳ Homing…";btn.disabled=true;
+  try{await fetch("/api/home",{method:"POST"});addLine("── home_all() triggered ──");setTimeout(()=>{btn.textContent="🏠 Home";btn.disabled=false;},8000);}
+  catch(e){btn.textContent="🏠 Home";btn.disabled=false;addLine("ERROR: home request failed");}
 }
-
-async function toggleKill() {
-  _killActive = !_killActive;
-  const btn = document.getElementById("killBtn");
-  try {
-    await fetch("/api/kill", { method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ enabled: _killActive }) });
-    btn.textContent = _killActive ? "💀 KILLED" : "☠ KILL";
-    btn.style.background = _killActive ? "rgba(255,61,90,.3)" : "rgba(255,61,90,.08)";
-    addLine(_killActive ? "── KILL SWITCH ACTIVE ──" : "── kill switch released ──");
-  } catch(e) { _killActive = !_killActive; addLine("ERROR: kill request failed"); }
+async function toggleKill(){
+  _killActive=!_killActive;const btn=document.getElementById("killBtn");
+  try{
+    await fetch("/api/kill",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:_killActive})});
+    btn.textContent=_killActive?"💀 KILLED":"☠ KILL";
+    btn.style.background=_killActive?"rgba(255,61,90,.3)":"rgba(255,61,90,.08)";
+    addLine(_killActive?"── KILL SWITCH ACTIVE ──":"── kill switch released ──");
+  }catch(e){_killActive=!_killActive;addLine("ERROR: kill request failed");}
 }
-
 </script>
 </body>
 </html>
