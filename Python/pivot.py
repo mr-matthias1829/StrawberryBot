@@ -32,11 +32,11 @@ THRESHOLD_MEDIUM = 150
 
 SENSOR_CHANNEL = -1
 
-MIN_DEG: float | None = -5.0
-MAX_DEG: float | None = 320.0
+MIN_DEG: float | None = -19.0
+MAX_DEG: float | None = 70.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
-SPEED_TO_DEG = 0.3
+SPEED_TO_DEG = 0.1
 
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
