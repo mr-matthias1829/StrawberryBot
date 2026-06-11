@@ -20,13 +20,19 @@ position drops more than HOLD_DRIFT_THRESH degrees below the last known
 idle position a short upward pulse (HOLD_SPEED, HOLD_PULSE_SEC) is fired
 to bring it back.  The reference is then reset to the corrected position.
 
+Only sensor channel A is used for hold logic — both servos are mechanically
+linked so a single sensor is sufficient.
+
 Set HOLD_ENABLED = False to disable during testing / without load.
 
 Tuning guide (1 kg load):
-  • Still sags  → increase HOLD_SPEED (try +20 steps) or lower HOLD_DRIFT_THRESH
-  • Overshoots up → decrease HOLD_SPEED or shorten HOLD_PULSE_SEC
-  • Corrects too late → lower HOLD_DRIFT_THRESH (e.g. 0.8)
-  • Servo hums → shorten HOLD_PULSE_SEC; do NOT use continuous low speed
+  • Still sags     → increase HOLD_SPEED (try +20 steps) or lower HOLD_DRIFT_THRESH
+  • Overshoots up  → decrease HOLD_SPEED or shorten HOLD_PULSE_SEC
+  • Corrects late  → lower HOLD_DRIFT_THRESH (e.g. 0.8)
+  • Servo hums     → shorten HOLD_PULSE_SEC; do NOT use continuous low speed
+
+Note: the hold check uses _sensor_mgr directly (not _initialized) so it
+becomes active as soon as the sensor is ready, regardless of init() order.
 """
 
 import threading
@@ -74,7 +80,7 @@ _DIR_CW  = 1 << 10
 # ── Holding torque ─────────────────────────────────────────────────────────────
 HOLD_ENABLED      = True   # set False to disable entirely
 HOLD_DRIFT_THRESH = 1.5    # degrees of sag before a corrective pulse fires
-HOLD_SPEED        = 120     # upward pulse strength  (0–1023, same scale as SPEED_*)
+HOLD_SPEED        = 120    # upward pulse strength  (0–1023, same scale as SPEED_*)
 HOLD_PULSE_SEC    = 0.08   # duration of each corrective pulse in seconds
 
 # =============================================================================
@@ -205,18 +211,24 @@ def _writer() -> None:
         idle = (word_a == 0 and word_b == 0)
 
         # ── Holding torque ────────────────────────────────────────────────────
-        if HOLD_ENABLED and idle and _initialized:
+        # Guard on _sensor_mgr (not _initialized) so this activates as soon
+        # as the sensor is ready, independent of init() completion order.
+        if HOLD_ENABLED and idle and _sensor_mgr is not None:
             reading = _read_sensor(SENSOR_CHANNEL_A)
-            if reading is not None and _sensor_mgr is not None:
+            if reading is not None:
                 current_deg = _sensor_mgr.total_position(reading) - (_zero_deg or 0.0)
 
-                # Capture reference the moment we go idle
+                # Capture reference the first cycle we go idle
                 if _hold_ref_deg is None:
                     _hold_ref_deg = current_deg
+                    print(f"[lift] Hold reference captured: {_hold_ref_deg:.2f}°")
 
                 sag = _hold_ref_deg - current_deg   # positive = dropped below ref
                 if sag >= HOLD_DRIFT_THRESH:
-                    # Brief upward pulse then release back to 0
+                    print(
+                        f"[lift] Hold pulse — "
+                        f"sag={sag:.2f}°  ref={_hold_ref_deg:.2f}°  cur={current_deg:.2f}°"
+                    )
                     pulse = _DIR_CCW | HOLD_SPEED
                     try:
                         motor._write_word(SERVO_ID_A, _REG_SPEED, pulse)
@@ -226,14 +238,15 @@ def _writer() -> None:
                         motor._write_word(SERVO_ID_B, _REG_SPEED, 0)
                     except Exception as e:
                         print(f"[lift] Hold pulse error: {e}")
-                    _hold_ref_deg = current_deg   # reset ref after correcting
+                    _hold_ref_deg = current_deg   # reset ref to corrected position
                     continue   # skip normal write this cycle
             else:
-                # No sensor available — holding torque not possible
-                _hold_ref_deg = None
+                # Sensor read failed this cycle — keep ref, try again next loop
+                pass
         else:
-            # Not idle — clear ref so it is recaptured next time we go idle
-            _hold_ref_deg = None
+            # Not idle or no sensor — clear ref so it is recaptured on next idle
+            if not idle:
+                _hold_ref_deg = None
 
         # ── Normal write ──────────────────────────────────────────────────────
         if word_a >= 0 and word_a != _last_word_a:
@@ -272,7 +285,7 @@ def init() -> None:
     _thread = threading.Thread(target=_writer, daemon=True, name="lift-writer")
     _thread.start()
 
-    _init_sensors()
+    _init_sensors()   # sets _sensor_mgr — writer can use hold logic from here
 
     reading = _read_sensor(SENSOR_CHANNEL_A)
     if reading is not None:
