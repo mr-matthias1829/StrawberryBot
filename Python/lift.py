@@ -41,8 +41,8 @@ THRESHOLD_MEDIUM = 150
 SENSOR_CHANNEL_A = 0
 SENSOR_CHANNEL_B = 0
 
-MIN_DEG: float | None = -500.0
-MAX_DEG: float | None = 500.0
+MIN_DEG: float | None = -5.0
+MAX_DEG: float | None = 320.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
 SPEED_TO_DEG = 0.3
@@ -160,10 +160,16 @@ _last_write_time: float         = 0.0
 def _writer() -> None:
     global _last_word_a, _last_word_b, _last_write_time
     while not _stop_flag:
-        if not _event.wait(timeout=0.1):
-            continue
-        _event.clear()
+        time.sleep(0.05)
 
+        now = time.monotonic()
+        dt  = now - _last_write_time if _last_write_time else 0.0
+        _last_write_time = now
+
+        if _last_word_a >= 0 and dt > 0:
+            accumulate(_dead_pos, _last_word_a, dt)
+
+        _event.clear()
         with _lock:
             word_a = _pending_word_a
             word_b = _pending_word_b
@@ -171,13 +177,8 @@ def _writer() -> None:
         if motor.is_locked():
             continue
 
-        now = time.monotonic()
-        dt  = now - _last_write_time if _last_write_time else 0.0
-
         if word_a >= 0 and word_a != _last_word_a:
             try:
-                if _last_word_a >= 0 and dt > 0:
-                    accumulate(_dead_pos, _last_word_a, dt)
                 motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
                 _last_word_a = word_a
             except Exception as e:
@@ -189,8 +190,6 @@ def _writer() -> None:
                 _last_word_b = word_b
             except Exception as e:
                 print(f"[lift] Serial error (servo {SERVO_ID_B}): {e}")
-
-        _last_write_time = now
 
 # =============================================================================
 # LIFECYCLE

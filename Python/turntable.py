@@ -155,23 +155,26 @@ _last_write_time: float   = 0.0
 def _writer() -> None:
     global _last_word, _last_write_time
     while not _stop_flag:
-        if not _event.wait(timeout=0.1):
-            continue
+        time.sleep(0.05)
+
+        now = time.monotonic()
+        dt  = now - _last_write_time if _last_write_time else 0.0
+        _last_write_time = now
+
+        if _last_word >= 0 and dt > 0:
+            accumulate(_dead_pos, _last_word, dt)
+
         _event.clear()
         with _lock:
             word = _pending_word
+
         if word < 0 or word == _last_word:
             continue
         if motor.is_locked():
             continue
         try:
-            now = time.monotonic()
-            dt  = now - _last_write_time if _last_write_time else 0.0
-            if _last_word >= 0 and dt > 0:
-                accumulate(_dead_pos, _last_word, dt)
             motor._write_word(SERVO_ID, _REG_SPEED, word)
-            _last_word       = word
-            _last_write_time = now
+            _last_word = word
         except Exception as e:
             print(f"[turntable] Serial error: {e}")
 
