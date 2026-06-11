@@ -526,9 +526,9 @@ class RobotController:
 
         # ── Turntable (horizontal) ────────────────────────────────────────────
         if _HAS_TURNTABLE:
-            tt_msg = _turntable.update(dx)
+            tt_msg = _turntable.update(-dx)
         else:
-            tt_msg = f"TURNTABLE dx={dx}"
+            tt_msg = f"TURNTABLE dx={-dx}"
 
         # ── Lift (vertical) ───────────────────────────────────────────────────
         if _HAS_LIFT:

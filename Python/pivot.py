@@ -21,7 +21,7 @@ from _homing_utils import (
 # =============================================================================
 
 SERVO_ID  = 2
-DEAD_ZONE = 5
+DEAD_ZONE = 10
 
 SPEED_SLOW   = 40
 SPEED_MEDIUM = 80
