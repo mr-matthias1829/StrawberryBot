@@ -55,8 +55,8 @@ _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
 _REG_SPEED     = 32
 
-_DIR_CCW = 1 << 10
-_DIR_CW  = 0
+_DIR_CCW = 0
+_DIR_CW  = 1 << 10
 
 # =============================================================================
 # CORNER SENSOR
