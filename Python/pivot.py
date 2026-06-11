@@ -23,17 +23,17 @@ from _homing_utils import (
 SERVO_ID  = 2
 DEAD_ZONE = 25
 
-SPEED_SLOW   = 150
-SPEED_MEDIUM = 300
-SPEED_FAST   = 500
+SPEED_SLOW   = 75
+SPEED_MEDIUM = 150
+SPEED_FAST   = 250
 
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
 
 SENSOR_CHANNEL = -1
 
-MIN_DEG: float | None = -45.0
-MAX_DEG: float | None = 45.0
+MIN_DEG: float | None = -500.0
+MAX_DEG: float | None = 500.0
 
 # Dead-reckoning limit conversion: degrees per (speed-unit × second).
 SPEED_TO_DEG = 0.3
