@@ -21,11 +21,11 @@ from _homing_utils import (
 # =============================================================================
 
 SERVO_ID  = 2
-DEAD_ZONE = 25
+DEAD_ZONE = 5
 
-SPEED_SLOW   = 75
-SPEED_MEDIUM = 150
-SPEED_FAST   = 250
+SPEED_SLOW   = 40
+SPEED_MEDIUM = 80
+SPEED_FAST   = 160
 
 THRESHOLD_SLOW   = 50
 THRESHOLD_MEDIUM = 150
