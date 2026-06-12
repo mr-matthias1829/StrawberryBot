@@ -1,0 +1,116 @@
+@startuml
+title Component Diagram - Aardbeiplukrobot
+
+!theme plain
+
+package "Input Layer" {
+    component "UDP Receiver" as UDP_Receiver
+    component "Control Mode" as ControlMode
+    component "Camera Capture" as CameraCapture
+}
+
+package "Detection Layer" {
+    component "Fusion Engine" as FusionEngine
+    component "AI Detector (YOLO)" as AIDetector
+    component "CV Detector (OpenCV)" as CVDectector
+    component "CV Config" as CVConfig
+    component "Detection Worker" as DetectionWorker
+}
+
+package "Tracking & Control Layer" {
+    component "Robot Controller" as RobotController
+    component "Tracked Object" as TrackedObject
+    component "Target Selection" as TargetSelector
+}
+
+package "Motor Layer" {
+    component "Motor Subsystem" as MotorSubsystem
+    component "Turntable (ID 13)" as Turntable
+    component "Lift (ID 3+4)" as Lift
+    component "Arm (ID 5)" as Arm
+    component "Pivot (ID 2)" as Pivot
+    component "Gripper (ID 8)" as Gripper
+}
+
+package "Sensor Layer" {
+    component "Corner Sensor Manager" as SensorManager
+    component "AS5600 Lift" as EncLift
+    component "AS5600 Turntable" as EncTurntable
+    component "AS5600 Arm" as EncArm
+    component "AS5600 Gripper" as EncGripper
+}
+
+package "Web & UI Layer" {
+    component "Web Server" as WebServer
+    component "Dashboard" as Dashboard
+    component "Servo Status" as ServoStatus
+}
+
+package "Utilities" {
+    component "Homing Utils" as HomingUtils
+    component "Configuration" as Config
+}
+
+' === relaties (alleen simpele pijlen) ===
+CameraCapture --> FusionEngine
+UDP_Receiver --> ControlMode
+
+UDP_Receiver --> Turntable
+UDP_Receiver --> Lift
+UDP_Receiver --> Arm
+UDP_Receiver --> Pivot
+UDP_Receiver --> Gripper
+
+FusionEngine --> RobotController
+FusionEngine --> DetectionWorker
+
+DetectionWorker --> AIDetector
+DetectionWorker --> CVDectector
+
+CVDectector --> CVConfig
+
+RobotController --> Turntable
+RobotController --> Lift
+RobotController --> Arm
+RobotController --> Pivot
+RobotController --> Gripper
+
+Turntable --> MotorSubsystem
+Lift --> MotorSubsystem
+Arm --> MotorSubsystem
+Pivot --> MotorSubsystem
+Gripper --> MotorSubsystem
+
+SensorManager --> EncLift
+SensorManager --> EncTurntable
+SensorManager --> EncArm
+SensorManager --> EncGripper
+
+Turntable --> HomingUtils
+Lift --> HomingUtils
+Arm --> HomingUtils
+Pivot --> HomingUtils
+Gripper --> HomingUtils
+
+AIDetector --> Config
+CVDectector --> Config
+
+WebServer --> FusionEngine
+WebServer --> CVConfig
+WebServer --> Config
+WebServer --> ControlMode
+WebServer --> SensorManager
+WebServer --> ServoStatus
+
+Dashboard --> WebServer
+
+note right of FusionEngine
+  AUTONOME MODUS:
+  Camera -> detectie -> tracking -> motor
+
+  MANUAL MODUS:
+  ESP32 UDP -> directe motorsturing
+  Fusion Engine wordt overgeslagen
+end note
+
+@enduml

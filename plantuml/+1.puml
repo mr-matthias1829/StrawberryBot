@@ -1,0 +1,45 @@
+@startuml
+:"Raspberry pi (robot)":
+:Persoon:
+:"esp32 (controller)":
+:Camera:
+("Aardbeien herkennen")
+:"Raspberry pi (robot)": -- ("Aardbeien herkennen")
+("Aardbeien herkennen") ..> :Camera:
+("Servo's zelf aansturen")
+:"Raspberry pi (robot)": -- ("Servo's zelf aansturen")
+("Servo's zelf aansturen") ..> :Camera:
+("Input geven")
+:Persoon: -- ("Input geven")
+("Input geven") ..> :"esp32 (controller)":
+:hoeksensoren:
+:Grijper:
+:"Servo's voor beweging":
+("Servo's zelf aansturen") -- :"Servo's voor beweging":
+("Servo's zelf aansturen") -- :Grijper:
+("Bepalen wanneer te grijpen")
+:"Raspberry pi (robot)": -- ("Bepalen wanneer te grijpen")
+:Webserver:
+("home en killswitch")
+:Webserver: -- ("home en killswitch")
+:Persoon: -- ("home en killswitch")
+("Bepalen wanneer te grijpen") -- :Grijper:
+("Bepalen wanneer te grijpen") ..> ("Aardbeien herkennen")
+("Camera feed sturen")
+:Camera: -- ("Camera feed sturen")
+("Camera feed sturen") -- :Webserver:
+("limiten en 0 punten respecteren")
+:"esp32 (controller)": -- ("limiten en 0 punten respecteren")
+("limiten en 0 punten respecteren") -- :hoeksensoren:
+:"Raspberry pi (robot)": -- ("limiten en 0 punten respecteren")
+("Grijper open of sluiten ")
+:"esp32 (controller)": -- ("Grijper open of sluiten ")
+("Grijper open of sluiten ") -- :Grijper:
+:"Aarbei(plant)":
+("Bepalen wanneer te grijpen") ..> :"Aarbei(plant)":
+("Aardbeien herkennen") ..> :"Aarbei(plant)":
+("Aardbeien herkennen") ..> :"Servo's voor beweging":
+
+note right: Automated
+note right: Manual
+@enduml

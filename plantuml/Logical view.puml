@@ -1,0 +1,631 @@
+@startuml
+class FusionEngine <<main>> <<main>>{
+  -_worker : DetectionWorker
+  -tracked_objects : Dictionary
+  -next_id : int
+  -frame_count : int
+  -detect_count : int
+  -last_confirmed_hits : List
+  -last_possible_hits : List
+  -detectionWorker : DetectionWorker
+  -trackedObjects : Dictionary
+  -nextId : int
+  -frameCount : int
+  -detectCount : int
+  -lastConfirmedHits : List
+  -lastPossibleHits : List
+  +process_frame(frame:numpy.ndarray) : Tuple
+  +shutdown() : void
+  +processFrame(frame:numpy.ndarray) : Tuple
+  +shutdown() : void
+}
+class RobotController {
+  -current_target : RobotTarget
+  -_ghost_frames : int
+  -_gripper_containment_frames : int
+  -_last_target_id : int
+  -_arm_extending : boolean
+  -_smooth_dx : float
+  -_smooth_dy : float
+  -currentTarget : RobotTarget
+  -ghostFrames : int
+  -gripperContainmentFrames : int
+  -lastTargetId : int
+  -armExtending : boolean
+  -smoothDx : float
+  -smoothDy : float
+  +choose_target(detections:List, gripper_x:int, gripper_y:int) : RobotTarget
+  +generate_dx(gripper_x:int) : int
+  +generate_dy(gripper_y:int) : int
+  +drive_hardware(gripper_x:int, gripper_y:int) : void
+  +ready_to_grab(gripper_x:int, gripper_y:int) : boolean
+  +get_gripper_bbox(gripper_x:int, gripper_y:int) : Tuple
+  +is_detection_fully_contained(det:Detection, bbox:Tuple) : boolean
+  +estimate_depth(det:Detection) : float
+  +chooseTarget(detections:List, gripperX:int, gripperY:int) : RobotTarget
+  +generateDx(gripperX:int) : int
+  +generateDy(gripperY:int) : int
+  +driveHardware(gripperX:int, gripperY:int) : void
+  +readyToGrab(gripperX:int, gripperY:int) : boolean
+  +getGripperBbox(gripperX:int, gripperY:int) : Tuple
+  +isDetectionFullyContained(det:Detection, bbox:Tuple) : boolean
+  +estimateDepth(det:Detection) : float
+}
+class AIDetector {
+  -model : YOLO
+  +detect(frame:numpy.ndarray, conf_threshold:float) : List
+  +detect(frame:numpy.ndarray, confThreshold:float) : List
+}
+class CVDectector {
+  +detect(frame:numpy.ndarray) : Tuple
+  +cv_score_crop(frame:numpy.ndarray, box:Tuple) : Dictionary
+  +detect(frame:numpy.ndarray) : Tuple
+  +cvScoreCrop(frame:numpy.ndarray, box:Tuple) : Dictionary
+}
+class CornerSensorManager {
+  -bus : SMBus
+  -channels : Tuple
+  -_laps : Dictionary
+  -_prev_deg : Dictionary
+  -_direction : Dictionary
+  -laps : Dictionary
+  -prevDeg : Dictionary
+  -direction : Dictionary
+  +read_sensor(ch:int) : Dictionary
+  +read_sensor_by_index(index:int) : Dictionary
+  +read_all() : Dictionary
+  +channel_has_sensor(ch:int) : boolean
+  +get_laps(ch:int) : int
+  +reset_laps(ch:int) : void
+  +monitor(delay:float) : void
+  +total_position(reading:Dictionary) : float
+  +readSensor(channel:int) : Dictionary
+  +readSensorByIndex(index:int) : Dictionary
+  +readAll() : Dictionary
+  +channelHasSensor(channel:int) : boolean
+  +getLaps(channel:int) : int
+  +resetLaps(channel:int) : void
+  +monitor(delay:float) : void
+  +totalPosition(reading:Dictionary) : float
+}
+class Capture {
+  -rtsp_url : String
+  -label : String
+  -cap : VideoCapture
+  -frame : numpy.ndarray
+  -running : boolean
+  -lock : Lock
+  -thread : Thread
+  -rtspUrl : String
+  +read() : numpy.ndarray
+  +release() : void
+  +read() : numpy.ndarray
+  +release() : void
+}
+class DetectionWorker {
+  -_frame_q : Queue
+  -_zoom_q : Queue
+  -_lock : Lock
+  -_stop : Event
+  -_ai_dets : List
+  -_cv_dets : List
+  -_mask : numpy.ndarray
+  -_zoom_results : List
+  -frameQueue : Queue
+  -zoomQueue : Queue
+  -lock : Lock
+  -stopFlag : Event
+  -aiDetections : List
+  -cvDetections : List
+  -mask : numpy.ndarray
+  -zoomResults : List
+  +push_frame(frame:numpy.ndarray, small:numpy.ndarray) : void
+  +push_zoom(frame:numpy.ndarray, box:Tuple, source:str) : void
+  +read_frame() : Tuple
+  +read_zoom() : List
+  +stop() : void
+  +pushFrame(frame:numpy.ndarray, small:numpy.ndarray) : void
+  +pushZoom(frame:numpy.ndarray, box:Tuple, source:String) : void
+  +readFrame() : Tuple
+  +readZoom() : List
+  +stop() : void
+}
+class Detection {
+  +x1 : int
+  +y1 : int
+  +x2 : int
+  +y2 : int
+  +confidence : float
+  +source : str
+  +label : str
+  +class_id : int
+  +classId : int
+  +is_targetable() : boolean
+  +color() : Tuple
+  +class_name() : str
+  +isTargetable() : boolean
+  +color() : Tuple
+  +className() : String
+}
+class TrackedObject {
+  +id : int
+  +detection : Detection
+  +seen_count : int
+  +missed_count : int
+  +fused_confidence : float
+  +first_seen : float
+  -_vx : float
+  -_vy : float
+  -_last_cx : float
+  -_last_cy : float
+  -_last_update_time : float
+  -_pos_history : List
+  +seenCount : int
+  +missedCount : int
+  +fusedConfidence : float
+  +firstSeen : float
+  -velocityX : float
+  -velocityY : float
+  -lastCenterX : float
+  -lastCenterY : float
+  -lastUpdateTime : float
+  -positionHistory : List
+  +update(new_det:Detection) : void
+  +miss() : void
+  +predicted_box(now:float) : Tuple
+  +is_confirmed() : boolean
+  +is_active() : boolean
+  +update(newDetection:Detection) : void
+  +miss() : void
+  +predictedBox(now:float) : Tuple
+  +isConfirmed() : boolean
+  +isActive() : boolean
+}
+class RobotTarget {
+  +detection : Detection
+  +center_x : int
+  +center_y : int
+  +distance : float
+  +depth_score : float
+  +depth_units : float
+  +centerX : int
+  +centerY : int
+  +depthScore : float
+  +depthUnits : float
+}
+class "Motor subsystem" {
+  -private -- : -
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +home_all() : void
+  {static} +is_locked() : void
+  {static} +_write_word() : void
+  {static} +_write_byte() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +home_all() : void
+  {static} +is_locked() : void
+  {static} +_write_word() : void
+  {static} +_write_byte() : void
+}
+class Turntable {
+  -- : int
+  -_dead_pos : list
+  -_zero_deg : float
+  -_initialized : boolean
+  -_pending_word : int
+  -_last_word : int
+  -_lock : Lock
+  -_stop_flag : boolean
+  -initialized : boolean
+  -pendingWord : int
+  -lastWord : int
+  -deadPos : float
+  -zeroDeg : float
+  -lock : Lock
+  -stopFlag : boolean
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dx:int) : void
+  {static} +spin_left() : void
+  {static} +spin_right() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dx:int) : void
+  {static} +spin_left() : void
+  {static} +spin_right() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dx:int) : String
+  +spin_left(speed:int) : Dictionary
+  +spin_right(speed:int) : Dictionary
+  +stop() : void
+  +get_dead_reckoning() : Dictionary
+  +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dx:int) : String
+  +spinLeft(speed:int) : Dictionary
+  +spinRight(speed:int) : Dictionary
+  +stop() : void
+  +getDeadReckoning() : Dictionary
+  +home() : void
+}
+class Lift {
+  -- : int
+  -_dead_pos : list
+  -_zero_deg : float
+  -_initialized : boolean
+  -_pending_word_a : int
+  -_pending_word_b : int
+  -_last_word_a : int
+  -_last_word_b : int
+  -_lock : Lock
+  -_stop_flag : boolean
+  -initialized : boolean
+  -pendingWordA : int
+  -pendingWordB : int
+  -lastWordA : int
+  -lastWordB : int
+  -deadPos : float
+  -zeroDeg : float
+  -lock : Lock
+  -stopFlag : boolean
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dy:int) : void
+  {static} +move_up() : void
+  {static} +move_down() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dy:int) : void
+  {static} +move_up() : void
+  {static} +move_down() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dy:int) : String
+  +move_up(speed:int) : Dictionary
+  +move_down(speed:int) : Dictionary
+  +stop() : void
+  +get_dead_reckoning() : Dictionary
+  +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dy:int) : String
+  +moveUp(speed:int) : Dictionary
+  +moveDown(speed:int) : Dictionary
+  +stop() : void
+  +getDeadReckoning() : Dictionary
+  +home() : void
+}
+class Arm {
+  -- : int
+  -_dead_pos : list
+  -_zero_deg : float
+  -_initialized : boolean
+  -_pending_word : int
+  -_last_word : int
+  -_lock : Lock
+  -_stop_flag : boolean
+  -initialized : boolean
+  -pendingWord : int
+  -lastWord : int
+  -deadPos : float
+  -zeroDeg : float
+  -lock : Lock
+  -stopFlag : boolean
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dz:int) : void
+  {static} +move_forward() : void
+  {static} +move_backward() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dz:int) : void
+  {static} +move_forward() : void
+  {static} +move_backward() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dz:int) : String
+  +move_forward(speed:int) : Dictionary
+  +move_backward(speed:int) : Dictionary
+  +stop() : void
+  +get_dead_reckoning() : Dictionary
+  +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dz:int) : String
+  +moveForward(speed:int) : Dictionary
+  +moveBackward(speed:int) : Dictionary
+  +stop() : void
+  +getDeadReckoning() : Dictionary
+  +home() : void
+}
+class Pivot {
+  -- : int
+  -_dead_pos : list
+  -_zero_deg : float
+  -_initialized : boolean
+  -_pending_word : int
+  -_last_word : int
+  -_lock : Lock
+  -_stop_flag : boolean
+  -initialized : boolean
+  -pendingWord : int
+  -lastWord : int
+  -deadPos : float
+  -zeroDeg : float
+  -lock : Lock
+  -stopFlag : boolean
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dp:int) : void
+  {static} +rotate_up() : void
+  {static} +rotate_down() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +update(dp:int) : void
+  {static} +rotate_up() : void
+  {static} +rotate_down() : void
+  {static} +stop() : void
+  {static} +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dp:int) : String
+  +rotate_up(speed:int) : Dictionary
+  +rotate_down(speed:int) : Dictionary
+  +stop() : void
+  +get_dead_reckoning() : Dictionary
+  +_home() : void
+  +init() : void
+  +shutdown() : void
+  +update(dp:int) : String
+  +rotateUp(speed:int) : Dictionary
+  +rotateDown(speed:int) : Dictionary
+  +stop() : void
+  +getDeadReckoning() : Dictionary
+  +home() : void
+}
+class Gripper {
+  -- : int
+  -_state : str
+  -_gripper_open : bool
+  -_initialized : boolean
+  -_pending_action : String
+  -_lock : Lock
+  -_stop_flag : boolean
+  -initialized : boolean
+  -state : String
+  -isGripperOpen : boolean
+  -pendingAction : String
+  -lock : Lock
+  -stopFlag : boolean
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +command(action:int) : void
+  {static} +grip() : void
+  {static} +open_gripper() : void
+  {static} +get_state() : void
+  {static} +_home() : void
+  {static} +init() : void
+  {static} +shutdown() : void
+  {static} +command(action:int) : void
+  {static} +grip() : void
+  {static} +open_gripper() : void
+  {static} +get_state() : void
+  {static} +_home() : void
+  +init() : void
+  +shutdown() : void
+  +command(action:String) : Dictionary
+  +grip() : Dictionary
+  +open_gripper() : Dictionary
+  +get_state() : String
+  +is_open() : boolean
+  +is_gripped() : boolean
+  +_home() : void
+  +init() : void
+  +shutdown() : void
+  +command(action:String) : Dictionary
+  +grip() : Dictionary
+  +open() : Dictionary
+  +getState() : String
+  +isOpen() : boolean
+  +isGripped() : boolean
+  +home() : void
+}
+class ManualController {
+  -- : int
+  -_running : bool
+  -_thread : Thread
+  -_sock : socket
+  -_last_packet_time : float
+  -_gripper_open : boolean
+  -_grip_btn_prev : int
+  -running : boolean
+  -thread : Thread
+  -socket : Socket
+  -lastPacketTime : float
+  -isGripperOpen : boolean
+  -gripButtonPrev : int
+  {static} +start() : void
+  {static} +stop() : void
+  {static} +is_active() : void
+  {static} +start() : void
+  {static} +stop() : void
+  {static} +is_active() : void
+  +start() : void
+  +stop() : void
+  +is_active() : boolean
+  +start() : void
+  +stop() : void
+  +isActive() : boolean
+}
+class ControlMode {
+  -- : int
+  -_mode : str
+  -_callbacks : list
+  -_lock : Lock
+  -mode : String
+  -lock : Lock
+  -callbacks : List
+  {static} +get_mode() : void
+  {static} +is_manual() : void
+  {static} +is_autonomous() : void
+  {static} +start() : void
+  {static} +stop() : void
+  {static} +on_change(callback:int) : void
+  {static} +get_mode() : void
+  {static} +is_manual() : void
+  {static} +is_autonomous() : void
+  {static} +start() : void
+  {static} +stop() : void
+  {static} +on_change(callback:int) : void
+  +get_mode() : String
+  +is_manual() : boolean
+  +is_autonomous() : boolean
+  +start() : void
+  +stop() : void
+  +on_change(callback:Callable) : void
+  +getMode() : String
+  +isManual() : boolean
+  +isAutonomous() : boolean
+  +start() : void
+  +stop() : void
+  +onChange(callback:Callable) : void
+}
+class WebServer {
+  {static} +start(host:int, port:int) : void
+  {static} +push_frame(bgr:int) : void
+  {static} +push_log(line:int) : void
+  {static} +is_killed() : void
+  {static} +start(host:int, port:int) : void
+  {static} +push_frame(bgr:int) : void
+  {static} +push_log(line:int) : void
+  {static} +is_killed() : void
+  +start(host:String, port:int) : void
+  +push_frame(bgr:numpy.ndarray) : void
+  +push_log(line:String) : void
+  +is_killed() : boolean
+  +start(host:String, port:int) : void
+  +pushFrame(bgr:numpy.ndarray) : void
+  +pushLog(line:String) : void
+  +isKilled() : boolean
+}
+class CVConfig {
+  +h1_low : int
+  +h1_high : int
+  +h2_low : int
+  +h2_high : int
+  +sat_min : int
+  +val_min : int
+  +val_max : int
+  +contour_min_circularity : float
+  +max_aspect_ratio : float
+  +watershed_fg_thresh : float
+  +nms_iou_threshold : float
+  -- : int
+  +h1Low : int
+  +h1High : int
+  +h2Low : int
+  +h2High : int
+  +satMin : int
+  +valMin : int
+  +valMax : int
+  +contourMinCircularity : float
+  +maxAspectRatio : float
+  +watershedFgThresh : float
+  +nmsIouThreshold : float
+  +to_hsv_arrays() : void
+  +sv_bounds() : void
+  +to_dict() : void
+  {static} +from_dict(d:int) : void
+  +to_hsv_arrays() : void
+  +sv_bounds() : void
+  +to_dict() : void
+  {static} +from_dict(d:int) : void
+  +to_hsv_arrays() : Tuple
+  +sv_bounds() : Tuple
+  +to_dict() : Dictionary
+  +from_dict(d:Dictionary) : CVConfig
+  +toHsvArrays() : Tuple
+  +svBounds() : Tuple
+  +toDict() : Dictionary
+  +fromDict(d:Dictionary) : CVConfig
+}
+class Config {
+  {static} +YOLO_BASE_THRESHOLD : float
+  {static} +CV_BASE_THRESHOLD : float
+  {static} +RED_LOWER1, RED_UPPER1 : np.array
+  {static} +RED_LOWER2, RED_UPPER2 : np.array
+  {static} +GRIPPER_BB_WIDTH : int
+  {static} +GRIPPER_BB_HEIGHT : int
+  {static} +GRIPPER_CONTAINMENT_FRAMES : int
+  {static} +AUTO_MODE_ALLOW_MOVE : bool
+  +... : int
+  +CV_DIRECT_ACCEPT_THRESHOLD : float
+  +HIGH_AI_CONFIDENCE : float
+  +LOW_AI_CONFIDENCE : float
+  +RED_LOWER1 : numpy.ndarray
+  +RED_UPPER1 : numpy.ndarray
+  +RED_LOWER2 : numpy.ndarray
+  +RED_UPPER2 : numpy.ndarray
+  +GRIPPER_AUTO_GRIP_ENABLED : boolean
+  +MIN_CONTOUR_AREA : int
+  +MAX_RECHECKS : int
+  +ZOOM_SCALE_FACTOR : float
+}
+FusionEngine --> RobotController : gebruikt <
+FusionEngine --> AIDetector : gebruikt <
+FusionEngine --> CVDectector : gebruikt <
+FusionEngine --> DetectionWorker : bezit <
+FusionEngine --> CornerSensorManager : gebruikt (optioneel) <
+RobotController --> Turntable : aanstuurt <
+RobotController --> Lift : aanstuurt <
+RobotController --> Arm : aanstuurt <
+RobotController --> Pivot : aanstuurt <
+RobotController --> Gripper : aanstuurt <
+RobotController --> RobotTarget : selecteert <
+AIDetector --> Detection : produceert <
+CVDectector --> Detection : produceert <
+DetectionWorker --> Detection : verwerkt <
+TrackedObject --> Detection : bevat <
+FusionEngine --> TrackedObject : beheert <
+Turntable --> "Motor subsystem" : gebruikt (lage level) <
+Lift --> "Motor subsystem" : gebruikt <
+Arm --> "Motor subsystem" : gebruikt <
+Pivot --> "Motor subsystem" : gebruikt <
+Gripper --> "Motor subsystem" : gebruikt <
+ManualController --> ControlMode : schakelt via _set_mode() <
+ManualController --> Turntable : stuurt aan in MANUAL <
+ManualController --> Lift : stuurt aan in MANUAL <
+ManualController --> Arm : stuurt aan in MANUAL <
+ManualController --> Pivot : stuurt aan in MANUAL <
+ManualController --> Gripper : stuurt aan in MANUAL <
+ControlMode --> Turntable : bepaalt toegang <
+ControlMode --> Lift : bepaalt toegang <
+ControlMode --> Arm : bepaalt toegang <
+ControlMode --> Pivot : bepaalt toegang <
+ControlMode --> Gripper : bepaalt toegang <
+WebServer --> FusionEngine : leest status (via REST API) <
+WebServer --> CVConfig : wijzigt (live via dashboard) <
+WebServer --> Config : wijzigt (live via dashboard) <
+WebServer --> ControlMode : leest status <
+WebServer --> CornerSensorManager : leest (via REST API) <
+WebServer --> "Motor subsystem" : activeert homing (via REST API) <
+Capture --> WebServer : levert videoframes (via push_frame) <
+FusionEngine --> Capture : leest frame <
+@enduml

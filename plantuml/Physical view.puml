@@ -1,0 +1,82 @@
+@startuml
+title Deployment Diagram - Aardbeiplukrobot
+
+!theme plain
+
+node "ESP32 Controller" as ESP32
+
+node "Raspberry Pi 5" as RPI5 {
+    component "UDP Listener" as UDP_RX
+    component "Control Mode" as CtrlMode
+    component "Fusion Engine" as Fusion
+    component "Robot Controller" as RobotCtrl
+    component "Web Server" as WebServer
+    component "AI Detector" as AIDetector
+    component "CV Detector" as CVDectector
+    component "Motor Subsystem" as MotorSub
+    component "Turntable" as TurntableComp
+    component "Lift" as LiftComp
+    component "Arm" as ArmComp
+    component "Pivot" as PivotComp
+    component "Gripper" as GripperComp
+    component "Sensor Manager" as SensorMgr
+    component "Camera Capture" as CaptureComp
+}
+
+node "USB Camera" as Camera
+
+node "Dynamixel Servos" as Servos {
+    artifact "Serial Bus"
+}
+
+node "TCA9548A" as TCA
+
+node "AS5600 Encoders" as Encoders
+
+' verbindingen
+ESP32 -[#blue]-> RPI5 : "WiFi UDP port 5005"
+
+Camera -[#green]-> CaptureComp : "RTSP"
+
+CaptureComp --> Fusion
+Fusion --> RobotCtrl
+RobotCtrl --> TurntableComp
+RobotCtrl --> LiftComp
+RobotCtrl --> ArmComp
+RobotCtrl --> PivotComp
+RobotCtrl --> GripperComp
+
+UDP_RX --> CtrlMode
+UDP_RX --> TurntableComp
+UDP_RX --> LiftComp
+UDP_RX --> ArmComp
+UDP_RX --> PivotComp
+UDP_RX --> GripperComp
+
+TurntableComp --> MotorSub
+LiftComp --> MotorSub
+ArmComp --> MotorSub
+PivotComp --> MotorSub
+GripperComp --> MotorSub
+
+MotorSub -[#red]-> Servos : "UART /dev/ttyAMA0"
+
+SensorMgr -[#purple]-> TCA : "I2C bus 1"
+TCA -[#purple]-> Encoders
+
+WebServer --> Fusion
+WebServer --> CtrlMode
+WebServer --> SensorMgr
+
+note right of ESP32
+  Joysticks + knop
+  JSON over UDP
+end note
+
+note bottom of RPI5
+  Raspberry Pi 5 - 16GB
+  Raspberry Pi OS
+  Python 3.11
+end note
+
+@enduml

@@ -1,0 +1,189 @@
+@startuml
+title Sequence Diagram - Aardbeienpluk in Auto Mode
+
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "Gebruiker" as User
+participant "Web Dashboard" as Web
+participant "Camera Capture" as Cam
+participant "Fusion Engine" as Fusion
+participant "AI Detector" as AI
+participant "CV Detector" as CV
+participant "Robot Controller" as Robot
+participant "Turntable" as TT
+participant "Lift" as Lift
+participant "Arm" as Arm
+participant "Gripper" as Grip
+participant "Motor Subsystem" as Motor
+participant "AS5600 Sensor" as Sensor
+
+== Opstarten (auto mode) ==
+
+User -> Web : start robot
+Web -> Fusion : init() / start
+Fusion -> Fusion : zet mode = AUTONOMOUS
+note right of Fusion : ControlMode.is_autonomous() = true
+
+== Continue detectielus ==
+
+loop Elke frame (20-30 fps)
+    Cam -> Fusion : push_frame(frame)
+    activate Fusion
+
+    Fusion -> AI : detect(small_frame)
+    activate AI
+    AI --> Fusion : AI detections (bbox + confidence)
+    deactivate AI
+
+    Fusion -> CV : detect(small_frame)
+    activate CV
+    CV -> CV : build red HSV mask\ncontour detection\nscore each blob
+    CV --> Fusion : CV detections (bbox + confidence)
+    deactivate CV
+
+    Fusion -> Fusion : fuse AI + CV\n(overlap / IoU matching)
+    Fusion -> Fusion : update tracking\n(persistentie / miss count)
+
+    alt Geen target gevonden
+        Fusion -> Robot : choose_target(empty)
+        Robot --> Fusion : None
+        note right of Fusion : wacht op volgende frame
+
+    else Target gevonden
+        Fusion -> Robot : choose_target(detections)
+        activate Robot
+        Robot -> Robot : selecteer beste target\n(op basis van distance + depth)
+        Robot --> Fusion : RobotTarget (center_x, center_y)
+
+        Robot -> Robot : bereken dx, dy, dz\n(offset t.o.v. gripper center)
+
+        == Horizontaal uitlijnen (X-as) ==
+
+        alt dx > threshold (rechts)
+            Robot -> TT : spin_right(speed)
+            TT -> Motor : _write_word(ID13, speed, DIR_CW)
+            Motor -> TT : ok
+            TT --> Robot : "TURNTABLE RIGHT"
+
+        else dx < -threshold (links)
+            Robot -> TT : spin_left(speed)
+            TT -> Motor : _write_word(ID13, speed, DIR_CCW)
+            Motor -> TT : ok
+            TT --> Robot : "TURNTABLE LEFT"
+
+        else |dx| <= threshold
+            Robot -> TT : stop()
+            TT -> Motor : _write_word(ID13, 0)
+            TT --> Robot : "TURNTABLE STOP"
+        end
+
+        == Verticaal uitlijnen (Y-as) ==
+
+        alt dy > threshold (omhoog? afhankelijk van assenstelsel)
+            Robot -> Lift : move_up(speed)
+            Lift -> Motor : _write_word(ID3+4, speed, DIR_CCW)
+            Motor -> Lift : ok
+            Lift --> Robot : "LIFT UP"
+
+        else dy < -threshold (omlaag)
+            Robot -> Lift : move_down(speed)
+            Lift -> Motor : _write_word(ID3+4, speed, DIR_CW)
+            Motor -> Lift : ok
+            Lift --> Robot : "LIFT DOWN"
+
+        else |dy| <= threshold
+            Robot -> Lift : stop()
+            Lift -> Motor : _write_word(ID3+4, 0)
+            Lift --> Robot : "LIFT STOP"
+        end
+
+        deactivate Robot
+
+        == Check of target in gripper bbox is ==
+
+        Robot -> Robot : is_detection_fully_contained(target, gripper_bbox)
+
+        alt Target volledig in gripper bbox
+            Robot -> Arm : move_forward(speed)
+            Arm -> Motor : _write_word(ID5, speed, DIR_CCW)
+            Motor -> Arm : ok
+            Arm --> Robot : "ARM EXTENDING"
+
+            note right of Robot
+                Arm blijft uitgestuurd
+                zolang target in bbox is
+            end note
+
+            == Check of berry dichtbij genoeg is om te grijpen ==
+
+            Robot -> Robot : ready_to_grab()\n(check fill ratio >= MIN_GRAB_AREA_RATIO)
+
+            alt ready_to_grab() = true
+                Robot -> Robot : gripper_containment_frames++
+
+                alt gripper_containment_frames >= GRIPPER_CONTAINMENT_FRAMES
+
+                    Robot -> Grip : grip()
+                    activate Grip
+                    Grip -> Motor : _write_word(ID8, SPEED_GRIP, DIR_CW)
+                    Motor -> Grip : ok
+                    Grip -> Grip : sleep(GRIP_TIME)
+                    Grip -> Motor : _write_word(ID8, 0)
+                    Grip --> Robot : "GRIPPED"
+                    deactivate Grip
+
+                    Robot -> Robot : reset gripper_containment_frames = 0
+
+                    note right of Robot
+                        Berry is gegrepen!
+                        Robot kan nu terugrijden
+                        naar startpositie
+                    end note
+
+                    Robot -> Arm : move_backward(speed)
+                    Arm -> Motor : _write_word(ID5, speed, DIR_CW)
+
+                    Robot -> Lift : move_down(speed)
+                    Lift -> Motor : _write_word(ID3+4, speed, DIR_CW)
+
+                    Robot -> TT : spin_left(speed)
+                    TT -> Motor : _write_word(ID13, speed, DIR_CCW)
+
+                    note right of Robot
+                        Terug naar homing positie
+                        of wachten op volgende berry
+                    end note
+
+                else (nog niet genoeg frames)
+                    note right : wacht op meer frames\n(zodat berry stabiel is)
+                end
+
+            else (nog niet dichtbij genoeg)
+                note right : wacht tot berry dichterbij komt\n(arm verder uitsteken of robot dichterbij)
+            end
+
+        else (target niet in gripper bbox)
+            Robot -> Arm : stop()
+            Arm -> Motor : _write_word(ID5, 0)
+            Arm --> Robot : "ARM STOPPED"
+
+            note right : Eerst uitlijnen (dx/dy)\nvoordat arm uitgestoken wordt
+        end
+
+    end
+
+    Fusion -> Web : push_frame(annotated_frame)
+    deactivate Fusion
+end
+
+== Uitzondering: verbinding verliezen ==
+
+opt Controller verbonden -> manual mode
+    Web -> Fusion : manual_controller verbonden
+    Fusion -> Fusion : mode = MANUAL
+    note right : Robot stopt met autonome beweging\nGebruiker neemt over met joystick
+end
+
+@enduml
