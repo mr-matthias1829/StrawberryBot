@@ -127,7 +127,7 @@ HW_LOG_EVERY = 5
 # Servo output is suppressed until the target has been continuously visible
 # for this many seconds, to account for RTSP feed latency.
 # Set to 0.0 to disable.
-ACTION_DEBOUNCE_S = 1.5
+ACTION_DEBOUNCE_S = 0.25
 
 
 # =============================================================================
@@ -164,8 +164,9 @@ class RobotController:
         self._smooth_dy: float = 0.0
 
         # Debounce state
-        self._stable_since: Optional[float] = None   # monotonic timestamp
-        self._debounce_logged: bool = False           # suppress repeat log spam
+        self._pending_target: Optional[RobotTarget] = None  # candidate waiting out debounce
+        self._stable_since: Optional[float] = None          # monotonic timestamp
+        self._debounce_logged: bool = False                 # suppress repeat log spam
 
     # =========================================================================
     # GEOMETRY
@@ -275,7 +276,8 @@ class RobotController:
         if not detections:
             self.current_target  = None
             self._ghost_frames   = 0
-            self._stable_since   = None       # reset debounce on target loss
+            self._stable_since    = None       # reset debounce on target loss
+            self._pending_target  = None
             self._debounce_logged = False
             return None
 
@@ -310,36 +312,41 @@ class RobotController:
             if best_score < cur_score - margin:
                 # Switched to a better target — reset debounce
                 self._ghost_frames    = 0
-                self.current_target   = best
-                self._stable_since    = None
+                self._pending_target  = best
+                self._stable_since    = time.monotonic()
                 self._debounce_logged = False
+                self.current_target   = None
 
             return self.current_target
 
-        # New target acquired — start debounce clock
+        # New target candidate — start debounce clock, don't commit yet
         self._ghost_frames    = 0
-        self.current_target   = best
+        self._pending_target  = best
         self._stable_since    = time.monotonic()
         self._debounce_logged = False
-        return self.current_target
+        self.current_target   = None
+        return None
 
     # =========================================================================
     # DEBOUNCE GATE
     # =========================================================================
 
-    def _debounce_ready(self) -> bool:
-        """Return True when the current target has been stable long enough to act on."""
+    def _check_debounce(self) -> None:
+        """Promote _pending_target to current_target once it has been stable long enough."""
+        if self._pending_target is None:
+            return
         if ACTION_DEBOUNCE_S <= 0.0:
-            return True
-        if self._stable_since is None:
-            self._stable_since = time.monotonic()
-        elapsed = time.monotonic() - self._stable_since
+            self.current_target  = self._pending_target
+            self._pending_target = None
+            return
+        elapsed = time.monotonic() - (self._stable_since or 0.0)
         if elapsed >= ACTION_DEBOUNCE_S:
-            return True
-        if not self._debounce_logged:
-            print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
-            self._debounce_logged = True
-        return False
+            self.current_target  = self._pending_target
+            self._pending_target = None
+        else:
+            if not self._debounce_logged:
+                print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
+                self._debounce_logged = True
 
     # =========================================================================
     # GRIPPER
@@ -535,19 +542,6 @@ class RobotController:
                 _arm.stop()
             self._arm_extending = False
             self._update_ema(0, 0)
-            return
-
-        # ── Debounce gate ─────────────────────────────────────────────────────
-        # Hold position (let EMA decay) until the target has been stable long
-        # enough to compensate for camera feed latency.
-        if not self._debounce_ready():
-            self._update_ema(0, 0)   # keep EMA decaying so we ramp up smoothly
-            if _HAS_TURNTABLE:
-                _turntable.stop()
-            if _HAS_LIFT:
-                _lift.stop()
-            if _HAS_ARM:
-                _arm.stop()
             return
 
         # ── Smooth the raw pixel offsets ──────────────────────────────────────
