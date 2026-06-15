@@ -38,7 +38,7 @@ SENSOR_DEADBAND = 5.0          # degrees
 SENSOR_HOME_TIMEOUT = 10.0     # seconds
 
 # Speed used when homing without a sensor (slow, safe)
-DR_HOME_SPEED = 150            # servo speed units
+DR_HOME_SPEED = 400           # servo speed units
 
 
 # ---------------------------------------------------------------------------
