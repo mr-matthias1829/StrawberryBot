@@ -23,6 +23,15 @@ The gripper fires when:
   3. The above has been true for config.GRIPPER_CONTAINMENT_FRAMES
      consecutive frames.
 
+Post-grip sequence
+------------------
+After a successful grip, drive_hardware() is immediately frozen:
+  - All servos (turntable, lift, arm) are stopped.
+  - _gripped is set to True, blocking every subsequent drive_hardware() call.
+  - bin.place_berry() is launched on a daemon worker thread.
+  - When place_berry() returns (success or exception), _gripped is cleared
+    and normal tracking resumes automatically.
+
 Smoothing
 ---------
 Raw dx/dy offsets are passed through an EMA (Exponential Moving Average)
@@ -55,6 +64,7 @@ zero naturally) and logs "[DEBOUNCE] waiting …" once per target.
 
 import math
 import time
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -89,6 +99,12 @@ try:
     _HAS_GRIPPER = True
 except ImportError:
     _HAS_GRIPPER = False
+
+try:
+    import bin as _bin
+    _HAS_BIN = True
+except ImportError:
+    _HAS_BIN = False
 
 
 # =============================================================================
@@ -166,6 +182,9 @@ class RobotController:
         # Debounce state
         self._stable_since: Optional[float] = None   # monotonic timestamp
         self._debounce_logged: bool = False           # suppress repeat log spam
+
+        # Post-grip state — True while bin.place_berry() is running
+        self._gripped: bool = False
 
     # =========================================================================
     # GEOMETRY
@@ -273,9 +292,9 @@ class RobotController:
     ) -> Optional[RobotTarget]:
 
         if not detections:
-            self.current_target  = None
-            self._ghost_frames   = 0
-            self._stable_since   = None       # reset debounce on target loss
+            self.current_target   = None
+            self._ghost_frames    = 0
+            self._stable_since    = None
             self._debounce_logged = False
             return None
 
@@ -403,6 +422,39 @@ class RobotController:
             self._gripper_containment_frames = 0
 
     # =========================================================================
+    # POST-GRIP BIN PLACEMENT
+    # =========================================================================
+
+    def _stop_all_servos(self) -> None:
+        """Hard-stop every moving axis immediately."""
+        if _HAS_TURNTABLE:
+            _turntable.stop()
+        if _HAS_LIFT:
+            _lift.stop()
+        if _HAS_ARM:
+            _arm.stop()
+        self._arm_extending = False
+
+    def _run_place_berry(self) -> None:
+        """
+        Worker thread target: run the full bin-placement sequence,
+        then release the gripped lock so tracking resumes.
+        """
+        try:
+            print("[RC] Starting bin placement sequence…")
+            if _HAS_BIN:
+                _bin.place_berry()
+            else:
+                print("[RC][SIM] bin not available — skipping place_berry()")
+        except Exception as e:
+            print(f"[RC] ERROR in place_berry thread: {e}")
+        finally:
+            self._gripped = False
+            # Reset EMA so the robot doesn't lurch when it resumes tracking
+            self._reset_ema()
+            print("[RC] Bin placement done — resuming tracking")
+
+    # =========================================================================
     # OFFSETS
     # =========================================================================
 
@@ -436,6 +488,9 @@ class RobotController:
     # =========================================================================
 
     def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
+        if self._gripped:
+            return "PLACING BERRY…"
+
         if self.current_target is None:
             return "NO TARGET"
 
@@ -463,6 +518,9 @@ class RobotController:
         )
 
     def generate_gripperstring(self) -> str:
+        if self._gripped:
+            return "GRIPPER: PLACING BERRY"
+
         if not _HAS_GRIPPER:
             return "GRIPPER: SIMULATED"
 
@@ -481,6 +539,8 @@ class RobotController:
     def generate_armstring(self, contained: bool) -> str:
         if not _HAS_ARM:
             return "ARM: SIMULATED"
+        if self._gripped:
+            return "ARM: STOPPED (placing)"
         return f"ARM: {'EXTENDING' if contained else 'STOPPED'}"
 
     # =========================================================================
@@ -526,6 +586,15 @@ class RobotController:
         self._hw_log_counter += 1
         do_log = self._hw_log_counter % HW_LOG_EVERY == 0
 
+        # ── Gripped gate ──────────────────────────────────────────────────────
+        # While bin.place_berry() is running on its worker thread, hold all
+        # servos stopped.  The EMA also decays toward zero so the robot doesn't
+        # lurch when tracking resumes.
+        if self._gripped:
+            self._stop_all_servos()
+            self._update_ema(0, 0)
+            return
+
         if self.current_target is None:
             if _HAS_TURNTABLE:
                 _turntable.stop()
@@ -541,7 +610,7 @@ class RobotController:
         # Hold position (let EMA decay) until the target has been stable long
         # enough to compensate for camera feed latency.
         if not self._debounce_ready():
-            self._update_ema(0, 0)   # keep EMA decaying so we ramp up smoothly
+            self._update_ema(0, 0)
             if _HAS_TURNTABLE:
                 _turntable.stop()
             if _HAS_LIFT:
@@ -571,6 +640,7 @@ class RobotController:
         contained, arm_msg = self._drive_arm(gripper_x, gripper_y)
 
         # ── Gripper ───────────────────────────────────────────────────────────
+        gripper_msg = "GRIPPER: no hardware"
         if _HAS_GRIPPER:
             self.update_gripper_containment(gripper_x, gripper_y)
             gripper_msg = self.generate_gripperstring()
@@ -586,7 +656,17 @@ class RobotController:
                         result = _gripper.grip()
                         if result["status"] == "ok":
                             self._gripper_containment_frames = 0
-                            gripper_msg = "GRIPPER: GRIPPING"
+                            gripper_msg = "GRIPPER: GRIPPED"
+
+                            # Stop everything before handing off to the bin thread
+                            self._stop_all_servos()
+                            self._gripped = True
+
+                            threading.Thread(
+                                target=self._run_place_berry,
+                                daemon=True,
+                                name="bin-placer",
+                            ).start()
             else:
                 gripper_msg = "GRIPPER SIMULATED"
 
