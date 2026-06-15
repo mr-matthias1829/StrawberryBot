@@ -10,6 +10,12 @@ RAW_LSB     = 0x0D
 # larger than this we treat it as a 0°/360° crossing.
 WRAP_THRESHOLD = 180.0
 
+# How many times to retry an I2C read before giving up and falling back to
+# the last known-good value. Keeps gaps between successful samples small so
+# wrap detection (_update_laps) doesn't get fed a stale _prev_deg.
+READ_RETRIES = 3
+RETRY_DELAY  = 0.002  # seconds between retries
+
 
 class CornerSensorManager:
     def __init__(self, bus_num=1):
@@ -22,6 +28,11 @@ class CornerSensorManager:
         self._laps:      dict[int, int]   = {ch: 0 for ch in self.channels}
         self._prev_deg:  dict[int, float] = {}   # last known angle per channel
         self._direction: dict[int, int]   = {ch: 0 for ch in self.channels}  # +1 / -1 / 0
+
+        # Last known-good reading per channel — returned (marked stale) if
+        # the live read fails after all retries, so callers always get the
+        # most reliable latest value instead of an exception/None.
+        self._last_good: dict[int, dict] = {}
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                  #
@@ -49,6 +60,22 @@ class CornerSensorManager:
         high = self.bus.read_byte_data(AS5600_ADDR, RAW_MSB)
         low  = self.bus.read_byte_data(AS5600_ADDR, RAW_LSB)
         return ((high << 8) | low) & 0x0FFF
+
+    def _read_raw_retry(self, ch: int) -> int | None:
+        """
+        Try to read the raw value up to READ_RETRIES times.
+        Returns the raw int on success, or None if every attempt failed.
+        """
+        last_err = None
+        for attempt in range(READ_RETRIES):
+            try:
+                return self._read_raw(ch)
+            except OSError as e:
+                last_err = e
+                if attempt < READ_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+        print(f"[WARN] Channel {ch} read failed after {READ_RETRIES} attempts: {last_err}")
+        return None
 
     @staticmethod
     def _deg(raw: int) -> float:
@@ -91,20 +118,46 @@ class CornerSensorManager:
             raw      – 12-bit raw value (0-4095)
             deg      – angle in degrees (0.0-359.9…)
             laps     – signed lap count since start / last reset
+            stale    – True if this is a repeat of the last known-good
+                       reading because the live read failed even after
+                       retries; False if it's a fresh sample.
+
         Raises ValueError if no sensor is present on that channel.
-        Raises OSError if the read fails (sensor disappeared).
+
+        Note: this no longer raises OSError on a transient read failure.
+        It retries internally (READ_RETRIES attempts, RETRY_DELAY apart)
+        and, if every attempt fails, returns the last known-good reading
+        (marked stale=True) so callers always get the most reliable
+        latest value. OSError is only raised if this channel has never
+        produced a successful reading.
         """
         if not self.channel_has_sensor(ch):
             raise ValueError(f"No sensor on channel {ch}")
-        raw = self._read_raw(ch)
+
+        raw = self._read_raw_retry(ch)
+
+        if raw is None:
+            # All retries failed this cycle — fall back to last known-good
+            # reading rather than returning nothing. Crucially, _prev_deg /
+            # _laps are NOT touched here, so the next successful read still
+            # compares against the correct previous angle.
+            if ch in self._last_good:
+                stale = dict(self._last_good[ch])
+                stale["stale"] = True
+                return stale
+            raise OSError(f"Channel {ch}: no reading available (sensor never responded)")
+
         deg = self._deg(raw)
         self._update_laps(ch, deg)
-        return {
+        result = {
             "channel": ch,
             "raw":     raw,
             "deg":     deg,
             "laps":    self._laps[ch],
+            "stale":   False,
         }
+        self._last_good[ch] = result
+        return result
 
     def read_sensor_by_index(self, index: int) -> dict:
         """
@@ -140,14 +193,14 @@ class CornerSensorManager:
         Read every discovered sensor.
 
         Returns a dict keyed by "sensor_1", "sensor_2", … each containing:
-            channel, raw, deg, laps
+            channel, raw, deg, laps, stale
         """
         result = {}
         for i, ch in enumerate(self.channels):
             try:
                 result[f"sensor_{i+1}"] = self.read_sensor(ch)
             except OSError as e:
-                print(f"[WARN] Channel {ch} disappeared: {e}")
+                print(f"[WARN] Channel {ch} unavailable: {e}")
         return result
 
     def monitor(self, delay: float = 0.2) -> None:
@@ -157,6 +210,7 @@ class CornerSensorManager:
                 data = self.read_all()
                 line = " | ".join(
                     f"S{i+1}(CH{d['channel']}): {d['deg']:>7.2f}°  laps={d['laps']:+d}"
+                    + (" [stale]" if d.get("stale") else "")
                     for i, d in enumerate(data.values())
                 )
                 print(line)
