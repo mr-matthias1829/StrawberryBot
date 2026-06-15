@@ -58,7 +58,7 @@ _PRESETS = {
     "yellow": dict(h1_low=22,  h1_high=38,  h2_low=22,   h2_high=22,   sat_min=80,  val_min=60,  val_max=240),
     "green":  dict(h1_low=35,  h1_high=85,  h2_low=35,   h2_high=35,   sat_min=60,  val_min=40,  val_max=240),
     "blue":   dict(h1_low=100, h1_high=130, h2_low=100,   h2_high=100,   sat_min=60,  val_min=40,  val_max=240),
-    "white":  dict(h1_low=0,   h1_high=179, h2_low=0,     h2_high=179,   sat_min=10,   val_min=180, val_max=255),
+    "white":  dict(h1_low=0,   h1_high=179, h2_low=0,     h2_high=179,   sat_min=5,   val_min=180, val_max=255),
 }
 
 # =============================================================================
