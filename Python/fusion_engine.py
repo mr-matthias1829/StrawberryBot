@@ -674,8 +674,7 @@ class FusionEngine:
             target_pool = [o.detection for o in possible if _pscore(o) >= config.POSSIBLE_TARGET_MIN_CONF]
             using_possible_fallback = bool(target_pool)
 
-        target = self.robot.choose_target(target_pool, gripper_x, gripper_y)
-        self.robot._check_debounce()  # promote pending → current once stable
+        target   = self.robot.choose_target(target_pool, gripper_x, gripper_y)
         movement = self.robot.generate_movementstring(gripper_x, gripper_y)
         dx, dy   = self.robot.generate_dx(gripper_x), self.robot.generate_dy(gripper_y)
         mode     = "possible" if using_possible_fallback else "confirmed"

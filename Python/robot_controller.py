@@ -108,7 +108,7 @@ LOCK_HYSTERESIS_BASE  = 40
 LOCK_HYSTERESIS_DEPTH = 30
 
 # ── Ghost-lock grace period ────────────────────────────────────────────────────
-LOCK_GHOST_FRAMES = 3
+LOCK_GHOST_FRAMES = 2
 
 # ── Candidate scoring weights ──────────────────────────────────────────────────
 WEIGHT_DIST  = 0.5
@@ -164,9 +164,8 @@ class RobotController:
         self._smooth_dy: float = 0.0
 
         # Debounce state
-        self._pending_target: Optional[RobotTarget] = None  # candidate waiting out debounce
-        self._stable_since: Optional[float] = None          # monotonic timestamp
-        self._debounce_logged: bool = False                 # suppress repeat log spam
+        self._stable_since: Optional[float] = None   # monotonic timestamp
+        self._debounce_logged: bool = False           # suppress repeat log spam
 
     # =========================================================================
     # GEOMETRY
@@ -267,21 +266,16 @@ class RobotController:
         return False
 
     def choose_target(
-            self,
-            detections: List[Detection],
-            gripper_x: int,
-            gripper_y: int,
+        self,
+        detections: List[Detection],
+        gripper_x: int,
+        gripper_y: int,
     ) -> Optional[RobotTarget]:
 
         if not detections:
-            if self.current_target is not None:
-                self._ghost_frames += 1
-                if self._ghost_frames <= LOCK_GHOST_FRAMES:
-                    return self.current_target
-            self.current_target = None
-            self._ghost_frames = 0
-            self._stable_since = None
-            self._pending_target = None
+            self.current_target  = None
+            self._ghost_frames   = 0
+            self._stable_since   = None       # reset debounce on target loss
             self._debounce_logged = False
             return None
 
@@ -316,41 +310,36 @@ class RobotController:
             if best_score < cur_score - margin:
                 # Switched to a better target — reset debounce
                 self._ghost_frames    = 0
-                self._pending_target  = best
-                self._stable_since    = time.monotonic()
+                self.current_target   = best
+                self._stable_since    = None
                 self._debounce_logged = False
-                self.current_target   = None
 
             return self.current_target
 
-        # New target candidate — start debounce clock, don't commit yet
+        # New target acquired — start debounce clock
         self._ghost_frames    = 0
-        self._pending_target  = best
+        self.current_target   = best
         self._stable_since    = time.monotonic()
         self._debounce_logged = False
-        self.current_target   = None
-        return None
+        return self.current_target
 
     # =========================================================================
     # DEBOUNCE GATE
     # =========================================================================
 
-    def _check_debounce(self) -> None:
-        """Promote _pending_target to current_target once it has been stable long enough."""
-        if self._pending_target is None:
-            return
+    def _debounce_ready(self) -> bool:
+        """Return True when the current target has been stable long enough to act on."""
         if ACTION_DEBOUNCE_S <= 0.0:
-            self.current_target  = self._pending_target
-            self._pending_target = None
-            return
-        elapsed = time.monotonic() - (self._stable_since or 0.0)
+            return True
+        if self._stable_since is None:
+            self._stable_since = time.monotonic()
+        elapsed = time.monotonic() - self._stable_since
         if elapsed >= ACTION_DEBOUNCE_S:
-            self.current_target  = self._pending_target
-            self._pending_target = None
-        else:
-            if not self._debounce_logged:
-                print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
-                self._debounce_logged = True
+            return True
+        if not self._debounce_logged:
+            print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
+            self._debounce_logged = True
+        return False
 
     # =========================================================================
     # GRIPPER
@@ -546,6 +535,19 @@ class RobotController:
                 _arm.stop()
             self._arm_extending = False
             self._update_ema(0, 0)
+            return
+
+        # ── Debounce gate ─────────────────────────────────────────────────────
+        # Hold position (let EMA decay) until the target has been stable long
+        # enough to compensate for camera feed latency.
+        if not self._debounce_ready():
+            self._update_ema(0, 0)   # keep EMA decaying so we ramp up smoothly
+            if _HAS_TURNTABLE:
+                _turntable.stop()
+            if _HAS_LIFT:
+                _lift.stop()
+            if _HAS_ARM:
+                _arm.stop()
             return
 
         # ── Smooth the raw pixel offsets ──────────────────────────────────────
