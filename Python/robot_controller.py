@@ -108,7 +108,7 @@ LOCK_HYSTERESIS_BASE  = 40
 LOCK_HYSTERESIS_DEPTH = 30
 
 # ── Ghost-lock grace period ────────────────────────────────────────────────────
-LOCK_GHOST_FRAMES = 2
+LOCK_GHOST_FRAMES = 3
 
 # ── Candidate scoring weights ──────────────────────────────────────────────────
 WEIGHT_DIST  = 0.5
@@ -267,17 +267,21 @@ class RobotController:
         return False
 
     def choose_target(
-        self,
-        detections: List[Detection],
-        gripper_x: int,
-        gripper_y: int,
+            self,
+            detections: List[Detection],
+            gripper_x: int,
+            gripper_y: int,
     ) -> Optional[RobotTarget]:
 
         if not detections:
-            self.current_target  = None
-            self._ghost_frames   = 0
-            self._stable_since    = None       # reset debounce on target loss
-            self._pending_target  = None
+            if self.current_target is not None:
+                self._ghost_frames += 1
+                if self._ghost_frames <= LOCK_GHOST_FRAMES:
+                    return self.current_target
+            self.current_target = None
+            self._ghost_frames = 0
+            self._stable_since = None
+            self._pending_target = None
             self._debounce_logged = False
             return None
 
