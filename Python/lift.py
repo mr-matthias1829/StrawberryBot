@@ -419,6 +419,8 @@ def update(dy: int) -> str:
 # =============================================================================
 
 def _home() -> None:
+    global HOLD_ENABLED
+
     if not _initialized:
         print("[lift] _home(): not initialised — skipping")
         return
@@ -433,35 +435,39 @@ def _home() -> None:
     def _stop_both() -> None:
         _both(0)
 
-    if _zero_deg is not None:
-        # Check current position relative to home BEFORE choosing direction
-        reading = _read_sensor(SENSOR_CHANNEL_A)
-        if reading is not None:
-            current_abs = _sensor_mgr.total_position(reading)
-            delta = current_abs - _zero_deg
-            print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°, "
-                  f"current {current_abs:.1f}°, delta {delta:+.1f}°")
-        else:
-            print(f"[lift] Homing with sensor → target {_zero_deg:.1f}° (sensor unreadable at start)")
+    _hold_was_enabled = HOLD_ENABLED
+    HOLD_ENABLED = False  # suppress hold pulses during homing
+    try:
+        if _zero_deg is not None:
+            reading = _read_sensor(SENSOR_CHANNEL_A)
+            if reading is not None:
+                current_abs = _sensor_mgr.total_position(reading)
+                delta = current_abs - _zero_deg
+                print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°, "
+                      f"current {current_abs:.1f}°, delta {delta:+.1f}°")
+            else:
+                print(f"[lift] Homing with sensor → target {_zero_deg:.1f}° (sensor unreadable at start)")
 
-        ok = home_with_sensor(
-            read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
-            total_position_fn = _sensor_mgr.total_position,
-            zero_deg          = _zero_deg,
-            drive_positive_fn = lambda s: _both(_DIR_CCW | s),
-            drive_negative_fn = lambda s: _both(_DIR_CW  | s),
-            stop_fn           = _stop_both,
-        )
-        print(f"[lift] Homing {'complete' if ok else 'incomplete — sensor timeout'}.")
-    else:
-        print("[lift] Homing with dead-reckoning…")
-        home_dead_reckoning(
-            dead_pos_ref      = _dead_pos,
-            drive_positive_fn = lambda s: _both(_DIR_CCW | s),
-            drive_negative_fn = lambda s: _both(_DIR_CW  | s),
-            stop_fn           = _stop_both,
-        )
-        print("[lift] Homing complete (dead-reckoning).")
+            ok = home_with_sensor(
+                read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
+                total_position_fn = _sensor_mgr.total_position,
+                zero_deg          = _zero_deg,
+                drive_positive_fn = lambda s: _both(_DIR_CCW | s),
+                drive_negative_fn = lambda s: _both(_DIR_CW  | s),
+                stop_fn           = _stop_both,
+            )
+            print(f"[lift] Homing {'complete' if ok else 'incomplete — sensor timeout'}.")
+        else:
+            print("[lift] Homing with dead-reckoning…")
+            home_dead_reckoning(
+                dead_pos_ref      = _dead_pos,
+                drive_positive_fn = lambda s: _both(_DIR_CCW | s),
+                drive_negative_fn = lambda s: _both(_DIR_CW  | s),
+                stop_fn           = _stop_both,
+            )
+            print("[lift] Homing complete (dead-reckoning).")
+    finally:
+        HOLD_ENABLED = _hold_was_enabled  # always restore, even if homing raises
 
     _dead_pos[0] = 0.0
     servo_status.update(SERVO_ID_A, "STOP", 0, real=_initialized)
