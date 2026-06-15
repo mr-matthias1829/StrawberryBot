@@ -51,15 +51,24 @@ continuously visible for at least ACTION_DEBOUNCE_S seconds.
 
 When the debounce is active the robot holds position (EMA decays toward
 zero naturally) and logs "[DEBOUNCE] waiting …" once per target.
+
+Bin placement
+-------------
+After a confirmed grip, place_berry() from bin.py is launched in a
+background thread so the main inference loop is not blocked.
+While bin placement is running, drive_hardware() is a no-op to prevent
+conflicting servo commands.
 """
 
 import math
 import time
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from detection import Detection
 import config
+import bin as _bin
 
 
 # =============================================================================
@@ -124,9 +133,6 @@ DEPTH_CONF_WEIGHT = 0.35
 HW_LOG_EVERY = 5
 
 # ── Action debounce ───────────────────────────────────────────────────────────
-# Servo output is suppressed until the target has been continuously visible
-# for this many seconds, to account for RTSP feed latency.
-# Set to 0.0 to disable.
 ACTION_DEBOUNCE_S = 0.7
 
 
@@ -164,8 +170,11 @@ class RobotController:
         self._smooth_dy: float = 0.0
 
         # Debounce state
-        self._stable_since: Optional[float] = None   # monotonic timestamp
-        self._debounce_logged: bool = False           # suppress repeat log spam
+        self._stable_since: Optional[float] = None
+        self._debounce_logged: bool = False
+
+        # Bin placement state
+        self._placing: bool = False   # True while bin.place_berry() is running
 
     # =========================================================================
     # GEOMETRY
@@ -273,9 +282,9 @@ class RobotController:
     ) -> Optional[RobotTarget]:
 
         if not detections:
-            self.current_target  = None
-            self._ghost_frames   = 0
-            self._stable_since   = None       # reset debounce on target loss
+            self.current_target   = None
+            self._ghost_frames    = 0
+            self._stable_since    = None
             self._debounce_logged = False
             return None
 
@@ -297,8 +306,8 @@ class RobotController:
         target_alive = self._target_still_exists(detections)
 
         if target_alive:
-            cur      = self.current_target
-            cur_dist = self._distance_to(gripper_x, gripper_y, cur.center_x, cur.center_y)
+            cur       = self.current_target
+            cur_dist  = self._distance_to(gripper_x, gripper_y, cur.center_x, cur.center_y)
             cur_score  = self._candidate_score(cur_dist, cur.depth_score, max_dist)
             best_score = self._candidate_score(best.distance, best.depth_score, max_dist)
 
@@ -308,7 +317,6 @@ class RobotController:
             ) * WEIGHT_DIST
 
             if best_score < cur_score - margin:
-                # Switched to a better target — reset debounce
                 self._ghost_frames    = 0
                 self.current_target   = best
                 self._stable_since    = None
@@ -316,7 +324,6 @@ class RobotController:
 
             return self.current_target
 
-        # New target acquired — start debounce clock
         self._ghost_frames    = 0
         self.current_target   = best
         self._stable_since    = time.monotonic()
@@ -328,7 +335,6 @@ class RobotController:
     # =========================================================================
 
     def _debounce_ready(self) -> bool:
-        """Return True when the current target has been stable long enough to act on."""
         if ACTION_DEBOUNCE_S <= 0.0:
             return True
         if self._stable_since is None:
@@ -403,6 +409,23 @@ class RobotController:
             self._gripper_containment_frames = 0
 
     # =========================================================================
+    # BIN PLACEMENT
+    # =========================================================================
+
+    def _launch_bin_placement(self) -> None:
+        """Spawn a daemon thread that runs bin.place_berry() and clears _placing when done."""
+        def _run():
+            try:
+                _bin.place_berry()
+            finally:
+                self._placing = False
+                print("[robot] Bin placement done — resuming tracking.")
+
+        self._placing = True
+        t = threading.Thread(target=_run, daemon=True, name="bin-placer")
+        t.start()
+
+    # =========================================================================
     # OFFSETS
     # =========================================================================
 
@@ -436,6 +459,9 @@ class RobotController:
     # =========================================================================
 
     def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
+        if self._placing:
+            return f"PLACING BERRY ({_bin.collected_count()}/{_bin.GRID_ROWS * _bin.GRID_COLS})"
+
         if self.current_target is None:
             return "NO TARGET"
 
@@ -526,6 +552,12 @@ class RobotController:
         self._hw_log_counter += 1
         do_log = self._hw_log_counter % HW_LOG_EVERY == 0
 
+        # ── Bin placement in progress — hold all servos ───────────────────────
+        if self._placing:
+            if do_log:
+                print(f"[HW] Bin placement running — servos held")
+            return
+
         if self.current_target is None:
             if _HAS_TURNTABLE:
                 _turntable.stop()
@@ -538,10 +570,8 @@ class RobotController:
             return
 
         # ── Debounce gate ─────────────────────────────────────────────────────
-        # Hold position (let EMA decay) until the target has been stable long
-        # enough to compensate for camera feed latency.
         if not self._debounce_ready():
-            self._update_ema(0, 0)   # keep EMA decaying so we ramp up smoothly
+            self._update_ema(0, 0)
             if _HAS_TURNTABLE:
                 _turntable.stop()
             if _HAS_LIFT:
@@ -571,6 +601,7 @@ class RobotController:
         contained, arm_msg = self._drive_arm(gripper_x, gripper_y)
 
         # ── Gripper ───────────────────────────────────────────────────────────
+        gripper_msg = "GRIPPER SIMULATED"
         if _HAS_GRIPPER:
             self.update_gripper_containment(gripper_x, gripper_y)
             gripper_msg = self.generate_gripperstring()
@@ -587,8 +618,7 @@ class RobotController:
                         if result["status"] == "ok":
                             self._gripper_containment_frames = 0
                             gripper_msg = "GRIPPER: GRIPPING"
-            else:
-                gripper_msg = "GRIPPER SIMULATED"
+                            self._launch_bin_placement()
 
         if do_log:
             print(
