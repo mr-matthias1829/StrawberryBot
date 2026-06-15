@@ -76,10 +76,10 @@ RECHECK_CV_CONF   = 0.50        # Lowered from 0.55 — zoom crops can be tight/
 # =============================================================================
 # TEMPORAL MEMORY / TRACKING
 # =============================================================================
-PERSISTENCE_REQUIRED        = 2   # Frames needed to confirm (AI / fused)
-PERSISTENCE_REQUIRED_CV_ONLY = 3  # Frames needed to confirm (CV-only source)
-PERSISTENCE_DECAY           = 0.7
-IOU_MATCH_THRESHOLD         = 0.40  # Standard IoU gate (containment check is separate)
+PERSISTENCE_REQUIRED        = 3   # was 2 — needs more frames to confirm (less flicker on entry)
+PERSISTENCE_REQUIRED_CV_ONLY = 4  # was 3
+PERSISTENCE_DECAY           = 0.85  # was 0.7 — slower confidence bleed on missed frames
+IOU_MATCH_THRESHOLD         = 0.30  # was 0.40 — more lenient matching when bbox shifts slightly
 
 # ---------------------------------------------------------------------------
 # Possible-hit lane

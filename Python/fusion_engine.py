@@ -16,10 +16,10 @@ from robot_controller import RobotController
 
 INFER_SCALE               = 1
 DETECT_EVERY              = 1
-RECHECK_EVERY_N_DETECTIONS = 3
+RECHECK_EVERY_N_DETECTIONS = 2
 ZOOM_QUEUE_MAXSIZE        = 4
-CLEANUP_INTERVAL          = 30
-CONTAINMENT_MATCH_THRESHOLD = 0.45
+CLEANUP_INTERVAL = 30
+CONTAINMENT_MATCH_THRESHOLD = 0.35  # was 0.45 — more forgiving overlap matching
 MIN_TARGET_BOX_AREA       = 900   # px²
 VELOCITY_ALPHA            = 0.4
 MAX_PREDICT_AGE           = 0.25  # s

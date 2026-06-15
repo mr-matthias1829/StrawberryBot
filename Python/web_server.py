@@ -73,7 +73,7 @@ _FULL_CONFIG_SCHEMA = [
     ("LOW_AI_CONFIDENCE",            float, 0.0, 1.0,   "AI low conf",          "thresholds", 0.35),
     ("YOLO_FUSION_WEIGHT",           float, 0.0, 1.0,   "YOLO weight",          "fusion", 0.6),
     ("CV_FUSION_WEIGHT",             float, 0.0, 1.0,   "CV weight",            "fusion", 0.4),
-    ("CV_WEIGHT_REDNESS",            float, 0.0, 1.0,   "CV: redness",          "fusion", 0.4),
+    ("CV_WEIGHT_REDNESS",            float, 0.0, 1.0,   "CV: color",          "fusion", 0.4),
     ("CV_WEIGHT_CIRCULARITY",        float, 0.0, 1.0,   "CV: circularity",      "fusion", 0.3),
     ("CV_WEIGHT_SIZE",               float, 0.0, 1.0,   "CV: size",             "fusion", 0.2),
     ("CV_WEIGHT_TEXTURE",            float, 0.0, 1.0,   "CV: texture",          "fusion", 0.1),
