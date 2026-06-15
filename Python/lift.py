@@ -419,7 +419,6 @@ def update(dy: int) -> str:
 # =============================================================================
 
 def _home() -> None:
-    """Drive lift to its zero (top / startup) position.  Blocks until complete."""
     if not _initialized:
         print("[lift] _home(): not initialised — skipping")
         return
@@ -435,7 +434,16 @@ def _home() -> None:
         _both(0)
 
     if _zero_deg is not None:
-        print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°")
+        # Check current position relative to home BEFORE choosing direction
+        reading = _read_sensor(SENSOR_CHANNEL_A)
+        if reading is not None:
+            current_abs = _sensor_mgr.total_position(reading)
+            delta = current_abs - _zero_deg
+            print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°, "
+                  f"current {current_abs:.1f}°, delta {delta:+.1f}°")
+        else:
+            print(f"[lift] Homing with sensor → target {_zero_deg:.1f}° (sensor unreadable at start)")
+
         ok = home_with_sensor(
             read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
             total_position_fn = _sensor_mgr.total_position,
