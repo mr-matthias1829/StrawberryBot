@@ -334,7 +334,6 @@ def _home() -> None:
             drive_positive_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
             drive_negative_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | s),
             stop_fn=lambda: motor._write_word(SERVO_ID, _REG_SPEED, 0),
-            ignore_laps=True,
         )
         if ok:
             print("[turntable] Homing complete (sensor).")
