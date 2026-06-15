@@ -37,9 +37,24 @@ Tune EMA_ALPHA in the CONFIG section:
   0.4  — responsive, mild smoothing
   0.25 — balanced (default)
   0.1  — very smooth, noticeable lag on fast moves
+
+Action debounce
+---------------
+Because the RTSP camera feed has inherent latency, detections we receive
+now correspond to what the camera *saw* ACTION_DEBOUNCE_S seconds ago.
+To avoid chasing already-stale positions, all servo output (turntable,
+lift, arm, gripper) is suppressed until the current target has been
+continuously visible for at least ACTION_DEBOUNCE_S seconds.
+
+  ACTION_DEBOUNCE_S = 0.0  — disables debounce entirely
+  ACTION_DEBOUNCE_S = 0.25 — good starting point for ~200-300 ms feed lag
+
+When the debounce is active the robot holds position (EMA decays toward
+zero naturally) and logs "[DEBOUNCE] waiting …" once per target.
 """
 
 import math
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -86,8 +101,6 @@ Y_THRESHOLD = 25
 PRIORITIZE_Y = True
 
 # ── EMA smoothing ──────────────────────────────────────────────────────────────
-# Applied to dx/dy before they reach the servos.
-# Lower = smoother but laggier.  Higher = more responsive but more jitter.
 EMA_ALPHA = 0.25
 
 # ── Lock hysteresis ────────────────────────────────────────────────────────────
@@ -109,6 +122,12 @@ DEPTH_UNITS_MAX = 1000
 DEPTH_CONF_WEIGHT = 0.35
 
 HW_LOG_EVERY = 5
+
+# ── Action debounce ───────────────────────────────────────────────────────────
+# Servo output is suppressed until the target has been continuously visible
+# for this many seconds, to account for RTSP feed latency.
+# Set to 0.0 to disable.
+ACTION_DEBOUNCE_S = 0.25
 
 
 # =============================================================================
@@ -143,6 +162,10 @@ class RobotController:
         # EMA state — smoothed dx/dy sent to the servos
         self._smooth_dx: float = 0.0
         self._smooth_dy: float = 0.0
+
+        # Debounce state
+        self._stable_since: Optional[float] = None   # monotonic timestamp
+        self._debounce_logged: bool = False           # suppress repeat log spam
 
     # =========================================================================
     # GEOMETRY
@@ -250,8 +273,10 @@ class RobotController:
     ) -> Optional[RobotTarget]:
 
         if not detections:
-            self.current_target = None
-            self._ghost_frames  = 0
+            self.current_target  = None
+            self._ghost_frames   = 0
+            self._stable_since   = None       # reset debounce on target loss
+            self._debounce_logged = False
             return None
 
         candidates: List[RobotTarget] = []
@@ -283,14 +308,38 @@ class RobotController:
             ) * WEIGHT_DIST
 
             if best_score < cur_score - margin:
-                self._ghost_frames  = 0
-                self.current_target = best
+                # Switched to a better target — reset debounce
+                self._ghost_frames    = 0
+                self.current_target   = best
+                self._stable_since    = None
+                self._debounce_logged = False
 
             return self.current_target
 
-        self._ghost_frames  = 0
-        self.current_target = best
+        # New target acquired — start debounce clock
+        self._ghost_frames    = 0
+        self.current_target   = best
+        self._stable_since    = time.monotonic()
+        self._debounce_logged = False
         return self.current_target
+
+    # =========================================================================
+    # DEBOUNCE GATE
+    # =========================================================================
+
+    def _debounce_ready(self) -> bool:
+        """Return True when the current target has been stable long enough to act on."""
+        if ACTION_DEBOUNCE_S <= 0.0:
+            return True
+        if self._stable_since is None:
+            self._stable_since = time.monotonic()
+        elapsed = time.monotonic() - self._stable_since
+        if elapsed >= ACTION_DEBOUNCE_S:
+            return True
+        if not self._debounce_logged:
+            print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
+            self._debounce_logged = True
+        return False
 
     # =========================================================================
     # GRIPPER
@@ -321,12 +370,6 @@ class RobotController:
         )
 
     def object_fill_ratio(self) -> float:
-        """
-        Fraction of the gripper bbox area that the berry occupies.
-
-        0.4 means the berry bbox is 40% of the 500x500 gripper area.
-        Higher = berry is closer / larger in frame.
-        """
         if self.current_target is None:
             return 0.0
         det          = self.current_target.detection
@@ -335,29 +378,15 @@ class RobotController:
         return target_area / max(1, gripper_area)
 
     def ready_to_grab(self, gripper_x: int, gripper_y: int) -> bool:
-        """
-        True when the berry is close enough to grip.
-
-        Conditions (all must hold):
-          1. Berry is fully contained inside the gripper bbox.
-          2. Berry fills at least config.MIN_GRAB_AREA_RATIO of the gripper
-             bbox area — i.e. it is physically close enough.
-        """
         if self.current_target is None:
             return False
-
         bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
         contained = self.is_detection_fully_contained(self.current_target.detection, bbox)
         if not contained:
             return False
-
         return self.object_fill_ratio() >= config.MIN_GRAB_AREA_RATIO
 
     def update_gripper_containment(self, gripper_x: int, gripper_y: int) -> None:
-        """
-        Increment the stable-frames counter when ready_to_grab is True,
-        reset when it is not or when the target changes.
-        """
         if self.current_target is None:
             self._gripper_containment_frames = 0
             self._last_target_id = None
@@ -374,7 +403,7 @@ class RobotController:
             self._gripper_containment_frames = 0
 
     # =========================================================================
-    # OFFSETS  (raw — used by HUD and as EMA input)
+    # OFFSETS
     # =========================================================================
 
     def generate_dx(self, gripper_x: int) -> int:
@@ -392,17 +421,8 @@ class RobotController:
     # =========================================================================
 
     def _update_ema(self, raw_dx: int, raw_dy: int) -> Tuple[int, int]:
-        """
-        Feed raw pixel offsets through the EMA filter and apply dead-zone
-        gating.  Returns the (dx, dy) that should be sent to the servos.
-
-        When there is no target the EMA state decays toward zero so the
-        servos ramp down smoothly rather than snapping to a stop.
-        """
         self._smooth_dx = EMA_ALPHA * raw_dx + (1.0 - EMA_ALPHA) * self._smooth_dx
         self._smooth_dy = EMA_ALPHA * raw_dy + (1.0 - EMA_ALPHA) * self._smooth_dy
-
-        # Dead-zone: swallow sub-threshold residual noise
         dx = int(self._smooth_dx) if abs(self._smooth_dx) >= X_THRESHOLD else 0
         dy = int(self._smooth_dy) if abs(self._smooth_dy) >= Y_THRESHOLD else 0
         return dx, dy
@@ -514,9 +534,20 @@ class RobotController:
             if _HAS_ARM:
                 _arm.stop()
             self._arm_extending = False
-            # Let EMA decay naturally toward zero rather than hard-resetting,
-            # so servos ramp down smoothly on target loss.
             self._update_ema(0, 0)
+            return
+
+        # ── Debounce gate ─────────────────────────────────────────────────────
+        # Hold position (let EMA decay) until the target has been stable long
+        # enough to compensate for camera feed latency.
+        if not self._debounce_ready():
+            self._update_ema(0, 0)   # keep EMA decaying so we ramp up smoothly
+            if _HAS_TURNTABLE:
+                _turntable.stop()
+            if _HAS_LIFT:
+                _lift.stop()
+            if _HAS_ARM:
+                _arm.stop()
             return
 
         # ── Smooth the raw pixel offsets ──────────────────────────────────────
@@ -544,19 +575,18 @@ class RobotController:
             self.update_gripper_containment(gripper_x, gripper_y)
             gripper_msg = self.generate_gripperstring()
             if config.GRIPPER_AUTO_GRIP_ENABLED and config.AUTO_MODE_ALLOW_MOVE:
-                if config.GRIPPER_AUTO_GRIP_ENABLED:
-                    if self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES:
-                        fill = self.object_fill_ratio()
-                        print(
-                            f"[GRAB CHECK] "
-                            f"fill={fill:.2f} (need {config.MIN_GRAB_AREA_RATIO:.2f}) "
-                            f"frames={self._gripper_containment_frames}"
-                        )
-                        if fill >= config.MIN_GRAB_AREA_RATIO:
-                            result = _gripper.grip()
-                            if result["status"] == "ok":
-                                self._gripper_containment_frames = 0
-                                gripper_msg = "GRIPPER: GRIPPING"
+                if self._gripper_containment_frames >= config.GRIPPER_CONTAINMENT_FRAMES:
+                    fill = self.object_fill_ratio()
+                    print(
+                        f"[GRAB CHECK] "
+                        f"fill={fill:.2f} (need {config.MIN_GRAB_AREA_RATIO:.2f}) "
+                        f"frames={self._gripper_containment_frames}"
+                    )
+                    if fill >= config.MIN_GRAB_AREA_RATIO:
+                        result = _gripper.grip()
+                        if result["status"] == "ok":
+                            self._gripper_containment_frames = 0
+                            gripper_msg = "GRIPPER: GRIPPING"
             else:
                 gripper_msg = "GRIPPER SIMULATED"
 
