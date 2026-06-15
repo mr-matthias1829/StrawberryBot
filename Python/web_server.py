@@ -58,7 +58,7 @@ _PRESETS = {
     "yellow": dict(h1_low=22,  h1_high=38,  h2_low=22,   h2_high=22,   sat_min=80,  val_min=60,  val_max=240),
     "green":  dict(h1_low=35,  h1_high=85,  h2_low=35,   h2_high=35,   sat_min=60,  val_min=40,  val_max=240),
     "blue":   dict(h1_low=100, h1_high=130, h2_low=100,   h2_high=100,   sat_min=60,  val_min=40,  val_max=240),
-    "purple": dict(h1_low=125, h1_high=155, h2_low=125,   h2_high=125,   sat_min=60,  val_min=40,  val_max=240),
+    "white":  dict(h1_low=0,   h1_high=179, h2_low=0,     h2_high=179,   sat_min=10,   val_min=180, val_max=255),
 }
 
 # =============================================================================
@@ -756,7 +756,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
         <button class="pbtn" data-preset="yellow" onclick="applyPreset('yellow')"><span class="pdot" style="background:#d4c030"></span>Yellow</button>
         <button class="pbtn" data-preset="green" onclick="applyPreset('green')"><span class="pdot" style="background:#30c050"></span>Green</button>
         <button class="pbtn" data-preset="blue" onclick="applyPreset('blue')"><span class="pdot" style="background:#3070e0"></span>Blue</button>
-        <button class="pbtn" data-preset="purple" onclick="applyPreset('purple')"><span class="pdot" style="background:#9030c0"></span>Purple</button>
+        <button class="pbtn" data-preset="white" onclick="applyPreset('white')"><span class="pdot" style="background:#e8e8e8"></span>White</button>
       </div>
     </div>
     <div class="sec">
