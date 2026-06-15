@@ -209,7 +209,7 @@ def home_all() -> None:
 
     Order (safe for the physical layout):
       1. Gripper  — open (simplest: just use existing state machine)
-      2. Pivot    — tilt to neutral
+      2. Pivot    — tilt to neutral (NOW NO LONGER THE CASE)
       3. Arm      — retract fully
       4. Lift     — move to bottom
       5. Turntable — rotate to centre
@@ -219,7 +219,6 @@ def home_all() -> None:
     is_locked() returns True and sub-modules silently ignore commands.
     """
     import gripper as _gripper
-    import pivot   as _pivot
     import arm     as _arm
     import lift    as _lift
     import turntable as _turntable
@@ -227,23 +226,19 @@ def home_all() -> None:
     print("🏠 home_all(): starting sequential homing…")
 
     # 1 ── Gripper ────────────────────────────────────────────────────────────
-    print("  [1/5] Gripper → OPEN")
+    print("  [1/4] Gripper → OPEN")
     _gripper._home()
 
-    # 2 ── Pivot ──────────────────────────────────────────────────────────────
-    print("  [2/5] Pivot → zero")
-    _pivot._home()
-
     # 3 ── Arm ────────────────────────────────────────────────────────────────
-    print("  [3/5] Arm → zero (retract)")
+    print("  [2/4] Arm → zero (retract)")
     _arm._home()
 
     # 4 ── Lift ───────────────────────────────────────────────────────────────
-    print("  [4/5] Lift → zero (bottom)")
+    print("  [3/4] Lift → zero (bottom)")
     _lift._home()
 
     # 5 ── Turntable ──────────────────────────────────────────────────────────
-    print("  [5/5] Turntable → zero (centre)")
+    print("  [4/4] Turntable → zero (centre)")
     _turntable._home()
 
     print(f"🏠 home_all(): complete — locking commands for {POST_HOME_LOCKOUT_S:.0f}s")
