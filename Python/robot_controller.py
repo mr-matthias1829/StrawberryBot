@@ -127,7 +127,7 @@ HW_LOG_EVERY = 5
 # Servo output is suppressed until the target has been continuously visible
 # for this many seconds, to account for RTSP feed latency.
 # Set to 0.0 to disable.
-ACTION_DEBOUNCE_S = 0.7
+ACTION_DEBOUNCE_S = 1.5
 
 
 # =============================================================================
