@@ -31,17 +31,17 @@ from _homing_utils import (
 # TUNING
 # =============================================================================
 
-SERVO_ID  = 13
+SERVO_ID = 13
 DEAD_ZONE = 25
 
-SPEED_SLOW   = 40
+SPEED_SLOW = 40
 SPEED_MEDIUM = 80
-SPEED_FAST   = 160
+SPEED_FAST = 160
 
-THRESHOLD_SLOW   = 50
+THRESHOLD_SLOW = 50
 THRESHOLD_MEDIUM = 150
 
-SENSOR_CHANNEL = 1   # TCA9548A channel wired to this encoder
+SENSOR_CHANNEL = 1  # TCA9548A channel wired to this encoder
 
 MIN_DEG: float | None = -999999999
 MAX_DEG: float | None = 999999999
@@ -50,13 +50,13 @@ MAX_DEG: float | None = 999999999
 SPEED_TO_DEG = 0.3
 
 # AX-12A registers
-_REG_CW_LIMIT  = 6
+_REG_CW_LIMIT = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
-_REG_SPEED     = 32
+_REG_SPEED = 32
 
 _DIR_CCW = 0
-_DIR_CW  = 1 << 10
+_DIR_CW = 1 << 10
 
 # =============================================================================
 # CORNER SENSOR
@@ -118,7 +118,7 @@ def _at_limit(direction: str) -> bool:
             deg = abs_deg - (_zero_deg or 0)
             if direction == "right" and deg >= MAX_DEG:
                 return True
-            if direction == "left"  and deg <= MIN_DEG:
+            if direction == "left" and deg <= MIN_DEG:
                 return True
             return False
         # sensor present but read failed — fall through to DR
@@ -127,26 +127,28 @@ def _at_limit(direction: str) -> bool:
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
     if direction == "right" and estimated_deg >= MAX_DEG:
         return True
-    if direction == "left"  and estimated_deg <= MIN_DEG:
+    if direction == "left" and estimated_deg <= MIN_DEG:
         return True
     return False
+
 
 # =============================================================================
 # STATE
 # =============================================================================
 
-_initialized:  bool  = False
-_pending_word: int   = -1
-_last_word:    int   = -1
-_lock      = threading.Lock()
-_event     = threading.Event()
+_initialized: bool = False
+_pending_word: int = -1
+_last_word: int = -1
+_lock = threading.Lock()
+_event = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
 # Zero-point tracking
-_zero_deg:  float | None = None
-_dead_pos:  list          = [0.0]
-_last_write_time: float   = 0.0
+_zero_deg: float | None = None
+_dead_pos: list = [0.0]
+_last_write_time: float = 0.0
+
 
 # =============================================================================
 # BACKGROUND WRITER THREAD
@@ -158,7 +160,7 @@ def _writer() -> None:
         time.sleep(0.05)
 
         now = time.monotonic()
-        dt  = now - _last_write_time if _last_write_time else 0.0
+        dt = now - _last_write_time if _last_write_time else 0.0
         _last_write_time = now
 
         if _last_word >= 0 and dt > 0:
@@ -178,6 +180,7 @@ def _writer() -> None:
         except Exception as e:
             print(f"[turntable] Serial error: {e}")
 
+
 # =============================================================================
 # LIFECYCLE
 # =============================================================================
@@ -190,11 +193,15 @@ def init() -> None:
 
     _stop_flag = False
 
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0); time.sleep(0.05)
-    motor._write_word(SERVO_ID, _REG_CW_LIMIT,  0); time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0); time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1); time.sleep(0.05)
-    motor._write_word(SERVO_ID, _REG_SPEED,     0)
+    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0);
+    time.sleep(0.05)
+    motor._write_word(SERVO_ID, _REG_CW_LIMIT, 0);
+    time.sleep(0.02)
+    motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0);
+    time.sleep(0.02)
+    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
+    time.sleep(0.05)
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
 
     _thread = threading.Thread(target=_writer, daemon=True, name="turntable-writer")
     _thread.start()
@@ -203,15 +210,15 @@ def init() -> None:
 
     reading = _read_sensor()
     if reading is not None:
-        _zero_deg =  _sensor_mgr.total_position(reading)
+        _zero_deg = _sensor_mgr.total_position(reading)
         print(f"[turntable] Zero point: {_zero_deg:.1f}° (sensor)")
     else:
         _zero_deg = None
         print("[turntable] Zero point: dead-reckoning only")
 
-    _dead_pos[0]      = 0.0
-    _last_write_time  = time.monotonic()
-    _initialized      = True
+    _dead_pos[0] = 0.0
+    _last_write_time = time.monotonic()
+    _initialized = True
     print(f"✅ Turntable initialised (ID {SERVO_ID}, wheel mode).")
 
 
@@ -227,13 +234,14 @@ def shutdown() -> None:
         _thread.join(timeout=1.0)
 
     try:
-        motor._write_word(SERVO_ID, _REG_SPEED,    0)
+        motor._write_word(SERVO_ID, _REG_SPEED, 0)
         motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0)
     except Exception:
         pass
 
     _initialized = False
     print("🛑 Turntable shut down.")
+
 
 # =============================================================================
 # INTERNAL HELPERS
@@ -257,6 +265,7 @@ def _speed_from_dx(dx_abs: int) -> int:
         return SPEED_MEDIUM
     return SPEED_FAST
 
+
 # =============================================================================
 # PUBLIC API
 # =============================================================================
@@ -267,7 +276,6 @@ def stop() -> None:
 
 
 def spin_left(speed: int = SPEED_MEDIUM) -> dict:
-
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CCW | speed)
     servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
@@ -275,7 +283,6 @@ def spin_left(speed: int = SPEED_MEDIUM) -> dict:
 
 
 def spin_right(speed: int = SPEED_MEDIUM) -> dict:
-
     speed = max(0, min(1023, speed))
     _post_word(_DIR_CW | speed)
     servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)
@@ -313,6 +320,7 @@ def update(dx: int) -> str:
     stop()
     return f"TURNTABLE STOP  (dx={dx:+d}, aligned)"
 
+
 # =============================================================================
 # HOMING  (called by motor.home_all())
 # =============================================================================
@@ -342,12 +350,53 @@ def _home() -> None:
     else:
         print("[turntable] Homing with dead-reckoning…")
         home_dead_reckoning(
-            dead_pos_ref      = _dead_pos,
-            drive_positive_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
-            drive_negative_fn = lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW  | s),
-            stop_fn           = lambda:   motor._write_word(SERVO_ID, _REG_SPEED, 0),
+            dead_pos_ref=_dead_pos,
+            drive_positive_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
+            drive_negative_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | s),
+            stop_fn=lambda: motor._write_word(SERVO_ID, _REG_SPEED, 0),
         )
         print("[turntable] Homing complete (dead-reckoning).")
 
     _dead_pos[0] = 0.0
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
+
+
+def home_physical() -> None:
+    """
+    Drive turntable to its physical zero position by hitting the end stop.
+    This is for the UI home button, NOT for bin placement.
+    """
+    if not _initialized:
+        print("[turntable] home_physical(): not initialised — skipping")
+        return
+
+    print("[turntable] Physical homing - moving to end stop...")
+
+    # Stop any current movement
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
+    time.sleep(0.1)
+
+    # Move left (CW) until we hit the end stop (3 seconds should be enough)
+    motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | SPEED_MEDIUM)
+    time.sleep(3.0)
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
+    time.sleep(0.3)
+
+    # Move a tiny bit off the end stop
+    motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | SPEED_SLOW)
+    time.sleep(0.3)
+    motor._write_word(SERVO_ID, _REG_SPEED, 0)
+
+    # Reset dead-reckoning
+    _dead_pos[0] = 0.0
+
+    # Update sensor zero if available
+    if _sensor_mgr is not None:
+        reading = _read_sensor()
+        if reading is not None:
+            global _zero_deg
+            _zero_deg = _sensor_mgr.total_position(reading)
+            print(f"[turntable] Physical home set to {_zero_deg:.1f}°")
+
+    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
+    print("[turntable] Physical homing complete")
