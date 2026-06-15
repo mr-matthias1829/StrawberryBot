@@ -1,10 +1,5 @@
 """Entry points for the strawberry fusion detector."""
-# aea
 import os
-os.environ.setdefault(
-    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|fflags;discardcorrupt|analyzeduration;500000|probesize;500000"
-)
 import time
 import platform
 import sys
@@ -15,61 +10,43 @@ from typing import Optional, cast
 
 import cv2
 import numpy as np
-
 import signal
-
-def _sigterm_handler(signum, frame):
-    print("[main] SIGTERM received — shutting down cleanly…", flush=True)
-    if ON_PI:
-        try: manual_controller.stop()
-        except Exception: pass
-        try: gripper.shutdown()
-        except Exception: pass
-        try: arm.shutdown()
-        except Exception: pass
-        try: pivot.shutdown()
-        except Exception: pass
-        try: lift.shutdown()
-        except Exception: pass
-        try: turntable.shutdown()
-        except Exception: pass
-        try: motor.shutdown()
-        except Exception: pass
-    import sys
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, _sigterm_handler)
 
 ON_PI = platform.system() == "Linux"
 
 # =============================================================================
-# Hardware init — must happen before any submodule that touches motor/servos
+# SIGTERM handler
 # =============================================================================
+
+def _sigterm_handler(signum, frame):
+    print("[main] SIGTERM received — shutting down cleanly…", flush=True)
+    if ON_PI:
+        for mod in (manual_controller, gripper, arm, pivot, lift, turntable, motor):
+            try:
+                (mod.stop if mod is manual_controller else mod.shutdown)()
+            except Exception:
+                pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+
+# =============================================================================
+# Hardware init
+# =============================================================================
+
 if ON_PI:
-    import motor
-    motor.init()
-
-    import turntable
-    turntable.init()
-
-    import lift
-    lift.init()
-
-    import arm
-    arm.init()
-
-    import pivot
-    pivot.init()
-
-    import gripper
-    gripper.init()
-
-    import manual_controller
-    manual_controller.start()
+    import motor;            motor.init()
+    import turntable;        turntable.init()
+    import lift;             lift.init()
+    import arm;              arm.init()
+    import pivot;            pivot.init()
+    import gripper;          gripper.init()
+    import manual_controller; manual_controller.start()
 
 # =============================================================================
-# Stdin diagnostics (harmless on all platforms)
+# Stdin diagnostics
 # =============================================================================
+
 try:
     isatty   = sys.stdin.isatty()
     stdin_fd = sys.stdin.fileno() if hasattr(sys.stdin, "fileno") else None
@@ -87,26 +64,28 @@ from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
 DISPLAY_WIDTH  = 1280
 DISPLAY_HEIGHT = 720
 
-RTSP_ETHERNET = "rtsp://admin:admin@169.254.192.21:554/live"
-RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
+# reCamera Seed 200X — UVC device path on the Pi.
+# Run `v4l2-ctl --list-devices` to confirm; usually /dev/video0.
+UVC_DEVICE = "/dev/video0"
 
 
 # =============================================================================
-# Real-Time Robust Capture Thread (Auto-reconnects on drop)
+# Real-Time Robust Capture Thread (auto-reconnects on drop)
 # =============================================================================
 
 class Capture:
-    def __init__(self, rtsp_url: str, label: str):
-        self.rtsp_url = rtsp_url
-        self.label = label
-        self.cap: Optional[cv2.VideoCapture] = None
-        self.frame: Optional[np.ndarray] = None
+    def __init__(self, device: str, label: str):
+        self.device = device
+        self.label  = label
+        self.cap:   Optional[cv2.VideoCapture] = None
+        self.frame: Optional[np.ndarray]       = None
         self.running = True
-        self.lock = threading.Lock()
+        self.lock    = threading.Lock()
 
         self._establish_connection()
-
-        self.thread = threading.Thread(target=self._reader, daemon=True, name="camera-buffer-flusher")
+        self.thread = threading.Thread(
+            target=self._reader, daemon=True, name="camera-buffer-flusher"
+        )
         self.thread.start()
 
     def _establish_connection(self) -> None:
@@ -117,14 +96,19 @@ class Capture:
                 except Exception:
                     pass
 
-            print(f"[{self.label}] Connecting to stream: {self.rtsp_url}...")
-            if self.rtsp_url == "0":
-                cap = cv2.VideoCapture(0)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            print(f"[{self.label}] Opening UVC device: {self.device}…")
+
+            if ON_PI:
+                cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
             else:
-                cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                # Laptop fallback: index 0, default backend
+                cap = cv2.VideoCapture(0)
+
+            cap.set(cv2.CAP_PROP_FOURCC,       cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  DISPLAY_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DISPLAY_HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS,          30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 
             self.cap = cap
 
@@ -137,27 +121,28 @@ class Capture:
                 current_cap = self.cap
 
             if current_cap is None or not current_cap.isOpened():
-                print(f"[{self.label}] Capture object is dead or null. Reconnecting...")
+                print(f"[{self.label}] Capture dead. Reconnecting…")
                 self._establish_connection()
                 time.sleep(1.0)
                 continue
 
+            # V4L2 grab() blocks until the next frame arrives — no busy-wait needed.
             if not current_cap.grab():
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_FAILURES:
-                    print(f"[{self.label}] Stream died (failed grab). Hard reconnecting pipeline...")
+                    print(f"[{self.label}] Grab failed {MAX_FAILURES}×. Reconnecting…")
                     self._establish_connection()
                     consecutive_failures = 0
                     time.sleep(1.0)
                 else:
-                    time.sleep(0.01)
+                    time.sleep(0.03)
                 continue
 
             ok, frame = current_cap.retrieve()
             if not ok or frame is None:
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_FAILURES:
-                    print(f"[{self.label}] Stream returned null frame data. Hard reconnecting...")
+                    print(f"[{self.label}] Null frame {MAX_FAILURES}×. Reconnecting…")
                     self._establish_connection()
                     consecutive_failures = 0
                     time.sleep(1.0)
@@ -195,119 +180,61 @@ class _WorkerState:
 
 
 # =============================================================================
-# Camera finder helper
-# =============================================================================
-
-def _find_available_camera_source() -> tuple[str, str]:
-    options = [
-        (RTSP_ETHERNET, "reCamera Ethernet"),
-        (RTSP_USB, "reCamera USB"),
-        ("0", "Laptop")
-    ]
-
-    idx = 0
-    while True:
-        url, label = options[idx % len(options)]
-        idx += 1
-
-        print(f"Probing {label}...")
-
-        if url == "0":
-            cap = cv2.VideoCapture(0)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        else:
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if cap.isOpened():
-            max_checks = 1 if url == "0" else 20
-            frame_received = False
-
-            for _ in range(max_checks):
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    frame_received = True
-                    break
-                time.sleep(0.1)
-
-            if frame_received:
-                print(f"--> Success! Found working camera: {label}")
-                cap.release()
-                return url, label
-
-        cap.release()
-        print(f"{label} not available. Moving to next option...")
-        time.sleep(0.5)
-
-
-# =============================================================================
 # Camera badge
 # =============================================================================
 
-def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
-    label   = f"CAM: {mode}"
+def _draw_camera_badge(frame: np.ndarray, label: str) -> None:
+    text    = f"CAM: {label}"
     font    = cv2.FONT_HERSHEY_SIMPLEX
     scale   = 0.55
     thick   = 1
     padding = 6
-    (tw, th), baseline = cv2.getTextSize(label, font, scale, thick)
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
     h, w = frame.shape[:2]
 
     x2 = w - 2
-    x1 = max(0, x2 - (tw + padding * 2 + 10))
+    x1 = max(0, x2 - tw - padding * 2 - 10)
     y1 = 2
     y2 = min(h, y1 + th + baseline + padding * 2)
 
     roi = frame[y1:y2, x1:x2]
-    if roi.size != 0:
-        roi[:] = (
-            roi.astype("float32") * 0.45
-            + np.array([20, 20, 20], dtype="float32") * 0.55
-        ).astype("uint8")
+    if roi.size:
+        roi[:] = (roi.astype("float32") * 0.45 + np.array([20, 20, 20], dtype="float32") * 0.55).astype("uint8")
 
-    colours    = {"reCamera Ethernet": (80, 220, 80), "reCamera USB": (60, 220, 220), "Laptop": (220, 220, 60)}
-    dot_colour = colours.get(mode, (200, 200, 200))
     dot_x = x1 + padding + 5
     dot_y = y1 + (y2 - y1) // 2
-    cv2.circle(frame, (dot_x, dot_y), 4, dot_colour, cv2.FILLED)
-    cv2.putText(frame, label, (dot_x + 10, y1 + padding + th),
-                font, scale, (230, 230, 230), thick, cv2.LINE_AA)
+    cv2.circle(frame, (dot_x, dot_y), 4, (60, 220, 220), cv2.FILLED)
+    cv2.putText(frame, text, (dot_x + 10, y1 + padding + th), font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
 
 # =============================================================================
-# Control mode badge
+# Control-mode badge
 # =============================================================================
 
 def _draw_mode_badge(frame: np.ndarray) -> None:
     is_manual = control_mode.is_manual()
-    label     = "MANUAL" if is_manual else "AUTO"
-    colour    = (0, 100, 255) if is_manual else (0, 220, 100)   # orange-red : green
+    text      = "MANUAL" if is_manual else "AUTO"
+    colour    = (0, 100, 255) if is_manual else (0, 220, 100)
 
     font    = cv2.FONT_HERSHEY_SIMPLEX
     scale   = 0.55
     thick   = 1
     padding = 6
-    (tw, th), baseline = cv2.getTextSize(label, font, scale, thick)
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
 
-    # Top-left corner, just below the camera badge area
     x1 = 2
     y1 = 2
     x2 = x1 + tw + padding * 2 + 14
     y2 = y1 + th + baseline + padding * 2
 
     roi = frame[y1:y2, x1:x2]
-    if roi.size != 0:
-        roi[:] = (
-            roi.astype("float32") * 0.45
-            + np.array([20, 20, 20], dtype="float32") * 0.55
-        ).astype("uint8")
+    if roi.size:
+        roi[:] = (roi.astype("float32") * 0.45 + np.array([20, 20, 20], dtype="float32") * 0.55).astype("uint8")
 
     dot_x = x1 + padding + 5
     dot_y = y1 + (y2 - y1) // 2
     cv2.circle(frame, (dot_x, dot_y), 4, colour, cv2.FILLED)
-    cv2.putText(frame, label, (dot_x + 10, y1 + padding + th),
-                font, scale, (230, 230, 230), thick, cv2.LINE_AA)
+    cv2.putText(frame, text, (dot_x + 10, y1 + padding + th), font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
 
 # =============================================================================
@@ -319,7 +246,7 @@ def _inference_worker(st: _WorkerState) -> None:
     try:
         engine = FusionEngine()
     except Exception as e:
-        print(f"Failed to init FusionEngine in worker: {e}")
+        print(f"[inference] Failed to init FusionEngine: {e}")
         return
 
     try:
@@ -327,7 +254,7 @@ def _inference_worker(st: _WorkerState) -> None:
             frame = None
             with cast(threading.Lock, st.lock):
                 if st.frame is not None:
-                    frame = st.frame
+                    frame   = st.frame
                     st.frame = None
 
             if frame is None:
@@ -344,7 +271,6 @@ def _inference_worker(st: _WorkerState) -> None:
 
             with cast(threading.Lock, st.lock):
                 st.result = (annotated, confirmed, debug, mask, process_ms)
-
     finally:
         try:
             engine.shutdown()
@@ -363,59 +289,54 @@ def run_webcam() -> None:
     show_mask       = config.SHOW_DEBUG_WINDOWS
     fps_timer       = time.perf_counter()
     fps_count       = 0
-    capture_wrapper = None
     headless        = False
+    cam_label       = "reCamera USB"
 
-    state = _WorkerState(lock=threading.Lock())
+    state  = _WorkerState(lock=threading.Lock())
     worker = threading.Thread(
-        target=_inference_worker,
-        args=(state,),
-        daemon=True,
-        name="inference-worker",
+        target=_inference_worker, args=(state,), daemon=True, name="inference-worker"
     )
     worker.start()
 
+    capture = Capture(UVC_DEVICE, cam_label)
+
+    print(f"\nCamera engine started (UVC direct, MJPG).")
+    print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
+    print("Keys: q=quit  d=toggle mask  m=toggle manual/auto\n")
+
+    last_read_ms = 0.0
+    last_proc_ms = 0.0
+
     try:
-        target_url, cam_mode = _find_available_camera_source()
-        capture_wrapper = Capture(target_url, cam_mode)
-
-        print(f"\nCamera Engine initialized in background thread context.")
-        print(f"Inference at {INFER_SCALE:.0%} res every {DETECT_EVERY} display frames.")
-        print("Press 'q' to quit, 'd' to toggle debug mask, 'm' to toggle manual/auto.\n")
-
-        last_read_ms = 0.0
-        last_proc_ms = 0.0
-
         while True:
-            t_read = time.perf_counter()
-            frame = capture_wrapper.read()
+            t_read       = time.perf_counter()
+            frame        = capture.read()
             last_read_ms = (time.perf_counter() - t_read) * 1000.0
 
             if frame is None:
-                time.sleep(0.03)
+                time.sleep(0.005)
                 continue
 
             # ------------------------------------------------------------------
-            # MANUAL MODE — skip autonomous inference, just stream the raw frame
+            # MANUAL MODE
             # ------------------------------------------------------------------
             if control_mode.is_manual():
-                h, w = frame.shape[:2]
+                h, w  = frame.shape[:2]
                 display = (
                     cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
                     if (w, h) != (DISPLAY_WIDTH, DISPLAY_HEIGHT)
                     else frame.copy()
                 )
-                _draw_camera_badge(display, cam_mode)
+                _draw_camera_badge(display, cam_label)
                 _draw_mode_badge(display)
 
                 try:
                     web_server.push_frame(display)
                 except Exception as e:
-                    print(f"Warning: web_server.push_frame failed: {e}")
+                    print(f"Warning: push_frame failed: {e}")
 
                 if not headless:
                     try:
-                        #cv2.imshow("Strawberry Detection", display)
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord("q"):
                             break
@@ -425,16 +346,15 @@ def run_webcam() -> None:
                         print(f"GUI unavailable (headless): {e}")
                         headless = True
 
-                time.sleep(0.03)
+                time.sleep(0.005)
                 continue
 
             # ------------------------------------------------------------------
-            # AUTONOMOUS MODE — pass frame to inference worker
+            # AUTONOMOUS MODE
             # ------------------------------------------------------------------
             with cast(threading.Lock, state.lock):
                 state.frame = frame
 
-            res = None
             with cast(threading.Lock, state.lock):
                 res = state.result
 
@@ -452,13 +372,13 @@ def run_webcam() -> None:
                 else annotated
             )
             display = np.asarray(display)
-            _draw_camera_badge(display, cam_mode)
+            _draw_camera_badge(display, cam_label)
             _draw_mode_badge(display)
 
             try:
                 web_server.push_frame(display)
             except Exception as e:
-                print(f"Warning: web_server.push_frame failed: {e}")
+                print(f"Warning: push_frame failed: {e}")
 
             fps_count += 1
             now = time.perf_counter()
@@ -477,12 +397,6 @@ def run_webcam() -> None:
 
             if not headless:
                 try:
-                    #cv2.imshow("Strawberry Detection", display)
-                    #if show_mask and mask is not None:
-                        #cv2.imshow(
-                         #   "CV Mask",
-                           # cv2.resize(mask, (DISPLAY_WIDTH // 2, DISPLAY_HEIGHT // 2)),
-                        #)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
                         break
@@ -504,8 +418,7 @@ def run_webcam() -> None:
             worker.join(timeout=2.0)
         except Exception:
             pass
-        if capture_wrapper is not None:
-            capture_wrapper.release()
+        capture.release()
         cv2.destroyAllWindows()
         if ON_PI:
             manual_controller.stop()
@@ -532,16 +445,13 @@ def run_image(image_path: Optional[str] = None) -> None:
         print(f"Error: Could not load image from {image_path}")
         return
 
-    fusion    = FusionEngine()
-    annotated = None
-    confirmed = []
-    debug     = {"ai_count": 0, "cv_count": 0, "fused_count": 0, "confirmed_count": 0, "possible_count": 0}
-    mask      = None
-    possible  = None
+    fusion   = FusionEngine()
+    debug    = {"ai_count": 0, "cv_count": 0, "fused_count": 0, "confirmed_count": 0, "possible_count": 0}
+    possible = None
 
     try:
         try:
-            fusion.process_frame(np.asarray(frame))   # warmup
+            fusion.process_frame(np.asarray(frame))  # warmup
         except Exception:
             pass
         time.sleep(0.5)
@@ -572,9 +482,6 @@ def run_image(image_path: Optional[str] = None) -> None:
             print(f"    P{obj.id}: conf={obj.fused_confidence:.3f}, seen={obj.seen_count}, source={det.source}")
 
     try:
-        #cv2.imshow("Result", annotated)
-        #if mask is not None:
-            #cv2.imshow("Mask", mask)
         cv2.waitKey(0)
     except Exception as e:
         print(f"GUI unavailable: {e}")
