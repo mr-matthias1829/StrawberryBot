@@ -56,7 +56,7 @@ MIN_DEG: float | None = -999999999
 MAX_DEG: float | None = 999999999
 
 # dead-reckoning limit conversion: degrees per (speed-unit * second).
-SPEED_TO_DEG = 0.3 # untested, as it always has a sensor
+SPEED_TO_DEG = 0.3  # untested, as it always has a sensor
 
 # AX-12A registers
 _REG_CW_LIMIT = 6
@@ -72,7 +72,7 @@ _DIR_CW = 1 << 10
 _sensor_mgr = None
 
 
-def _init_sensor() -> None: # in hindsight: shouldve used a single global init() for all servo
+def _init_sensor() -> None:  # in hindsight: shouldve used a single global init() for all servo
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -139,7 +139,6 @@ def _at_limit(direction: str) -> bool:
     return False
 
 
-
 _initialized: bool = False
 _pending_word: int = -1
 _last_word: int = -1
@@ -171,10 +170,18 @@ def _writer() -> None:
         with _lock:
             word = _pending_word
 
-        if word < 0 or word == _last_word:
+        # 🔥 FIX 2: REMOVED the motor.is_locked() check here
+        # The writer should NEVER skip writing due to lock
+        # lock handling is now in _post_word() with wait
+
+        if word < 0:
             continue
-        if motor.is_locked():
+
+        # If same word, still write it if it's a stop command (0)
+        # or if we're forcing a re-write
+        if word == _last_word and word != 0:
             continue
+
         try:
             motor._write_word(SERVO_ID, _REG_SPEED, word)
             _last_word = word
@@ -249,11 +256,25 @@ def shutdown() -> None:
     print("🛑 turntable shut down.")
 
 
-
 def _post_word(word: int) -> None:
+    """Post a speed command to the writer thread.
+
+    🔥 FIX 1: NEVER DROP commands due to lock.
+    Instead, wait for lock to clear with a timeout.
+    """
     global _pending_word
+
+    # Wait for lock to clear instead of dropping
+    # This is the CRITICAL fix
+    timeout = 5.0  # 5 second timeout
+    start = time.monotonic()
+    while motor.is_locked() and (time.monotonic() - start) < timeout:
+        time.sleep(0.01)
+
     if motor.is_locked():
-        return
+        # Emergency: if still locked after timeout, log but still try to send
+        print(f"[turntable] WARNING: lock still active after {timeout}s - forcing write anyway")
+
     with _lock:
         _pending_word = word
     _event.set()
@@ -267,7 +288,6 @@ def _speed_from_dx(dx_abs: int) -> int:
     if dx_abs <= THRESHOLD_MEDIUM:
         return SPEED_MEDIUM
     return SPEED_FAST
-
 
 
 def stop() -> None:
@@ -409,3 +429,13 @@ def home_physical() -> None:
 
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
     print("[turntable] physical homing complete")
+
+
+#  BONUS: debug helper to see if commands are being dropped
+def debug_command(word: int) -> bool:
+    """Test if a command would be dropped due to lock."""
+    if motor.is_locked():
+        print(f"[turntable] DEBUG: Command {word} would be DROPPED (locked)")
+        return False
+    print(f"[turntable] DEBUG: Command {word} would be ACCEPTED")
+    return True
