@@ -11,9 +11,9 @@ is present.  _home() drives back to zero using whichever is available.
 
 coordinate convention
 ---------------------
-    dz > 0  → target is FAR    → extend  (forward)
-    dz < 0  → target is CLOSE  → retract (backward)
-    |dz| ≤ DEAD_ZONE  → aligned, stop
+    dz > 0  -> target is FAR    -> extend  (forward)
+    dz < 0  -> target is CLOSE  -> retract (backward)
+    |dz| <= DEAD_ZONE  -> aligned, stop
 """
 
 import threading
@@ -55,9 +55,8 @@ _REG_SPEED     = 32
 _DIR_CCW = 0
 _DIR_CW  = 1 << 10
 
-# =============================================================================
-# CORNER SENSOR
-# =============================================================================
+
+# corner sensor
 
 _sensor_mgr = None
 

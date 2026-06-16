@@ -26,9 +26,8 @@ GRID LAYOUT (3x3, left-to-right, top-to-bottom):
 import time
 import threading
 
-# =============================================================================
-# HARDWARE IMPORTS
-# =============================================================================
+
+# hardware imports
 
 try:
     import turntable as _turntable
@@ -72,9 +71,8 @@ except ImportError:
     _HAS_MOTOR = False
     print("[bin] motor not available — simulating")
 
-# =============================================================================
-# TUNING — adjust these values for your robot
-# =============================================================================
+
+# tuning to adjust values for the robot
 
 # Direction to rotate toward bin ("left" or "right")
 BIN_SIDE: str = "left"
@@ -113,9 +111,8 @@ POST_HOME_SETTLE_S: float = 0.5
 GRID_COLS: int = 3
 GRID_ROWS: int = 3
 
-# =============================================================================
-# STATE
-# =============================================================================
+
+# state
 
 _lock = threading.Lock()
 _slot_index: int = 0
@@ -146,9 +143,7 @@ def reset() -> None:
     print("[bin] Reset — starting fresh bin.")
 
 
-# =============================================================================
-# LOCKOUT HELPER
-# =============================================================================
+# lockout helper
 
 def _wait_for_lockout() -> None:
     """Block until the motor post-home lockout has expired."""
@@ -175,9 +170,7 @@ def _wait_for_lockout_then_settle() -> None:
     time.sleep(POST_HOME_SETTLE_S)
 
 
-# =============================================================================
-# HOME HELPERS
-# =============================================================================
+# home helpers
 
 def _home_axes_keep_gripper_closed() -> None:
     """
@@ -260,9 +253,7 @@ def _home_all_including_gripper() -> None:
     print("[bin] Full homing complete")
 
 
-# =============================================================================
-# MOVEMENT HELPERS
-# =============================================================================
+# movement helpers
 
 def _turntable_move(duration: float, direction: str = None) -> None:
     """Rotate turntable for specific duration."""
@@ -366,9 +357,7 @@ def _open_gripper() -> None:
     time.sleep(GRIPPER_DROP_WAIT_S)
 
 
-# =============================================================================
-# SLOT POSITION CALCULATION
-# =============================================================================
+# slot position calculation
 
 def _calculate_slot_times(row: int, col: int) -> tuple[float, float]:
     """
@@ -403,9 +392,7 @@ def _drive_to_slot(row: int, col: int) -> None:
     _arm_move(arm_time, forward=True)
 
 
-# =============================================================================
-# MAIN SEQUENCE
-# =============================================================================
+# main sequence
 
 def place_berry() -> bool:
     """
@@ -431,35 +418,25 @@ def place_berry() -> bool:
         print(f"\n[bin] === PLACING BERRY #{current_slot + 1}/{total} ===")
         print(f"[bin] Slot {current_slot} → Row {row}, Col {col}")
 
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 1: Home all axes EXCEPT the gripper (berry is still held)
-        # ─────────────────────────────────────────────────────────────────────
+        # homing all axes except the gripper while berry is still held
         print("[bin] STEP 1: Homing axes (gripper stays closed)...")
         _home_axes_keep_gripper_closed()
 
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 2: Drive to specific slot in bin
-        # ─────────────────────────────────────────────────────────────────────
+        # driving to specific spot in bin
         print("[bin] STEP 2: Driving to slot...")
         _drive_to_slot(row, col)
 
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 3: Drop the berry
-        # ─────────────────────────────────────────────────────────────────────
+        # dropping the berry
         print("[bin] STEP 3: Dropping berry...")
         _pivot_lower_drop()
         _open_gripper()
         _pivot_raise_home()
 
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 4: Home all axes (gripper can now open freely)
-        # ─────────────────────────────────────────────────────────────────────
+        # homing all axes, gripper can now move freely
         print("[bin] STEP 4: Homing all axes...")
         _home_all_including_gripper()
 
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 5: Update counter
-        # ─────────────────────────────────────────────────────────────────────
+        # updating counter
         with _lock:
             _slot_index += 1
             new_count = _slot_index
@@ -502,9 +479,7 @@ def place_berry() -> bool:
             _busy = False
 
 
-# =============================================================================
-# STATUS
-# =============================================================================
+# status
 
 def status() -> dict:
     with _lock:
@@ -539,9 +514,7 @@ def status() -> dict:
     }
 
 
-# =============================================================================
-# TEST
-# =============================================================================
+# test
 
 if __name__ == "__main__":
     print("=== bin.py test (3x3 grid) ===")
