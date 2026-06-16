@@ -6,11 +6,12 @@ Post-grip bin-placement sequencer for StrawberryBot.
 
 SIMPLE FLOW:
   1. Gripper is already closed (called after successful grip)
-  2. HOME ALL AXES (turntable, lift, arm, pivot)
-  3. Drive to bin with slot offset (turntable + arm based on grid position)
-  4. Lower pivot, open gripper, raise pivot
-  5. HOME ALL AXES again
-  6. Done - robot resumes searching for next berry
+  2. HOME ALL AXES except gripper (turntable, lift, arm, pivot)
+  3. Wait for motor lockout to expire
+  4. Drive to bin with slot offset (turntable + arm based on grid position)
+  5. Lower pivot, open gripper, raise pivot
+  6. HOME ALL AXES again (including gripper this time)
+  7. Done - robot resumes searching for next berry
 
 GRID LAYOUT (3x3, left-to-right, top-to-bottom):
 
@@ -31,7 +32,6 @@ import threading
 
 try:
     import turntable as _turntable
-
     _HAS_TURNTABLE = True
 except ImportError:
     _HAS_TURNTABLE = False
@@ -39,7 +39,6 @@ except ImportError:
 
 try:
     import lift as _lift
-
     _HAS_LIFT = True
 except ImportError:
     _HAS_LIFT = False
@@ -47,7 +46,6 @@ except ImportError:
 
 try:
     import arm as _arm
-
     _HAS_ARM = True
 except ImportError:
     _HAS_ARM = False
@@ -55,7 +53,6 @@ except ImportError:
 
 try:
     import pivot as _pivot
-
     _HAS_PIVOT = True
 except ImportError:
     _HAS_PIVOT = False
@@ -63,7 +60,6 @@ except ImportError:
 
 try:
     import gripper as _gripper
-
     _HAS_GRIPPER = True
 except ImportError:
     _HAS_GRIPPER = False
@@ -71,7 +67,6 @@ except ImportError:
 
 try:
     import motor as _motor
-
     _HAS_MOTOR = True
 except ImportError:
     _HAS_MOTOR = False
@@ -106,6 +101,9 @@ GRIPPER_DROP_WAIT_S: float = 0.5
 # Settle pause after each move
 SETTLE_S: float = 0.2
 
+# How long to wait for motor lockout to expire after homing (s)
+LOCKOUT_WAIT_TIMEOUT_S: float = 15.0
+
 # Grid dimensions (3x3)
 GRID_COLS: int = 3
 GRID_ROWS: int = 3
@@ -122,7 +120,7 @@ _busy: bool = False
 def _slot_to_row_col(slot: int):
     """Convert slot number (0-8) to (row, col)."""
     row = slot // GRID_COLS  # 0, 1, 2
-    col = slot % GRID_COLS  # 0, 1, 2
+    col = slot % GRID_COLS   # 0, 1, 2
     return row, col
 
 
@@ -144,44 +142,104 @@ def reset() -> None:
 
 
 # =============================================================================
-# HOME ALL AXES (same as web interface button)
+# LOCKOUT HELPER
 # =============================================================================
 
-def _home_all() -> None:
-    """Home all axes - uses same function as web UI home button."""
-    print("[bin] Homing ALL axes...")
+def _wait_for_lockout() -> None:
+    """Block until the motor post-home lockout has expired."""
+    if not _HAS_MOTOR:
+        return
+    deadline = time.monotonic() + LOCKOUT_WAIT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not _motor.is_locked():
+            return
+        time.sleep(0.05)
+    print("[bin] WARNING: lockout wait timed out — proceeding anyway")
+
+
+# =============================================================================
+# HOME HELPERS
+# =============================================================================
+
+def _home_axes_keep_gripper_closed() -> None:
+    """
+    Home arm, lift, turntable and pivot — but NOT the gripper.
+    The gripper stays closed because we are still holding the berry.
+    Also waits for the motor lockout to expire before returning,
+    so subsequent timed moves are not silently dropped.
+    """
+    print("[bin] Homing axes (gripper stays closed)...")
+
+    if _HAS_ARM and hasattr(_arm, '_home'):
+        print("[bin]  → arm")
+        _arm._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_LIFT and hasattr(_lift, '_home'):
+        print("[bin]  → lift")
+        _lift._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_TURNTABLE and hasattr(_turntable, '_home'):
+        print("[bin]  → turntable")
+        _turntable._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_PIVOT and hasattr(_pivot, '_home'):
+        print("[bin]  → pivot")
+        _pivot._home()
+        time.sleep(SETTLE_S)
+
+    # The individual _home() calls don't set a lockout, but if motor.home_all()
+    # was used elsewhere and the lockout is still ticking, wait it out now.
+    _wait_for_lockout()
+
+    print("[bin] Homing complete (gripper kept closed)")
+
+
+def _home_all_including_gripper() -> None:
+    """
+    Home everything including the gripper (berry has been released).
+    Uses motor.home_all() if available, otherwise homes individually.
+    Waits for the lockout to expire before returning.
+    """
+    print("[bin] Homing ALL axes (including gripper)...")
 
     if _HAS_MOTOR and hasattr(_motor, 'home_all'):
         _motor.home_all()
+        # home_all() sets the lockout — wait for it to expire
+        _wait_for_lockout()
     else:
-        print("[bin] No motor.home_all() found, homing individually...")
+        print("[bin] No motor.home_all() — homing individually...")
+
+        if _HAS_GRIPPER and hasattr(_gripper, '_home'):
+            print("[bin]  → gripper")
+            _gripper._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_ARM and hasattr(_arm, '_home'):
+            print("[bin]  → arm")
+            _arm._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_LIFT and hasattr(_lift, '_home'):
+            print("[bin]  → lift")
+            _lift._home()
+            time.sleep(SETTLE_S)
 
         if _HAS_TURNTABLE and hasattr(_turntable, '_home'):
+            print("[bin]  → turntable")
             _turntable._home()
             time.sleep(SETTLE_S)
 
-        if _HAS_LIFT:
-            if hasattr(_lift, 'move_up'):
-                _lift.move_up()
-                time.sleep(2.0)
-                _lift.stop()
+        if _HAS_PIVOT and hasattr(_pivot, '_home'):
+            print("[bin]  → pivot")
+            _pivot._home()
             time.sleep(SETTLE_S)
 
-        if _HAS_ARM:
-            if hasattr(_arm, 'move_backward'):
-                _arm.move_backward()
-                time.sleep(1.5)
-                _arm.stop()
-            time.sleep(SETTLE_S)
+        _wait_for_lockout()
 
-        if _HAS_PIVOT:
-            if hasattr(_pivot, 'move_down'):
-                _pivot.move_down()
-                time.sleep(0.3)
-                _pivot.stop()
-            time.sleep(SETTLE_S)
-
-    print("[bin] Homing complete")
+    print("[bin] Full homing complete")
 
 
 # =============================================================================
@@ -294,11 +352,9 @@ def _calculate_slot_times(row: int, col: int) -> tuple[float, float]:
     Col 1 (midden): turntable base tijd
     Col 2 (rechts): turntable meer tijd
     """
-    # Turntable time: col 0 = -1 step, col 1 = 0, col 2 = +1 step
     col_offset = col - 1  # -1, 0, or 1
     turntable_time = TURNTABLE_BASE_S + (col_offset * TURNTABLE_STEP_S)
 
-    # Arm time: row 0 = -1 step, row 1 = 0, row 2 = +1 step
     row_offset = row - 1  # -1, 0, or 1
     arm_time = ARM_BASE_S + (row_offset * ARM_STEP_S)
 
@@ -347,10 +403,10 @@ def place_berry() -> bool:
         print(f"[bin] Slot {current_slot} → Row {row}, Col {col}")
 
         # ─────────────────────────────────────────────────────────────────────
-        # STEP 1: Home all axes
+        # STEP 1: Home all axes EXCEPT the gripper (berry is still held)
         # ─────────────────────────────────────────────────────────────────────
-        print("[bin] STEP 1: Homing all axes...")
-        _home_all()
+        print("[bin] STEP 1: Homing axes (gripper stays closed)...")
+        _home_axes_keep_gripper_closed()
 
         # ─────────────────────────────────────────────────────────────────────
         # STEP 2: Drive to specific slot in bin
@@ -367,10 +423,10 @@ def place_berry() -> bool:
         _pivot_raise_home()
 
         # ─────────────────────────────────────────────────────────────────────
-        # STEP 4: Home all axes again
+        # STEP 4: Home all axes (gripper can now open freely)
         # ─────────────────────────────────────────────────────────────────────
         print("[bin] STEP 4: Homing all axes...")
-        _home_all()
+        _home_all_including_gripper()
 
         # ─────────────────────────────────────────────────────────────────────
         # STEP 5: Update counter
@@ -446,7 +502,6 @@ if __name__ == "__main__":
     print(f"Turntable: base={TURNTABLE_BASE_S}s, step={TURNTABLE_STEP_S}s")
     print(f"Arm: base={ARM_BASE_S}s, step={ARM_STEP_S}s\n")
 
-    # Show slot layout
     print("Slot layout:")
     for row in range(3):
         line = []
