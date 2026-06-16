@@ -43,9 +43,9 @@ import serial
 # CONFIG
 # =============================================================================
 
-DIRECTION_PIN  = 17
-PORT           = "/dev/ttyAMA0"
-BAUDRATE       = 1_000_000
+DIRECTION_PIN = 17
+PORT = "/dev/ttyAMA0"
+BAUDRATE = 1_000_000
 
 # All known servo IDs — torque is disabled on all of them during shutdown.
 ALL_SERVO_IDS = [2, 3, 4, 5, 8, 13]
@@ -53,26 +53,34 @@ ALL_SERVO_IDS = [2, 3, 4, 5, 8, 13]
 # AX-12A register addresses
 TORQUE_ENABLE = 24
 GOAL_POSITION = 30
-MOVING_SPEED  = 32
+MOVING_SPEED = 32
 
 # =============================================================================
 # HARDWARE STATE  (module-level singletons)
 # =============================================================================
 
-_h:            object = None   # lgpio chip handle  (Pi only)
-_ser:          object = None   # serial.Serial instance
-_initialized:  bool   = False
+_h: object = None  # lgpio chip handle  (Pi only)
+_ser: object = None  # serial.Serial instance
+_initialized: bool = False
+
+# =============================================================================
+# THREAD SAFETY  (CRITICAL FIX)
+# =============================================================================
+
+# Single lock that serializes ALL serial writes.  Without this, multiple
+# threads can interleave their packets on the bus, corrupting commands.
+_serial_lock: threading.Lock = threading.Lock()
 
 # =============================================================================
 # HOMING LOCKOUT
 # =============================================================================
 
-_locked:        bool            = False   # True during post-home lockout
-_locked_until:  float           = 0.0     # monotonic timestamp when lock expires
-_locked_set_at: float           = 0.0     # monotonic timestamp when lock was set
-_lock_mutex:    threading.Lock  = threading.Lock()
+_locked: bool = False  # True during post-home lockout
+_locked_until: float = 0.0  # monotonic timestamp when lock expires
+_locked_set_at: float = 0.0  # monotonic timestamp when lock was set
+_lock_mutex: threading.Lock = threading.Lock()
 
-POST_HOME_LOCKOUT_S = 0.3   # seconds to refuse commands after home_all()
+POST_HOME_LOCKOUT_S = 0.3  # seconds to refuse commands after home_all()
 
 
 def is_locked() -> bool:
@@ -108,6 +116,7 @@ def _clear_lock() -> None:
     with _lock_mutex:
         _locked = False
         _locked_set_at = 0.0
+
 
 # =============================================================================
 # LIFECYCLE
@@ -168,20 +177,32 @@ def shutdown() -> None:
 
     print(" Motor shutdown complete.")
 
+
 # =============================================================================
 # LOW-LEVEL COMMS  (private — used by sub-modules only)
 # =============================================================================
 
 def _send_packet(packet: bytes) -> None:
+    """
+    Send a packet over the serial bus with proper thread synchronization.
+
+    CRITICAL: This uses _serial_lock to prevent multiple threads from
+    interleaving their writes. Without this, packets get corrupted on the bus.
+    """
     if not _initialized:
         raise RuntimeError("motor.init() has not been called.")
-    if ON_PI:
-        lgpio.gpio_write(_h, DIRECTION_PIN, 1)
-    _ser.write(packet)
-    _ser.flush()
-    time.sleep(0.001)
-    if ON_PI:
-        lgpio.gpio_write(_h, DIRECTION_PIN, 0)
+
+    # Serialize ALL serial writes with a single lock
+    with _serial_lock:
+        if ON_PI:
+            lgpio.gpio_write(_h, DIRECTION_PIN, 1)
+
+        _ser.write(packet)
+        _ser.flush()
+        time.sleep(0.001)
+
+        if ON_PI:
+            lgpio.gpio_write(_h, DIRECTION_PIN, 0)
 
 
 def _checksum(data: list) -> int:
@@ -189,7 +210,7 @@ def _checksum(data: list) -> int:
 
 
 def _write_word(servo_id: int, address: int, value: int) -> None:
-    low  = value & 0xFF
+    low = value & 0xFF
     high = (value >> 8) & 0xFF
     data = [servo_id, 5, 0x03, address, low, high]
     _send_packet(bytes([0xFF, 0xFF] + data + [_checksum(data)]))
@@ -198,6 +219,7 @@ def _write_word(servo_id: int, address: int, value: int) -> None:
 def _write_byte(servo_id: int, address: int, value: int) -> None:
     data = [servo_id, 4, 0x03, address, value]
     _send_packet(bytes([0xFF, 0xFF] + data + [_checksum(data)]))
+
 
 # =============================================================================
 # PUBLIC TORQUE HELPERS
@@ -211,6 +233,7 @@ def enable_torque(servo_id: int) -> None:
 def disable_torque(servo_id: int) -> None:
     print(f" Torque OFF (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 0)
+
 
 # =============================================================================
 # HOMING  (sequential, blocks until all motors are zeroed)
@@ -233,8 +256,8 @@ def home_all() -> None:
     is_locked() returns True and sub-modules silently ignore commands.
     """
     import gripper as _gripper
-    import arm     as _arm
-    import lift    as _lift
+    import arm as _arm
+    import lift as _lift
     import turntable as _turntable
 
     print(" home_all(): starting sequential homing…")
@@ -257,9 +280,11 @@ def home_all() -> None:
 
     print(f" home_all(): complete — locking commands for {POST_HOME_LOCKOUT_S:.0f}s")
     _set_lock(POST_HOME_LOCKOUT_S)
+
     # Spin in a background thread so we don't block the caller forever, but
     # print a clear message when the lock expires.
     def _log_unlock():
         time.sleep(POST_HOME_LOCKOUT_S + 0.05)
         print(" Motor lockout expired — commands accepted again.")
+
     threading.Thread(target=_log_unlock, daemon=True, name="home-lock-expire").start()
