@@ -106,10 +106,10 @@ POSSIBLE_TARGET_MIN_CONF         = 0.50  # Lowered from 0.60 to match CV_ONLY fl
 # DISPLAY
 # =============================================================================
 SHOW_DEBUG_WINDOWS = True
-COLOR_AI       = (0, 255, 0)
-COLOR_CV       = (255, 80, 0)
+COLOR_AI       = (0, 255, 0) #unused
+COLOR_CV       = (255, 80, 0) #unused
 COLOR_FUSED    = (0, 255, 255)
-COLOR_ZOOMED   = (255, 255, 0)
+COLOR_ZOOMED   = (255, 255, 0) #unused
 COLOR_POSSIBLE = (180, 100, 255)
 
 # =============================================================================
@@ -133,8 +133,8 @@ GRIPPER_AUTO_GRIP_ENABLED = True
 
 MIN_GRAB_AREA_RATIO = 0.1
 
-GRAB_CENTER_TOLERANCE_X = 15
-GRAB_CENTER_TOLERANCE_Y = 15
+GRAB_CENTER_TOLERANCE_X = 15 #unused
+GRAB_CENTER_TOLERANCE_Y = 15 #unused
 
 # Auto-mode control: when False, arm won't extend AND gripper won't auto-grip
 AUTO_MODE_ALLOW_MOVE = True
