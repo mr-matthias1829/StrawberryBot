@@ -10,7 +10,7 @@ Hardware calls are fire-and-forget.
 Arm logic (autonomous mode)
 ----------------------------
 The arm extends forward whenever the current target is fully contained
-inside the gripper bounding box, regardless of apparent size / depth.
+inside the gripper bounding box, regardless of apparent depth.
 Once the target leaves the gripper area the arm stops.
 
 Grip logic
@@ -25,41 +25,35 @@ The gripper fires when:
 
 Post-grip sequence
 ------------------
-After a successful grip, drive_hardware() is immediately frozen:
-  - All servos (turntable, lift, arm) are stopped.
-  - _gripped is set to True, blocking every subsequent drive_hardware() call.
-  - bin.place_berry() is launched on a daemon worker thread.
-  - When place_berry() returns (success or exception), _gripped is cleared
-    and normal tracking resumes automatically.
+After a successful grip, drive_hardware() freezes:
+  - all servos (turntable, lift, arm) stop
+  - _gripped is set True, blocking all subsequent drive_hardware() calls
+  - bin.place_berry() runs on a daemon worker thread
+  - when place_berry() finishes, _gripped clears and tracking resumes
 
 Smoothing
 ---------
-Raw dx/dy offsets are passed through an EMA (Exponential Moving Average)
-filter before reaching the servos.  This absorbs single-frame detection
-blinks and prevents micro-jitter on the turntable and lift axes.
+Raw dx/dy offsets go through an EMA filter before reaching the servos.
+Absorbs single-frame detection blinks and prevents micro-jitter on the
+turntable and lift.
 
-A dead-zone gate then zeroes out any smoothed offset that is still below
-the X/Y threshold, so the servos hold position instead of hunting around
-the centre.
+Dead-zone gate zeroes out any smoothed offset still below the X/Y
+threshold so servos hold position instead of hunting around centre.
 
-Tune EMA_ALPHA in the CONFIG section:
+Tune EMA_ALPHA:
   0.4  — responsive, mild smoothing
   0.25 — balanced (default)
   0.1  — very smooth, noticeable lag on fast moves
 
 Action debounce
 ---------------
-Because the RTSP camera feed has inherent latency, detections we receive
-now correspond to what the camera *saw* ACTION_DEBOUNCE_S seconds ago.
-To avoid chasing already-stale positions, all servo output (turntable,
-lift, arm, gripper) is suppressed until the current target has been
+Because the RTSP camera feed has latency, detections we receive now
+correspond to what the camera saw ACTION_DEBOUNCE_S seconds ago.
+All servo output is suppressed until the current target has been
 continuously visible for at least ACTION_DEBOUNCE_S seconds.
 
-  ACTION_DEBOUNCE_S = 0.0  — disables debounce entirely
-  ACTION_DEBOUNCE_S = 0.25 — good starting point for ~200-300 ms feed lag
-
-When the debounce is active the robot holds position (EMA decays toward
-zero naturally) and logs "[DEBOUNCE] waiting …" once per target.
+  ACTION_DEBOUNCE_S = 0.0  — disables debounce
+  ACTION_DEBOUNCE_S = 0.25 — good starting point for ~200-300ms feed lag
 """
 
 import math
@@ -107,48 +101,37 @@ except ImportError:
     _HAS_BIN = False
 
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-
 X_THRESHOLD = 25
 Y_THRESHOLD = 25
 
 PRIORITIZE_Y = True
 
-# ── EMA smoothing ──────────────────────────────────────────────────────────────
+# EMA smoothing
 EMA_ALPHA = 0.25
 
-# ── Lock hysteresis ────────────────────────────────────────────────────────────
+# lock hysteresis
 LOCK_HYSTERESIS_BASE  = 40
 LOCK_HYSTERESIS_DEPTH = 30
 
-# ── Ghost-lock grace period ────────────────────────────────────────────────────
+# ghost-lock grace period
 LOCK_GHOST_FRAMES = 2
 
-# ── Candidate scoring weights ──────────────────────────────────────────────────
+# candidate scoring weights
 WEIGHT_DIST  = 0.5
 WEIGHT_DEPTH = 0.5
 
-# ── Depth units ───────────────────────────────────────────────────────────────
+# depth units
 DEPTH_UNITS_MIN = 0.2
 DEPTH_UNITS_MAX = 1000
 
-# ── Depth estimation ──────────────────────────────────────────────────────────
+# depth estimation
 DEPTH_CONF_WEIGHT = 0.35
 
 HW_LOG_EVERY = 5
 
-# ── Action debounce ───────────────────────────────────────────────────────────
-# Servo output is suppressed until the target has been continuously visible
-# for this many seconds, to account for RTSP feed latency.
-# Set to 0.0 to disable.
+# servo output is suppressed until the target has been continuously visible
+# for this many seconds (accounts for RTSP feed latency). set to 0.0 to disable.
 ACTION_DEBOUNCE_S = 0.5
-
-
-# =============================================================================
-# DATA
-# =============================================================================
 
 @dataclass
 class RobotTarget:
@@ -160,12 +143,8 @@ class RobotTarget:
     depth_units: float = 1.0
 
 
-# =============================================================================
-# CONTROLLER
-# =============================================================================
-
 class RobotController:
-    """Select target strawberries and produce simple movement commands."""
+    """select target strawberries and produce simple movement commands."""
 
     def __init__(self) -> None:
         self.current_target: Optional[RobotTarget] = None
@@ -175,20 +154,15 @@ class RobotController:
         self._last_target_id = None
         self._arm_extending: bool = False
 
-        # EMA state — smoothed dx/dy sent to the servos
         self._smooth_dx: float = 0.0
         self._smooth_dy: float = 0.0
 
-        # Debounce state
         self._stable_since: Optional[float] = None   # monotonic timestamp
         self._debounce_logged: bool = False           # suppress repeat log spam
 
-        # Post-grip state — True while bin.place_berry() is running
+        # True while bin.place_berry() is running
         self._gripped: bool = False
 
-    # =========================================================================
-    # GEOMETRY
-    # =========================================================================
 
     @staticmethod
     def get_box_center(det: Detection) -> Tuple[int, int]:
@@ -198,9 +172,6 @@ class RobotController:
     def _distance_to(gripper_x: int, gripper_y: int, x: int, y: int) -> float:
         return math.hypot(x - gripper_x, y - gripper_y)
 
-    # =========================================================================
-    # DEPTH
-    # =========================================================================
 
     @staticmethod
     def estimate_depth(det: Detection) -> float:
@@ -236,17 +207,11 @@ class RobotController:
             return "VERY FAR"
         return "UNKNOWN"
 
-    # =========================================================================
-    # CANDIDATE SCORING
-    # =========================================================================
 
     def _candidate_score(self, dist: float, depth_score: float, max_dist: float) -> float:
         dist_norm = dist / max(max_dist, 1.0)
         return dist_norm * WEIGHT_DIST + (1.0 - depth_score) * WEIGHT_DEPTH
 
-    # =========================================================================
-    # TARGET SELECTION
-    # =========================================================================
 
     @staticmethod
     def _simple_iou(a: Detection, b: Detection) -> float:
@@ -327,7 +292,7 @@ class RobotController:
             ) * WEIGHT_DIST
 
             if best_score < cur_score - margin:
-                # Switched to a better target — reset debounce
+                # switched to a better target — reset debounce
                 self._ghost_frames    = 0
                 self.current_target   = best
                 self._stable_since    = None
@@ -335,19 +300,16 @@ class RobotController:
 
             return self.current_target
 
-        # New target acquired — start debounce clock
+        # new target acquired — start debounce clock
         self._ghost_frames    = 0
         self.current_target   = best
         self._stable_since    = time.monotonic()
         self._debounce_logged = False
         return self.current_target
 
-    # =========================================================================
-    # DEBOUNCE GATE
-    # =========================================================================
 
     def _debounce_ready(self) -> bool:
-        """Return True when the current target has been stable long enough to act on."""
+        """returns True when the current target has been stable long enough to act on."""
         if ACTION_DEBOUNCE_S <= 0.0:
             return True
         if self._stable_since is None:
@@ -360,9 +322,6 @@ class RobotController:
             self._debounce_logged = True
         return False
 
-    # =========================================================================
-    # GRIPPER
-    # =========================================================================
 
     @staticmethod
     def get_gripper_bbox(gripper_x: int, gripper_y: int) -> Tuple[int, int, int, int]:
@@ -421,12 +380,9 @@ class RobotController:
         else:
             self._gripper_containment_frames = 0
 
-    # =========================================================================
-    # POST-GRIP BIN PLACEMENT
-    # =========================================================================
 
     def _stop_all_servos(self) -> None:
-        """Hard-stop every moving axis immediately."""
+        """hard-stop every moving axis immediately."""
         if _HAS_TURNTABLE:
             _turntable.stop()
         if _HAS_LIFT:
@@ -437,7 +393,7 @@ class RobotController:
 
     def _run_place_berry(self) -> None:
         """
-        Worker thread target: run the full bin-placement sequence,
+        worker thread: run the full bin-placement sequence,
         then release the gripped lock so tracking resumes.
         """
         try:
@@ -450,13 +406,9 @@ class RobotController:
             print(f"[RC] ERROR in place_berry thread: {e}")
         finally:
             self._gripped = False
-            # Reset EMA so the robot doesn't lurch when it resumes tracking
             self._reset_ema()
             print("[RC] Bin placement done — resuming tracking")
 
-    # =========================================================================
-    # OFFSETS
-    # =========================================================================
 
     def generate_dx(self, gripper_x: int) -> int:
         if self.current_target is None:
@@ -468,9 +420,6 @@ class RobotController:
             return 0
         return self.current_target.center_y - gripper_y
 
-    # =========================================================================
-    # SMOOTHING
-    # =========================================================================
 
     def _update_ema(self, raw_dx: int, raw_dy: int) -> Tuple[int, int]:
         self._smooth_dx = EMA_ALPHA * raw_dx + (1.0 - EMA_ALPHA) * self._smooth_dx
@@ -483,9 +432,6 @@ class RobotController:
         self._smooth_dx = 0.0
         self._smooth_dy = 0.0
 
-    # =========================================================================
-    # HUD
-    # =========================================================================
 
     def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
         if self._gripped:
@@ -543,9 +489,6 @@ class RobotController:
             return "ARM: STOPPED (placing)"
         return f"ARM: {'EXTENDING' if contained else 'STOPPED'}"
 
-    # =========================================================================
-    # HARDWARE
-    # =========================================================================
 
     def _drive_arm(self, gripper_x: int, gripper_y: int) -> Tuple[bool, str]:
         if self.current_target is None:
@@ -586,10 +529,8 @@ class RobotController:
         self._hw_log_counter += 1
         do_log = self._hw_log_counter % HW_LOG_EVERY == 0
 
-        # ── Gripped gate ──────────────────────────────────────────────────────
-        # While bin.place_berry() is running on its worker thread, hold all
-        # servos stopped.  The EMA also decays toward zero so the robot doesn't
-        # lurch when tracking resumes.
+        # while bin.place_berry() is running on its worker thread, hold all
+        # servos stopped. EMA decays toward zero so no lurch when tracking resumes.
         if self._gripped:
             self._stop_all_servos()
             self._update_ema(0, 0)
@@ -606,9 +547,8 @@ class RobotController:
             self._update_ema(0, 0)
             return
 
-        # ── Debounce gate ─────────────────────────────────────────────────────
-        # Hold position (let EMA decay) until the target has been stable long
-        # enough to compensate for camera feed latency.
+        # hold position (let EMA decay) until the target has been stable long
+        # enough to compensate for camera feed latency
         if not self._debounce_ready():
             self._update_ema(0, 0)
             if _HAS_TURNTABLE:
@@ -619,27 +559,22 @@ class RobotController:
                 _arm.stop()
             return
 
-        # ── Smooth the raw pixel offsets ──────────────────────────────────────
         raw_dx = self.generate_dx(gripper_x)
         raw_dy = self.generate_dy(gripper_y)
         dx, dy = self._update_ema(raw_dx, raw_dy)
 
-        # ── Turntable (horizontal) ────────────────────────────────────────────
         if _HAS_TURNTABLE:
             tt_msg = _turntable.update(-dx)
         else:
             tt_msg = f"TURNTABLE dx={-dx}"
 
-        # ── Lift (vertical) ───────────────────────────────────────────────────
         if _HAS_LIFT:
             lift_msg = _lift.update(dy)
         else:
             lift_msg = f"LIFT dy={dy}"
 
-        # ── Arm (depth) ───────────────────────────────────────────────────────
         contained, arm_msg = self._drive_arm(gripper_x, gripper_y)
 
-        # ── Gripper ───────────────────────────────────────────────────────────
         gripper_msg = "GRIPPER: no hardware"
         if _HAS_GRIPPER:
             self.update_gripper_containment(gripper_x, gripper_y)
@@ -658,7 +593,6 @@ class RobotController:
                             self._gripper_containment_frames = 0
                             gripper_msg = "GRIPPER: GRIPPED"
 
-                            # Stop everything before handing off to the bin thread
                             self._stop_all_servos()
                             self._gripped = True
 

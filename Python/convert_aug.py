@@ -8,9 +8,7 @@ import shutil
 # to run: run this exact file. no other python files needed.
 # note: make sure you ran convert_csv.py, as that creates the proper data that this script uses and needs
 
-# =============================================================================
-# CONFIG
-# =============================================================================
+# config
 IMAGES_DIR  = "dataset/images"
 LABELS_DIR  = "dataset/labels"
 OUT_TRAIN_IMAGES = "dataset_aug/images/train"
@@ -24,7 +22,7 @@ SYNTHETIC_NEGATIVES_VAL   = 5
 RED_NEGATIVES_SOLID = 8   # plain red fill, different shades
 RED_NEGATIVES_MIXED = 5   # image split into 2-4 red shade blocks
 
-# Background-swap: how many random backgrounds to composite per image
+# background-swap: how many random backgrounds to composite per image
 BG_SWAP_TRAIN = 3   # dark / gradient / noisy variants each
 BG_SWAP_VAL   = 1   # one random bg for val
 
@@ -46,18 +44,12 @@ AUGMENTATIONS = {
     "bg_swap":    False,
 }
 
-# =============================================================================
-# SETUP
-# =============================================================================
+#setup
 for _dir in (OUT_TRAIN_IMAGES, OUT_TRAIN_LABELS, OUT_VAL_IMAGES, OUT_VAL_LABELS):
     if os.path.exists(_dir):
         shutil.rmtree(_dir)
     os.makedirs(_dir)
 
-
-# =============================================================================
-# LABEL HELPERS
-# =============================================================================
 
 def read_labels(label_path: str) -> list[tuple]:
     labels = []
@@ -80,14 +72,10 @@ def save(name: str, img: np.ndarray, labels: list[tuple], train: bool = True) ->
     label_dir = OUT_TRAIN_LABELS if train else OUT_VAL_LABELS
     ok = cv2.imwrite(os.path.join(img_dir,   name + ".jpg"), img)
     if not ok:
-        print(f"  [ERROR] Failed to write image: {name}.jpg")
+        print(f"  [ERROR] failed to write image: {name}.jpg")
         return
     write_labels(os.path.join(label_dir, name + ".txt"), labels)
 
-
-# =============================================================================
-# BBOX TRANSFORMS
-# =============================================================================
 
 def flip_h(labels):
     return [(c, 1.0-xc, yc, w, h) for c, xc, yc, w, h in labels]
@@ -147,12 +135,13 @@ def zoom_out_labels(labels, pad_frac):
             for cls, xc, yc, w, h in labels]
 
 
-# =============================================================================
-# BACKGROUND GENERATORS
-# =============================================================================
 
+"""
+background swap barely works and isn't too useful LOL
+a attempt was made at least
+"""
 def _dark_bg(h, w, rng):
-    """Near-black — mimics dark surfaces, clothing."""
+    """near-black — mimics dark surfaces, clothing."""
     v = int(rng.uniform(10, 55))
     bg = np.full((h, w, 3), v, dtype=np.uint8)
     # slight noise so it's not a flat block
@@ -160,7 +149,7 @@ def _dark_bg(h, w, rng):
     return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 def _gradient_bg(h, w, rng):
-    """Two-color gradient — generic indoor/outdoor surface."""
+    """two-color gradient — generic indoor/outdoor surface."""
     c1 = rng.integers(20, 210, 3).astype(np.float32)
     c2 = rng.integers(20, 210, 3).astype(np.float32)
     # random direction: horizontal or vertical
@@ -174,13 +163,13 @@ def _gradient_bg(h, w, rng):
     return bg
 
 def _noisy_bg(h, w, rng):
-    """Random noise — busy/textured surface."""
+    """random noise — busy/textured surface."""
     base  = int(rng.uniform(30, 180))
     noise = rng.integers(-50, 51, (h, w, 3), dtype=np.int16)
     return np.clip(base + noise, 0, 255).astype(np.uint8)
 
 def _wood_bg(h, w, rng):
-    """Rough wood-grain simulation — common table surface."""
+    """rough wood-grain simulation — common table surface."""
     base_color = np.array(rng.integers([60,30,10],[160,100,60], 3), dtype=np.float32)
     bg = np.zeros((h, w, 3), dtype=np.float32)
     for i in range(h):
@@ -198,7 +187,7 @@ def _wood_bg(h, w, rng):
     return np.clip(bg + noise, 0, 255).astype(np.uint8)
 
 def _solid_color_bg(h, w, rng):
-    """Solid muted color — like a colored table or backdrop."""
+    """solid muted color — like a colored table or backdrop."""
     color = rng.integers(30, 200, 3)
     bg = np.full((h, w, 3), color, dtype=np.uint8)
     noise = rng.integers(-15, 16, (h, w, 3), dtype=np.int16)
@@ -207,7 +196,7 @@ def _solid_color_bg(h, w, rng):
 _BG_FNS = [_dark_bg, _gradient_bg, _noisy_bg, _wood_bg, _solid_color_bg]
 
 def _solid_red_bg(h, w, rng):
-    """Solid red fill — teaches model that red alone ≠ strawberry."""
+    """solid red fill — teaches model that red alone ≠ strawberry."""
     r = int(rng.uniform(120, 255))
     g = int(rng.uniform(0,   60))
     b = int(rng.uniform(0,   50))
@@ -216,7 +205,7 @@ def _solid_red_bg(h, w, rng):
     return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 def _mixed_red_bg(h, w, rng):
-    """Image split into 2-4 horizontal bands, each a different red shade."""
+    """image split into 2-4 horizontal bands, each a different red shade."""
     bg = np.zeros((h, w, 3), dtype=np.uint8)
     n  = int(rng.integers(2, 5))
     cuts = sorted(rng.integers(h // 5, 4 * h // 5, n - 1).tolist())
@@ -230,7 +219,7 @@ def _mixed_red_bg(h, w, rng):
     return np.clip(bg.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 def random_background(h, w, rng=None, exclude=None):
-    """Return a random background image of shape (h, w, 3)."""
+    """return a random background image of shape (h, w, 3)."""
     if rng is None:
         rng = np.random.default_rng()
     choices = [f for f in _BG_FNS if f is not exclude]
@@ -238,36 +227,33 @@ def random_background(h, w, rng=None, exclude=None):
     return fn(h, w, rng)
 
 
-# =============================================================================
-# WHITE BACKGROUND REMOVAL + COMPOSITING
-# =============================================================================
 
 def extract_foreground_mask(img: np.ndarray,
                              white_thresh: int = 230,
                              erode_px: int = 2) -> np.ndarray:
     """
-    Returns a uint8 mask (0=background, 255=foreground) by thresholding
-    near-white pixels.  Works well for studio shots on white/light-grey bg.
+    returns a uint8 mask (0=background, 255=foreground) by thresholding
+    near-white pixels.  works well for studio shots on white/light-grey bg.
 
     white_thresh : pixels where ALL channels >= this are considered background.
     erode_px     : shrinks the mask edge slightly to remove white fringing
                    that gets left behind after compositing.
     """
-    # Convert to float and check if pixel is "near white" in all channels
+    # convert to float and check if pixel is "near white" in all channels
     gray_max = img.max(axis=2)           # max channel per pixel
     gray_min = img.min(axis=2)           # min channel per pixel
 
-    # Background: bright (all channels high) AND low saturation (max≈min)
+    # background: bright (all channels high) AND low saturation (max~=min)
     is_bg = (gray_max.astype(np.int16) >= white_thresh) & \
             (gray_max.astype(np.int16) - gray_min.astype(np.int16) < 30)
 
     mask = np.where(is_bg, 0, 255).astype(np.uint8)
 
-    # Fill small holes inside the foreground (e.g. white glare on berries)
+    # fill small holes inside the foreground (e.g. white glare on berries)
     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
 
-    # Erode to remove white halo fringing at the foreground edge
+    # erode to remove white halo fringing at the foreground edge
     if erode_px > 0:
         kernel_erode = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (erode_px*2+1, erode_px*2+1))
@@ -280,7 +266,7 @@ def composite_on_background(img: np.ndarray,
                               mask: np.ndarray,
                               bg: np.ndarray) -> np.ndarray:
     """
-    Alpha-blend foreground (img) over bg using mask.
+    alpha-blend foreground (img) over bg using mask.
     mask is uint8 0/255; we blur its edge for a smooth transition.
     """
     # Soft edge: blur the mask so the composite doesn't look cut-out
@@ -295,7 +281,7 @@ def composite_on_background(img: np.ndarray,
 
 
 def aug_bg_swap(img: np.ndarray, rng=None) -> np.ndarray:
-    """Extract foreground, place on a random non-white background."""
+    """extract foreground, place on a random non-white background."""
     if rng is None:
         rng = np.random.default_rng()
     h, w = img.shape[:2]
@@ -304,9 +290,6 @@ def aug_bg_swap(img: np.ndarray, rng=None) -> np.ndarray:
     return composite_on_background(img, mask, bg)
 
 
-# =============================================================================
-# IMAGE TRANSFORMS
-# =============================================================================
 
 def aug_brightness(img):
     alpha = np.random.choice([0.6, 1.5])
@@ -355,9 +338,7 @@ def aug_zoom_out(img, pad_frac=0.5):
                               cv2.BORDER_REPLICATE)
 
 
-# =============================================================================
 # SYNTHETIC NEGATIVE GENERATOR
-# =============================================================================
 
 _SKIN  = [(147,182,219),(120,160,200),(90,130,170),(60,90,130),(40,60,90),
            (130,160,210),(80,100,180),(100,130,200),(60,80,150),(150,180,230)]
@@ -438,9 +419,10 @@ def generate_red_negatives(n_solid, n_mixed, img_size=640):
         save(f"red_mixed_val_{i:03d}", _mixed_red_bg(img_size, img_size, rng), [], train=False)
     print(f"  Done.")
 
-# =============================================================================
-# MAIN
-# =============================================================================
+
+
+# AND THEN FINALLY: THE MAIN CODE FOR THIS SCRIPT...
+# ... MAN WE REALLY NEED TO ORGANIZE THESE FILES BETTER
 
 def augment_dataset() -> None:
     image_files = [f for f in os.listdir(IMAGES_DIR)
@@ -456,7 +438,7 @@ def augment_dataset() -> None:
 
     rng = np.random.default_rng()
 
-    # Fixed background sequence for train bg_swap so we always get one of each type
+    # fixed background sequence for train bg_swap so we always get one of each type
     _TRAIN_BG_FNS = [_dark_bg, _gradient_bg, _noisy_bg]  # length == BG_SWAP_TRAIN=3
 
     for filename in image_files:
@@ -474,16 +456,16 @@ def augment_dataset() -> None:
         h, w = img.shape[:2]
         mask = extract_foreground_mask(img) if AUGMENTATIONS.get("bg_swap") else None
 
-        # -- Copy original -> val ------------------------------------------
+        # copy original -> val
         save(stem, img, labels, train=False)
 
-        # -- Flips -> train ------------------------------------------------
+        # flips -> train
         if AUGMENTATIONS["flip_h"]:
             save(f"{stem}_fliph", cv2.flip(img,1), flip_h(labels), train=True)
         if AUGMENTATIONS["flip_v"]:
             save(f"{stem}_flipv", cv2.flip(img,0), flip_v(labels), train=True)
 
-        # -- Rotations -> train --------------------------------------------
+        # Rotations -> train
         for key, angle in [("rot_15",15),("rot_30",30),
                             ("rot_neg15",-15),("rot_neg30",-30)]:
             if AUGMENTATIONS[key]:
@@ -491,7 +473,7 @@ def augment_dataset() -> None:
                      rotate_image(img, angle),
                      rotate_labels(labels, angle, w, h), train=True)
 
-        # -- Photometric -> train ------------------------------------------
+        # Photometric -> train
         if AUGMENTATIONS["brightness"]:
             save(f"{stem}_bright", aug_brightness(img), labels, train=True)
         if AUGMENTATIONS["darken"]:
@@ -503,7 +485,7 @@ def augment_dataset() -> None:
         if AUGMENTATIONS["heavy_blur"]:
             save(f"{stem}_heavyblur", aug_heavy_blur(img), labels, train=True)
 
-        # -- Spatial zoom -> train -----------------------------------------
+        # Spatial zoom -> train
         if AUGMENTATIONS["zoom_in"]:
             save(f"{stem}_zoomin",
                  aug_zoom_in(img, ZOOM_IN_FRAC),
@@ -517,20 +499,20 @@ def augment_dataset() -> None:
                  aug_zoom_out(img, ZOOM_OUT2_FRAC),
                  zoom_out_labels(labels, ZOOM_OUT2_FRAC), train=True)
 
-        # -- Background swap -> train + val --------------------------------
+        # Background swap -> train + val
         if AUGMENTATIONS.get("bg_swap") and mask is not None:
-            # Train: one of each bg type for variety
+            # train: one of each bg type for variety
             for i, bg_fn in enumerate(_TRAIN_BG_FNS):
                 bg      = bg_fn(h, w, rng)
                 swapped = composite_on_background(img, mask, bg)
                 save(f"{stem}_bg{i}", swapped, labels, train=True)
 
-            # Val: one random bg
+            # val: one random bg
             bg      = random_background(h, w, rng)
             swapped = composite_on_background(img, mask, bg)
             save(f"{stem}_bgval", swapped, labels, train=False)
 
-    # -- Synthetic hard negatives ------------------------------------------
+    # synthetic hard negatives
     first    = cv2.imread(os.path.join(IMAGES_DIR, image_files[0]))
     neg_size = first.shape[0] if first is not None else 640
     generate_all_negatives(SYNTHETIC_NEGATIVES_TRAIN, SYNTHETIC_NEGATIVES_VAL,
