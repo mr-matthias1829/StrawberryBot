@@ -131,7 +131,7 @@ HW_LOG_EVERY = 5
 
 # servo output is suppressed until the target has been continuously visible
 # for this many seconds (accounts for RTSP feed latency). set to 0.0 to disable.
-ACTION_DEBOUNCE_S = 0.1
+ACTION_DEBOUNCE_S = 0.3
 
 @dataclass
 class RobotTarget:

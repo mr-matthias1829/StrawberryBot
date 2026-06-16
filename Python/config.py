@@ -69,7 +69,7 @@ TRACK_MATCH_CENTER_DIST_MAX   = 1.50   # max normalized center distance (diagona
 # ---------------------------------------------------------------------------
 # Detections older than this (wall-clock seconds since frame capture) are
 # excluded from driving the robot.  Tune to ≈ your observed camera latency.
-MAX_ACCEPTABLE_FRAME_AGE_S = 2.5   # seconds  — start conservative, tune down
+MAX_ACCEPTABLE_FRAME_AGE_S = 3   # seconds  — start conservative, tune down
 
 # ---------------------------------------------------------------------------
 # ZOOM RECHECK  (per-track, time-based cooldown)
