@@ -6,11 +6,11 @@ AS5600_ADDR = 0x36
 RAW_MSB     = 0x0C
 RAW_LSB     = 0x0D
 
-# Threshold (degrees) to detect a wrap: if the jump between two readings is
+# threshold (degrees) to detect a wrap: if the jump between two readings is
 # larger than this we treat it as a 0°/360° crossing.
 WRAP_THRESHOLD = 180.0
 
-# How many times to retry an I2C read before giving up and falling back to
+# how many times to retry an I2C read before giving up and falling back to
 # the last known-good value. Keeps gaps between successful samples small so
 # wrap detection (_update_laps) doesn't get fed a stale _prev_deg.
 READ_RETRIES = 3
@@ -24,19 +24,16 @@ class CornerSensorManager:
         self.channels = self._discover_channels()
         print(f"[INFO] Found sensors on channels: {self.channels}")
 
-        # Lap tracking — keyed by channel number
+        # lap tracking — keyed by channel number
         self._laps:      dict[int, int]   = {ch: 0 for ch in self.channels}
         self._prev_deg:  dict[int, float] = {}   # last known angle per channel
         self._direction: dict[int, int]   = {ch: 0 for ch in self.channels}  # +1 / -1 / 0
 
-        # Last known-good reading per channel — returned (marked stale) if
+        # last known-good reading per channel — returned (marked stale) if
         # the live read fails after all retries, so callers always get the
         # most reliable latest value instead of an exception/None.
         self._last_good: dict[int, dict] = {}
 
-    # ------------------------------------------------------------------ #
-    #  Internal helpers                                                  #
-    # ------------------------------------------------------------------ #
 
     def _select(self, ch: int) -> None:
         if ch < 0 or ch > 7:
@@ -63,8 +60,8 @@ class CornerSensorManager:
 
     def _read_raw_retry(self, ch: int) -> int | None:
         """
-        Try to read the raw value up to READ_RETRIES times.
-        Returns the raw int on success, or None if every attempt failed.
+        try to read the raw value up to READ_RETRIES times.
+        returns the raw int on success, or None if every attempt failed.
         """
         last_err = None
         for attempt in range(READ_RETRIES):
@@ -74,15 +71,15 @@ class CornerSensorManager:
                 last_err = e
                 if attempt < READ_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
-        print(f"[WARN] Channel {ch} read failed after {READ_RETRIES} attempts: {last_err}")
+        print(f"[WARN] channel {ch} read failed after {READ_RETRIES} attempts: {last_err}")
         return None
 
     @staticmethod
-    def _deg(raw: int) -> float:
+    def _deg(raw: int) -> float: # converts raw to proper deg
         return raw * 360.0 / 4096.0
 
     def _update_laps(self, ch: int, new_deg: float) -> None:
-        """Detect a 0°/360° wrap and increment (or decrement) the lap counter."""
+        """detect a 0°/360° wrap and increment (or decrement) the lap counter."""
         if ch not in self._prev_deg:
             self._prev_deg[ch] = new_deg
             return
@@ -101,17 +98,15 @@ class CornerSensorManager:
 
         self._prev_deg[ch] = new_deg
 
-    # ------------------------------------------------------------------ #
-    #  Public API                                                          #
-    # ------------------------------------------------------------------ #
+
 
     def channel_has_sensor(self, ch: int) -> bool:
-        """Return True if a sensor was discovered on the given TCA channel."""
+        """return True if a sensor was discovered on the given TCA channel."""
         return ch in self.channels
 
     def read_sensor(self, ch: int) -> dict:
         """
-        Read one sensor by TCA channel number.
+        read one sensor by TCA channel number.
 
         Returns a dict with keys:
             channel  – TCA channel
@@ -122,14 +117,7 @@ class CornerSensorManager:
                        reading because the live read failed even after
                        retries; False if it's a fresh sample.
 
-        Raises ValueError if no sensor is present on that channel.
-
-        Note: this no longer raises OSError on a transient read failure.
-        It retries internally (READ_RETRIES attempts, RETRY_DELAY apart)
-        and, if every attempt fails, returns the last known-good reading
-        (marked stale=True) so callers always get the most reliable
-        latest value. OSError is only raised if this channel has never
-        produced a successful reading.
+        Raises ValueError if no sensor is present on that channel
         """
         if not self.channel_has_sensor(ch):
             raise ValueError(f"No sensor on channel {ch}")
@@ -137,8 +125,8 @@ class CornerSensorManager:
         raw = self._read_raw_retry(ch)
 
         if raw is None:
-            # All retries failed this cycle — fall back to last known-good
-            # reading rather than returning nothing. Crucially, _prev_deg /
+            # all retries failed this cycle — fall back to last known-good
+            # reading rather than returning nothing. crucially, _prev_deg /
             # _laps are NOT touched here, so the next successful read still
             # compares against the correct previous angle.
             if ch in self._last_good:
@@ -161,38 +149,38 @@ class CornerSensorManager:
 
     def read_sensor_by_index(self, index: int) -> dict:
         """
-        Read sensor by discovery index (0-based).
-        Convenience wrapper around read_sensor() for code that uses
+        read sensor by discovery index (0-based).
+        convenience wrapper around read_sensor() for code that uses
         positional numbering rather than channel numbers.
         """
         if index < 0 or index >= len(self.channels):
-            raise IndexError(f"Sensor index {index} out of range (found {len(self.channels)} sensors)")
+            raise IndexError(f"sensor index {index} out of range (found {len(self.channels)} sensors)")
         return self.read_sensor(self.channels[index])
 
     def get_laps(self, ch: int) -> int:
-        """Return the current lap count for a channel (positive = CW, negative = CCW)."""
+        """return the current lap count for a channel (positive = CW, negative = CCW)."""
         if not self.channel_has_sensor(ch):
             raise ValueError(f"No sensor on channel {ch}")
         return self._laps[ch]
 
     def reset_laps(self, ch: int | None = None) -> None:
         """
-        Reset lap counters.
-        Pass a channel number to reset just one sensor, or None to reset all.
+        reset lap counters.
+        pass a channel number to reset just one sensor, or None to reset all.
         """
         targets = self.channels if ch is None else (ch,)
         for c in targets:
             self._laps[c] = 0
 
     def sensor_count(self) -> int:
-        """Return the number of discovered sensors."""
+        """return the number of discovered sensors."""
         return len(self.channels)
 
     def read_all(self) -> dict:
         """
-        Read every discovered sensor.
+        read every discovered sensor.
 
-        Returns a dict keyed by "sensor_1", "sensor_2", … each containing:
+        returns a dict keyed by "sensor_1", "sensor_2", … each containing:
             channel, raw, deg, laps, stale
         """
         result = {}
@@ -204,7 +192,7 @@ class CornerSensorManager:
         return result
 
     def monitor(self, delay: float = 0.2) -> None:
-        """Continuously print all sensor readings until Ctrl-C."""
+        """continuously print all sensor readings until Ctrl-C."""
         try:
             while True:
                 data = self.read_all()
@@ -216,11 +204,11 @@ class CornerSensorManager:
                 print(line)
                 time.sleep(delay)
         except KeyboardInterrupt:
-            print("\nStopped")
+            print("\nstopped")
 
     @staticmethod
     def total_position(reading: dict) -> float:
-        """Give the full degrees amount by (laps * degrees), includes correction for negative numbers"""
+        """give the full degrees amount by (laps * degrees), includes correction for negative numbers"""
         laps = reading["laps"]
         deg = reading["deg"]
         if laps >= 0:
@@ -229,10 +217,9 @@ class CornerSensorManager:
             return laps * 360.0 - (360.0 - deg)
 
 
-# ------------------------------------------------------------------ #
-#  Stand-alone entry point                                           #
-# ------------------------------------------------------------------ #
 
+# standalone
+# reads all discovered sensors and then monitors them
 if __name__ == "__main__":
     sensors = CornerSensorManager(bus_num=1)
     sensors.monitor()

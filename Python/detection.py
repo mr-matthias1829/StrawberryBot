@@ -1,4 +1,4 @@
-"""Detection pipelines: YOLO AI and contour-based OpenCV."""
+"""detection pipelines: YOLO AI and contour-based OpenCV."""
 
 import cv2
 import numpy as np
@@ -10,28 +10,26 @@ import threading
 import config
 
 
-# ---------------------------------------------------------------------------
-# Class definitions — must match dataset_aug yaml order
-# ---------------------------------------------------------------------------
+# class definitions, must match dataset_aug yaml order
 CLASS_NAMES = {
     0: "strawberry",
     1: "bad strawberry",
 }
 
-# Unique box colours per class (BGR)
+# unique box colours per class (BGR)
 CLASS_COLORS = {
-    0: (100,   100, 200),   # Strawberry  — roze
+    0: (100,   100, 200),   # strawberry  — roze
     1: (0,   0,   100),   # rotten      — donker-rood
     2: (0,   180,  60),   # leaf        — groen
 }
 
-# Only these class IDs are valid strawberry targets
+# only these class IDs are valid strawberry targets
 TARGETABLE_CLASS_IDS = {0}
 
 
 @dataclass
 class Detection:
-    """Unified detection object from either pipeline."""
+    """unified detection object from either pipeline."""
     x1: int
     y1: int
     x2: int
@@ -43,7 +41,7 @@ class Detection:
 
     @property
     def is_targetable(self) -> bool:
-        """True when this detection represents a ripe strawberry."""
+        """true when this detection represents a ripe strawberry."""
         return self.class_id in TARGETABLE_CLASS_IDS
 
     @property
@@ -55,46 +53,40 @@ class Detection:
         return CLASS_NAMES.get(self.class_id, "unknown")
 
 
-# =============================================================================
-# DYNAMIC CV CONFIG
-# =============================================================================
-# All mutable state for the CV pipeline lives here so it can be hot-swapped
-# from the web UI without restarting the process.  Thread-safe via a lock.
+# all mutable CV state lives here so it can be hot-swapped from the web UI
+# without restarting. thread-safe via a lock.
 
 @dataclass
 class CVConfig:
     """
-    Runtime-editable parameters for the CV detector.
+    runtime-editable parameters for the CV detector.
 
     HSV ranges follow OpenCV conventions:
-      H ∈ [0, 179],  S ∈ [0, 255],  V ∈ [0, 255]
+      H [0, 179],  S [0, 255],  V [0, 255]
 
-    Red wraps around 0/180 so two ranges are needed (lower1/upper1 for the
-    low-hue band, lower2/upper2 for the high-hue band).  For non-wrapping
-    colours (green, yellow, …) set both ranges to the same values or leave
-    lower2/upper2 with H=0 so the second mask contributes nothing.
+    red wraps around 0/180 so two ranges are needed (lower1/upper1 for the
+    low-hue band, lower2/upper2 for the high-hue band). for non-wrapping
+    colours set both ranges to the same values or leave lower2/upper2
+    with H=0 so the second mask contributes nothing.
     """
-    # ── Hue ranges ──────────────────────────────────────────────────────────
+
     h1_low:  int = 0      # lower hue-band: low end
     h1_high: int = 10     # lower hue-band: high end
     h2_low:  int = 160    # upper hue-band: low end
     h2_high: int = 179    # upper hue-band: high end
 
-    # ── Saturation / value gate ─────────────────────────────────────────────
     sat_min: int = 150     # reject washed-out / pastel colours
     val_min: int = 50     # reject very dark regions / shadows
     val_max: int = 240    # reject near-white highlights
 
-    # ── Shape filters ───────────────────────────────────────────────────────
     contour_min_circularity: float = 0.55
     max_aspect_ratio:        float = 1.6
 
-    # ── Watershed / NMS ─────────────────────────────────────────────────────
     watershed_fg_thresh: float = 0.35
     nms_iou_threshold:   float = 0.35
 
     def to_hsv_arrays(self):
-        """Return (lower1, upper1, lower2, upper2) as numpy arrays."""
+        """return (lower1, upper1, lower2, upper2) as numpy arrays."""
         lower1 = np.array([self.h1_low,  self.sat_min, self.val_min])
         upper1 = np.array([self.h1_high, 255,          self.val_max])
         lower2 = np.array([self.h2_low,  self.sat_min, self.val_min])
@@ -132,7 +124,7 @@ class CVConfig:
         return obj
 
 
-# Shared, process-wide mutable config + its lock
+# shared, process-wide mutable config + its lock
 _cv_config_lock = threading.Lock()
 _cv_config = CVConfig(
     h1_low  = int(config.RED_LOWER1[0]),
@@ -154,10 +146,6 @@ def set_cv_config(new_cfg: CVConfig) -> None:
         _cv_config = new_cfg
 
 
-# =============================================================================
-# AI DETECTOR
-# =============================================================================
-
 class AIDetector:
     """YOLO-based detector with multi-class support."""
 
@@ -167,17 +155,15 @@ class AIDetector:
 
     def detect(self, frame: np.ndarray, conf_threshold: float = None) -> List[Detection]:
         """
-        Runs YOLO detection and returns detections for all classes.
+        runs YOLO detection and returns detections for all classes.
 
-        Previously used a triple-pass strategy (running inference 3 times and
-        keeping the pass with the highest average confidence).  The current
-        implementation runs a single pass, which is sufficient now that the
-        model is more robust.
+        previously used a triple-pass strategy (three inference runs, keep
+        the highest average confidence). now just a single pass — the model
+        is good enough that it's not needed anymore.
         """
         if conf_threshold is None:
             conf_threshold = config.YOLO_BASE_THRESHOLD
 
-        # verbose=False keeps the console clean during inference
         results = self.model(frame, conf=conf_threshold, verbose=False)
         detections: List[Detection] = []
 
@@ -201,11 +187,8 @@ class AIDetector:
         return detections
 
 
-# =============================================================================
-# CV DETECTOR
-# =============================================================================
 
-# Reuse tiny kernel instead of recreating it every frame.
+# reuse tiny kernel instead of recreating it every frame
 _KERNEL3 = np.ones((3, 3), np.uint8)
 
 
@@ -213,37 +196,33 @@ class CVDectector:
     """
     OpenCV contour + watershed detector.
 
-    Improvements over the original version
-    ---------------------------------------
-    1. Saturation + value gate on the red mask so pale / dark non-berry
-       reds are rejected at the very first stage.
-    2. Per-contour circularity and aspect-ratio pre-filter so elongated
-       blobs never reach splitting or scoring.
-    3. Watershed-based cluster splitting instead of convexity-defect
-       heuristics — produces at most one box per berry centre, no more.
-    4. IoU-based NMS (non-maximum suppression) as the final deduplication
-       step, replacing the iterative overlap-merge which was creating
-       duplicate boxes.
-    5. The CV confidence score now requires a higher redness *and* a
-       non-trivial circularity before a detection is accepted, so vaguely
-       red blobs with poor shape are filtered out automatically.
-    6. All colour and shape thresholds are read from the process-wide CVConfig
-       on every frame so they can be updated live from the web dashboard.
+    Changes over the original version:
+    - saturation + value gate on the red mask so pale/dark non-berry reds
+      get rejected up front
+    - per-contour circularity and aspect-ratio filter so elongated blobs
+      never reach splitting or scoring
+    - watershed-based cluster splitting instead of convexity-defect
+      heuristics — one box per berry centre, no more
+    - IoU-based NMS as final deduplication instead of the iterative
+      overlap-merge that was creating duplicates
+    - CV confidence score now requires higher redness AND decent circularity
+      before a detection passes
+    - all thresholds read from the process-wide CVConfig every frame so they
+      can be updated live from the web dashboard
 
-    NOTE: The CV pipeline can only detect red/strawberry-coloured regions, so
-    all CV detections are tagged class_id=0 (Strawberry).  Non-red classes
-    (rotten, leaf) are handled exclusively by the AI branch.
+    note: CV can only detect red regions so all CV detections are class_id=0.
+    non-red classes (rotten, leaf) are AI-only.
     """
 
     def __init__(self):
         pass
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # internal helpers
     # ------------------------------------------------------------------
 
     def _build_red_mask(self, frame: np.ndarray, cfg: CVConfig) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (hsv, binary_mask) using the current CVConfig."""
+        """return (hsv, binary_mask) using the current CVConfig."""
         blurred = cv2.GaussianBlur(frame, (7, 7), 0)
         hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
@@ -260,7 +239,7 @@ class CVDectector:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  _KERNEL3, iterations=config.MORPH_OPEN_ITER)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL3, iterations=config.MORPH_CLOSE_ITER)
 
-        # Adaptive close scaled to median blob radius
+        # adaptive close scaled to median blob radius
         n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
         if n > 1:
             areas    = stats[1:, cv2.CC_STAT_AREA]
@@ -281,7 +260,7 @@ class CVDectector:
 
     @staticmethod
     def _contour_aspect_ratio(cnt: np.ndarray) -> float:
-        """Returns the longer side divided by the shorter side (≥ 1)."""
+        """returns the longer side divided by the shorter side (>= 1)."""
         _, _, w, h = cv2.boundingRect(cnt)
         if h == 0 or w == 0:
             return 999.0
@@ -294,10 +273,10 @@ class CVDectector:
         fg_thresh: float,
     ) -> List[Tuple[int, int, int, int]]:
         """
-        Split a potentially multi-berry contour into individual bounding boxes
+        split a potentially multi-berry contour into individual bounding boxes
         using distance-transform watershed.
 
-        Returns one box per detected berry centre, or the whole bounding rect
+        returns one box per detected berry centre, or the whole bounding rect
         if no clean split is found.
         """
         x, y, w, h = cv2.boundingRect(contour)
@@ -306,33 +285,29 @@ class CVDectector:
         if roi.size == 0:
             return [(x, y, x + w, y + h)]
 
-        # Distance transform
         dist = cv2.distanceTransform(roi, cv2.DIST_L2, 5)
         if dist.max() == 0:
             return [(x, y, x + w, y + h)]
         dist_norm = dist / dist.max()
 
-        # Foreground = definite berry centres (high distance from edge)
+        # definite berry centres = high distance from edge
         fg = (dist_norm >= fg_thresh).astype(np.uint8)
         n_labels, markers = cv2.connectedComponents(fg)
 
         if n_labels <= 1:
-            # No foreground peaks found → single berry
             return [(x, y, x + w, y + h)]
 
-        # Dilate fg slightly to build unknown border
         sure_bg = cv2.dilate(roi, np.ones((3, 3), np.uint8), iterations=3)
         unknown = cv2.subtract(sure_bg, fg)
 
-        markers = markers + 1           # background becomes label 1
-        markers[unknown == 255] = 0     # border region is unknown
+        markers = markers + 1
+        markers[unknown == 255] = 0
 
-        # Watershed needs a 3-channel image; use a mock BGR from the mask
         mock_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
         cv2.watershed(mock_bgr, markers)
 
         boxes: List[Tuple[int, int, int, int]] = []
-        min_area = max(100, config.BERRY_SIZE_MIN // 4)  # lenient for distance
+        min_area = max(100, config.BERRY_SIZE_MIN // 4)
 
         for label in range(2, n_labels + 1):  # skip bg (1) and border (-1)
             region = np.zeros_like(roi)
@@ -342,7 +317,6 @@ class CVDectector:
                 continue
             rx, ry, rw, rh = cv2.boundingRect(cnts[0])
             if rw * rh >= min_area:
-                # Add a small padding so tight watershed regions aren't too small
                 pad = max(2, int(min(rw, rh) * 0.10))
                 bx1 = max(0, rx - pad)
                 by1 = max(0, ry - pad)
@@ -358,9 +332,7 @@ class CVDectector:
         scores: List[float],
         iou_threshold: float,
     ) -> List[int]:
-        """
-        Standard IoU-based NMS. Returns indices of kept boxes, sorted by score.
-        """
+        """standard IoU-based NMS. returns indices of kept boxes, sorted by score."""
         if not boxes:
             return []
 
@@ -391,14 +363,14 @@ class CVDectector:
         return kept
 
     # ------------------------------------------------------------------
-    # Public scoring + detection
+    # public scoring + detection
     # ------------------------------------------------------------------
 
     def cv_score_crop(self, frame: np.ndarray, box: Tuple[int, int, int, int]) -> Dict:
         """
-        Score a single crop: redness, circularity, size, texture → weighted total.
-        Colour ranges are read from the current CVConfig so live tuning works.
-        Returns dict with individual scores and 'total'.
+        score a single crop: redness, circularity, size, texture -> weighted total.
+        colour ranges read from the current CVConfig so live tuning works.
+        returns dict with individual scores and 'total'.
         """
         cfg = get_cv_config()
 
@@ -416,9 +388,9 @@ class CVDectector:
         lower1, upper1, lower2, upper2 = cfg.to_hsv_arrays()
         sv_lower, sv_upper             = cfg.sv_bounds()
 
-        # Redness score (with saturation gate applied to crop as well).
-        # Denominator is 20% of total pixels — a well-cropped berry commonly
-        # covers 25-50% of its bounding box, so this gives realistic scores.
+        # redness score. denominator is 20% of total pixels — a well-cropped
+        # berry commonly covers 25-50% of its bounding box so this gives
+        # realistic scores.
         hsv      = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         hue_mask = cv2.bitwise_or(
             cv2.inRange(hsv, lower1, upper1),
@@ -430,10 +402,9 @@ class CVDectector:
         total_pixels = crop.shape[0] * crop.shape[1]
         redness = min(1.0, cv2.countNonZero(red_mask) / max(total_pixels * 0.20, 1))
 
-        # Circularity score.
-        # No hard zero gate here — low circularity just contributes a low
-        # weighted term.  The contour pre-filter in detect() already removed
-        # clearly non-circular blobs before we get to scoring.
+        # circularity score. no hard zero gate here — low circularity just
+        # contributes a low weighted term. the contour pre-filter in detect()
+        # already removed clearly non-circular blobs before we get here.
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         circularity = 0.0
         if contours:
@@ -443,13 +414,13 @@ class CVDectector:
             if peri > 0:
                 circularity = min(1.0, (4 * np.pi * area) / (peri ** 2))
 
-            # HARD GATE: If it fails the roundness requirement,
-            # it's a poster block or a background artifact. Nuke it entirely.
+            # hard gate: if it fails roundness it's probably a poster or
+            # background artifact. nuke it.
             if circularity < 0.20:
                 return {"redness": 0, "circularity": 0, "size": 0,
                         "texture": 0, "total": 0.0}
 
-        # Size score (adaptive — penalise both too-small and too-large)
+        # size score (adaptive — penalise both too-small and too-large)
         box_area = (x2 - x1) * (y2 - y1)
         if box_area <= config.BERRY_SIZE_MIN:
             size_score = box_area / max(config.BERRY_SIZE_MIN, 1)
@@ -463,7 +434,7 @@ class CVDectector:
                 config.BERRY_SIZE_MAX - config.BERRY_SIZE_IDEAL, 1)
         size_score = float(np.clip(size_score, 0.0, 1.0))
 
-        # Texture score (Laplacian variance — berries have seedy texture)
+        # texture score (laplacian variance — berries have seedy texture)
         gray    = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         texture = float(np.clip(lap_var / 500.0, 0.0, 1.0))
@@ -485,23 +456,20 @@ class CVDectector:
 
     def detect(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
         """
-        Run CV contour detection.  All results are class_id=0 (Strawberry)
-        because the CV pipeline is purely colour-based (red HSV range).
+        run CV contour detection. all results are class_id=0 (Strawberry)
+        because the pipeline is purely colour-based.
 
-        Pipeline
-        --------
-        1. Snapshot current CVConfig (thread-safe, single copy for this frame).
-        2. Build colour mask with saturation/value gate.
-        3. Find external contours; reject tiny, non-circular, and elongated ones.
-        4. Split large multi-berry blobs with distance-transform watershed.
-        5. Score each candidate box.
-        6. Run NMS to eliminate duplicate boxes.
+        pipeline:
+        1. snapshot current CVConfig (thread-safe)
+        2. build colour mask with saturation/value gate
+        3. find external contours; reject tiny, non-circular, and elongated ones
+        4. split large multi-berry blobs with distance-transform watershed
+        5. score each candidate box
+        6. NMS to eliminate duplicates
 
-        Returns
-        -------
-        (detections, mask)
+        returns (detections, mask)
         """
-        cfg = get_cv_config()   # one consistent snapshot for the whole frame
+        cfg = get_cv_config()
 
         _, mask = self._build_red_mask(frame, cfg)
 
@@ -513,14 +481,12 @@ class CVDectector:
             if area < config.MIN_CONTOUR_AREA:
                 continue
 
-            # Shape pre-filter — reject non-circular or elongated blobs
             if self._contour_circularity(cnt) < cfg.contour_min_circularity:
                 continue
             if self._contour_aspect_ratio(cnt) > cfg.max_aspect_ratio:
                 continue
 
             if area >= config.CONVEXITY_MIN_AREA:
-                # Potentially a cluster — try watershed split
                 raw_boxes.extend(self._split_by_watershed(mask, cnt, cfg.watershed_fg_thresh))
             else:
                 x, y, w, h = cv2.boundingRect(cnt)
@@ -529,13 +495,9 @@ class CVDectector:
         if not raw_boxes:
             return [], mask
 
-        # Score every candidate box
         scores: List[float] = [self.cv_score_crop(frame, box)["total"] for box in raw_boxes]
-
-        # NMS: removes duplicate boxes around the same berry
         kept_indices = self._nms(raw_boxes, scores, cfg.nms_iou_threshold)
 
-        # Build Detection objects, applying the acceptance threshold
         detections: List[Detection] = []
         for idx in kept_indices:
             conf = scores[idx]
@@ -551,10 +513,6 @@ class CVDectector:
 
         return detections, mask
 
-
-# =============================================================================
-# UTILITY
-# =============================================================================
 
 def iou(box1: Detection, box2: Detection) -> float:
     """IoU between two Detection objects."""

@@ -62,7 +62,7 @@ def is_cv_enabled() -> bool:
         return _cv_enabled
 
 # ---------------------------------------------------------------------------
-# Helpers
+# helpers
 # ---------------------------------------------------------------------------
 
 def _scale_det(det: Detection, scale: float) -> Detection:
@@ -284,7 +284,7 @@ class DetectionWorker:
                 self._zoom_results.append(best_det)
 
 # ---------------------------------------------------------------------------
-# Drawing utilities
+# drawing utilities
 # ---------------------------------------------------------------------------
 
 def _draw_velocity_arrow(img, cx, cy, vx, vy, color,
@@ -314,9 +314,6 @@ def _draw_ghost_trail(img, cx, cy, vx, vy, w, h, color,
         overlay = img.copy()
         cv2.circle(img, (int(gcx), int(gcy)), 3, color, -1)
 
-# ---------------------------------------------------------------------------
-# FusionEngine
-# ---------------------------------------------------------------------------
 
 class FusionEngine:
     def __init__(self) -> None:
@@ -441,7 +438,7 @@ class FusionEngine:
         return new_tracked
 
     # ------------------------------------------------------------------
-    # Annotation
+    # annotation
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -550,7 +547,7 @@ class FusionEngine:
         for obj in possible:
             _draw_obj(obj, config.COLOR_POSSIBLE, "P", 0.45, 1)
 
-        # Gripper
+        # gripper
         gripping = False
         try:
             import gripper as _gripper
@@ -580,7 +577,7 @@ class FusionEngine:
         if target_center is not None:
             cv2.line(out, (gripper_x, gripper_y), target_center, (0,165,255), 2)
 
-        # Legend
+        # legend
         legend_items = [(CLASS_COLORS[0], "Strawberry (targetable)"),
                         (CLASS_COLORS[1], "Bad (display only)"),
                         (CLASS_COLORS[2], "Leaf (display only)")]
@@ -600,15 +597,12 @@ class FusionEngine:
         cv2.putText(out, f"Robot: {movement_text}",
             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)
 
-        # FusionEngine._draw_servo_panel(out) #(servo debug ui (uitgeschakeld)
+        # fusionEngine._draw_servo_panel(out) # servo debug ui (uitgeschakeld)
         return out
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
 
     def process_frame(self, frame: np.ndarray):
-        # Kill switch
+        # kill switch
         try:
             from web_server import is_killed
             if is_killed():
@@ -625,6 +619,7 @@ class FusionEngine:
 
         ai_dets, cv_dets, mask, fresh = self._worker.read_frame()
         if not fresh:
+            # no new detections yet — draw predicted positions from last frame
             annotated = self.draw_annotations(
                 frame.copy(), self._last_ai_dets, self._last_cv_dets,
                 self.last_confirmed_hits, self.last_possible_hits,
