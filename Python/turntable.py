@@ -191,16 +191,18 @@ def _writer() -> None:
         with _lock:
             word = _pending_word
 
-        # FIX 3: only skip invalid (negative) words.
-        # Removed the `word == _last_word` check so the same speed is always
-        # re-sent after a homing/reset cycle that cleared _last_word to -1.
+        # Skip invalid words.
         if word < 0:
             continue
 
-        # FIX 2: do NOT check motor.is_locked() here.
-        # The lock is already handled in _post_word() — by the time a word
-        # arrives here the lock has cleared.  Checking again introduces a new
-        # race window and causes the exact "silent drop" bug we are fixing.
+        # Dedup: only write if the word changed.
+        # _last_word is reset to -1 after every direct write (homing etc.),
+        # so the first command after homing always goes through even if it
+        # happens to match the previous speed.
+        if word == _last_word:
+            continue
+
+        # Do NOT check motor.is_locked() here — already handled in _post_word().
 
         try:
             motor._write_word(SERVO_ID, _REG_SPEED, word)
@@ -278,16 +280,20 @@ def shutdown() -> None:
 
 def _post_word(word: int) -> None:
     """
-    FIX 1: queue a speed word for the writer thread.
+    Queue a speed word for the writer thread.
 
-    OLD behaviour: returned immediately (dropped the command) when
-    motor.is_locked().  This caused bin.py spin commands issued right after
-    homing to be silently lost.
+    Blocks until the motor lock clears (instead of silently dropping the
+    command), then queues the word.  POST_WORD_LOCK_TIMEOUT_S caps the wait.
 
-    NEW behaviour: blocks until the lock clears, then queues the word.
-    POST_WORD_LOCK_TIMEOUT_S caps the wait so we never hang forever.
+    Bails out immediately (with a clear log line) when turntable.init() has
+    not been called — without init() the writer thread is not running and
+    nothing would ever read _pending_word.
     """
     global _pending_word
+
+    if not _initialized:
+        print(f"[turntable] _post_word({word}): turntable not initialised — call turntable.init() first!")
+        return
 
     if motor.is_locked():
         print(f"[turntable] _post_word({word}): motor locked — waiting for lock to clear…")
