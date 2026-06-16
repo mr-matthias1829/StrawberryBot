@@ -1,22 +1,22 @@
-"""Lightweight web dashboard voor de Strawberry Fusion Detector.
+"""Lightweight web dashboard for the Strawberry Fusion Detector.
 
-Publieke API
+Public API
 -----------
-start(host, port)   – start Flask in een daemon-thread (eenmalig)
-push_frame(bgr)     – voed een geannoteerd BGR numpy-array aan de MJPEG-stream
-push_log(line)      – stuur een logregel naar alle SSE-clients
+start(host, port)   – start Flask in a daemon-thread (one time thing)
+push_frame(bgr)     – feed an annotated BGR numpy array to the MJPEG stream
+push_log(line)      – send a logline to all SSE-clients
 
 REST API (JSON)
 ---------------
-GET  /api/cv_config       – huidige CVConfig als JSON
-POST /api/cv_config       – update CVConfig velden (partial update ok)
+GET  /api/cv_config       – current CVConfig as JSON
+POST /api/cv_config       – update CVConfig parts (partial update ok)
 GET  /api/ai_enabled      – {"enabled": true/false}
 POST /api/ai_enabled      – {"enabled": true/false}
 GET  /api/cv_enabled      – {"enabled": true/false}
 POST /api/cv_enabled      – {"enabled": true/false}
 POST /api/cv_preset       – {"preset": "red"|"green"|"yellow"|"blue"|"orange"|"custom"}
-GET  /api/full_config     – alle config.py knobs als JSON
-POST /api/full_config     – partial update van config.py knobs (setattr live)
+GET  /api/full_config     – all config.py knobs as JSON
+POST /api/full_config     – partial update from config.py knobs (setattr live)
 GET  /api/corner_sensors  – latest AS5600 reading per motor
 GET  /api/dead_reckoning  – dead-reckoning position accumulators per motor
 GET  /api/auto_move       – {"enabled": true/false} (arm extension + auto-grip)
@@ -572,7 +572,7 @@ main{flex:1;display:flex;min-height:0}
 .sw input:checked+.sw-t{background:var(--grn)}
 .sw input:checked+.sw-t::after{background:#fff;transform:translateX(15px)}
 
-/* combined toggle button */
+/* combo toggle button */
 .combo-btn{width:100%;padding:8px 12px;font-family:var(--mono);font-size:11px;font-weight:600;border-radius:6px;cursor:pointer;transition:all .15s;letter-spacing:.4px;display:flex;align-items:center;justify-content:space-between;margin-top:2px}
 .combo-btn .cb-lbl small{display:block;font-size:9px;font-weight:400;margin-top:1px;text-align:left}
 .combo-btn .cb-state{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid currentColor;opacity:.8}
@@ -642,7 +642,7 @@ input[type=number]:focus{border-color:var(--ora)}
 .sarc{height:4px;border-radius:2px;margin-top:5px;background:var(--brd2);position:relative;overflow:hidden}
 .sarc-f{position:absolute;top:0;left:0;height:100%;background:var(--grn);border-radius:2px;transition:width .25s}
 .sarc-f.dr{background:var(--pur)}
-/* DR position bar uses min/max range; neutral (zero) centred */
+/* DR position bar uses min/max range */
 .sarc-dr{height:4px;border-radius:2px;margin-top:5px;background:var(--brd2);position:relative;overflow:hidden}
 .sarc-dr-f{position:absolute;top:0;height:100%;background:var(--pur);border-radius:2px;transition:left .2s,width .2s}
 /* zero tick */
@@ -714,7 +714,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
 
 <main>
 
-<!-- ── SETTINGS PANEL ── -->
+/* settings panel */ 
 <div class="panel" id="settingsPanel">
   <div class="tabs">
     <button class="tab on" onclick="switchTab('detect')">Detect</button>
@@ -724,7 +724,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     <button class="tab" onclick="switchTab('sensors')">Sensors</button>
   </div>
 
-  <!-- ── DETECT ── -->
+  /* detect */
   <div class="pane on" id="tab-detect">
     <div class="sec">
       <div class="sec-t">Detector mode</div>
@@ -781,7 +781,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  <!-- ── THRESHOLDS ── -->
+  /* thresholds */
   <div class="pane" id="tab-thresholds">
     <div class="sec">
       <div class="sec-t">Confidence thresholds</div>
@@ -794,7 +794,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  <!-- ── TRACKING ── -->
+  /* tracking */
   <div class="pane" id="tab-tracking">
     <div class="sec">
       <div class="sec-t">Persistence & possible-hit</div>
@@ -807,7 +807,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  <!-- ── ADVANCED ── -->
+  /* advanced */
   <div class="pane" id="tab-advanced">
     <div class="sec">
       <div class="grp-h">Fusion weights</div>
@@ -833,7 +833,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  <!-- ── SENSORS ── -->
+  /* sensors */
   <div class="pane" id="tab-sensors">
     <div class="sec">
       <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
@@ -851,11 +851,12 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
       <div id="servoList"></div>
     </div>
   </div>
-</div><!-- /panel -->
+</div>
 
+/* panel */
 <div class="div" id="divLeft"></div>
 
-<!-- ── VIDEO ── -->
+/* video (MAGIC PORTALLLL) */
 <div class="video">
   <span class="clabel tl" id="camLabel">CAM</span>
   <span class="clabel tr" id="resLabel"></span>
@@ -866,7 +867,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
 
 <div class="div" id="divRight"></div>
 
-<!-- ── CONSOLE ── -->
+/* console */
 <div class="con" id="consolePanel">
   <div class="con-bar">
     <span class="con-t">Console</span>
@@ -927,7 +928,7 @@ const _cfg={};
 
 let _aiOn=true,_cvOn=true;
 
-/* ── TABS ── */
+/* tabs */
 let _sensorTimer=null;
 function switchTab(name){
   document.querySelectorAll(".tab").forEach(b=>b.classList.remove("on"));
@@ -941,7 +942,7 @@ function switchTab(name){
   }
 }
 
-/* ── KNOBS ── */
+/* knobs */
 function buildKnobs(group){
   const c=document.getElementById("knobs-"+group);if(!c)return;c.innerHTML="";
   SCHEMA.filter(s=>s[5]===group).forEach(([key,typ,mn,mx,label])=>{
@@ -976,7 +977,7 @@ async function applyGroup(group){
   finally{if(btn){btn.classList.remove("busy");btn.textContent="▶ Apply";}}
 }
 
-/* ── ADVANCED ── */
+/* advanced */
 async function applyAdvanced(){
   const btn=document.getElementById("applyAdvanced"),fb=document.getElementById("fb-advanced");
   btn.classList.add("busy");btn.textContent="Sending…";
@@ -1019,7 +1020,7 @@ function resetGroup(group){
   applyGroup(group);
 }
 
-/* ── AUTO-MOVE TOGGLE ── */
+/* arm & gripper movement toggle */
 let _autoMoveEnabled = true;
 
 async function onAutoMoveToggle(enabled) {
@@ -1043,7 +1044,7 @@ async function loadAutoMoveState() {
   } catch(e) { console.warn("Failed to load auto-move state:", e); }
 }
 
-/* ── INIT ── */
+/* init */
 async function initUI(){
   try{
     const[cr,ar,cvr,fr]=await Promise.all([
@@ -1066,15 +1067,15 @@ function loadCVConfig(cfg){
   updateHSVLabels();
 }
 
-/* ── AI TOGGLE ── */
+/* AI toggle */
 function setAiUI(on){_aiOn=on;document.getElementById("aiToggle").checked=on;document.getElementById("aiSub").textContent=on?"Active — fusing with CV":"Disabled — CV only";updateComboBtn();}
 async function onAiToggle(on){setAiUI(on);try{await fetch("/api/ai_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
 
-/* ── CV TOGGLE ── */
+/* CV toggle */
 function setCvUI(on){_cvOn=on;document.getElementById("cvToggle").checked=on;document.getElementById("cvSub").textContent=on?"Active — colour detection":"Disabled — AI only";updateComboBtn();}
 async function onCvToggle(on){setCvUI(on);try{await fetch("/api/cv_enabled",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});}catch(e){console.error(e);}}
 
-/* ── COMBO TOGGLE ── */
+/* combo toggle */
 function updateComboBtn(){
   const btn=document.getElementById("comboBtn"),state=document.getElementById("comboState"),sub=document.getElementById("comboSub");
   btn.className="combo-btn";
@@ -1093,7 +1094,7 @@ async function onComboToggle(){
   }catch(e){console.error(e);}
 }
 
-/* ── PRESETS ── */
+/* presets */
 async function applyPreset(name){
   document.querySelectorAll(".pbtn").forEach(b=>b.classList.remove("on"));
   document.querySelector(`[data-preset="${name}"]`)?.classList.add("on");
@@ -1105,7 +1106,7 @@ async function applyPreset(name){
   }catch{showFb(document.getElementById("fb-hsv"),"err","Request failed");}
 }
 
-/* ── HSV ── */
+/* HSV sliders */
 function sliderChanged(){updateHSVLabels();document.querySelectorAll(".pbtn").forEach(b=>b.classList.remove("on"));}
 function updateHSVLabels(){
   [["sl-h1l","v-h1l","hm1l"],["sl-h1h","v-h1h","hm1h"],["sl-h2l","v-h2l","hm2l"],["sl-h2h","v-h2h","hm2h"]].forEach(([s,v,m])=>{
@@ -1139,7 +1140,7 @@ function resetHSV(){
 }
 function showFb(el,cls,msg){if(!el)return;el.className="fb "+cls;el.textContent=msg;setTimeout(()=>{el.className="fb";el.textContent="";},3000);}
 
-/* ── SENSORS: dead-reckoning bar helper ── */
+/* sensors with dead-reckoning thingy */
 function _drBar(estDeg, minDeg, maxDeg) {
   // Draw a centred bar: left half = negative travel, right half = positive
   // If no limits, use ±90° as display range
@@ -1155,14 +1156,14 @@ function _drBar(estDeg, minDeg, maxDeg) {
   </div>`;
 }
 
-/* ── SENSORS: build one card (sensor + optional DR section) ── */
+/* sensors + optional DR section */
 const SLBL={turntable:"Turntable (ID 13)",lift:"Lift (ID 3+4, dual)",gripper:"Gripper (ID 8)",arm:"Arm (ID 5)",pivot:"Pivot (ID 2)"};
 
 function _scard(name, sensorInfo, drInfo) {
   const lbl   = SLBL[name] || name;
   const alive = sensorInfo.available;
 
-  // ── sensor portion ──
+  /* sensor portion */
   let rows = "";
   if (alive && sensorInfo.data) {
     const d = sensorInfo.data, pct = ((d.deg / 360) * 100).toFixed(0);
@@ -1182,7 +1183,7 @@ function _scard(name, sensorInfo, drInfo) {
     rows = `<div class="srow"><span class="sk" style="color:var(--acc)">${sensorInfo.error}</span></div>`;
   }
 
-  // ── dead-reckoning portion (only for motors that have DR data) ──
+  /* dead-reckoning portion for motors that only have DR data stuff */
   let drHtml = "";
   if (drInfo && !drInfo.error) {
     const estDeg  = drInfo.estimated_deg;
@@ -1192,7 +1193,7 @@ function _scard(name, sensorInfo, drInfo) {
     const maxDeg  = drInfo.max_deg;
     const s2d     = drInfo.speed_to_deg;
 
-    // Only show DR section when sensor is absent (it's the primary position source then)
+    // only show DR section when sensor is not found (its the primary position source then)
     // but always show it so the user can see accumulator drift
     const estStr  = estDeg !== null ? `${estDeg >= 0 ? "+" : ""}${estDeg.toFixed(1)}°` : "—";
     const rangeStr = (minDeg !== null && maxDeg !== null) ? `${minDeg}° … ${maxDeg}°` : "unlimited";
@@ -1211,7 +1212,7 @@ function _scard(name, sensorInfo, drInfo) {
     </div>`;
   }
 
-  // card class: sensor live → green border; DR-only → purple border; nothing → dead
+  // card class: sensor live = green border; DR-only = purple border; nothing = dead womp womp
   const cardCls = alive ? "live" : (drInfo && !drInfo.error && !alive) ? "dr" : "dead";
   const badgeCls = alive ? "on" : (drInfo && !drInfo.error && !alive) ? "dr" : "";
   const badgeTxt = alive ? "LIVE" : (drInfo && !drInfo.error) ? "DR ONLY" : (sensorInfo.error ? "ERROR" : "NO SENSOR");
@@ -1270,7 +1271,7 @@ async function refreshServos(){
   }catch(e){c.innerHTML=`<div style="color:var(--acc);font-size:10px">Request failed: ${e}</div>`;}
 }
 
-/* ── DRAG RESIZE ── */
+/* drag resize */
 function makeDrag(divId,panelId,side){
   const div=document.getElementById(divId),panel=document.getElementById(panelId);
   if(!div||!panel)return;
@@ -1286,7 +1287,7 @@ function makeDrag(divId,panelId,side){
 makeDrag("divLeft","settingsPanel","left");
 makeDrag("divRight","consolePanel","right");
 
-/* ── STATS ── */
+/* stats like fps, ai, cv n both, hits & possible hits */
 const RE_FPS=/FPS:\s*(\d+).*?AI:\s*(\d+).*?CV:\s*(\d+).*?Fused:\s*(\d+).*?Hits:\s*(\d+).*?Possible:\s*(\d+)/;
 const RE_CAM=/Camera mode:\s*(\w+)/;
 function parseStats(line){
@@ -1295,7 +1296,7 @@ function parseStats(line){
   m=RE_CAM.exec(line);if(m){document.getElementById("s-cam").textContent=m[1];document.getElementById("camLabel").textContent="CAM: "+m[1].toUpperCase();}
 }
 
-/* ── CONSOLE ── */
+/* console */
 function cls(l){if(/FPS:/i.test(l))return"fps";if(/verbonden!|connected/i.test(l))return"ok";if(/error|failed/i.test(l))return"err";if(/warn/i.test(l))return"warn";if(/Dashboard:|http:\/\//i.test(l))return"info";if(/^──/.test(l.trim()))return"sep";return"";}
 const logEl=document.getElementById("log");
 function addLine(text){
@@ -1313,13 +1314,13 @@ function clearLog(){logEl.innerHTML="";lineCount=0;lastText=null;lastMsgEl=null;
 function toggleScroll(){autoScroll=!autoScroll;const b=document.getElementById("scrollBtn");b.textContent=autoScroll?"↓ Auto":"⏸ Gepauzeerd";b.className=autoScroll?"on":"";if(autoScroll)logEl.scrollTop=logEl.scrollHeight;}
 logEl.addEventListener("scroll",()=>{if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<40&&!autoScroll)return;if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight>=40&&autoScroll){autoScroll=false;document.getElementById("scrollBtn").textContent="⏸ Gepauzeerd";document.getElementById("scrollBtn").className="";}});
 
-/* ── LIVE DOT ── */
+/* LIVE dot */
 function setLive(on,text){document.getElementById("liveDot").className=on?"dot on":"dot";document.getElementById("connDot").className=on?"dot on":"dot";document.getElementById("liveText").textContent=on?"LIVE":text;document.getElementById("connText").textContent=text;}
 
-/* ── CLOCK ── */
+/* clock */
 setInterval(()=>{document.getElementById("timeLabel").textContent=new Date().toLocaleTimeString("nl-NL");},1000);
 
-/* ── VIDEO ── */
+/* THE PORTAL OF WHICH TO SEE (video feed) */
 const feed=document.getElementById("feed"),noSignal=document.getElementById("noSignal");
 let feedAlive=false,feedRetry=null,feedDog=null,feedDelay=3000;
 function _clearFT(){clearTimeout(feedRetry);clearTimeout(feedDog);feedRetry=feedDog=null;}
@@ -1332,7 +1333,7 @@ document.addEventListener("visibilitychange",()=>{if(!document.hidden)loadFeed()
 window.addEventListener("focus",()=>{if(feedAlive)loadFeed();});
 loadFeed();
 
-/* ── SSE ── */
+/* SSE */
 function connect(){
   if(evtSrc){evtSrc.close();evtSrc=null;}
   evtSrc=new EventSource("/logs");
