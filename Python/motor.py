@@ -71,7 +71,7 @@ _locked:      bool            = False   # True during post-home lockout
 _locked_until: float          = 0.0    # monotonic timestamp when lock expires
 _lock_mutex:  threading.Lock  = threading.Lock()
 
-POST_HOME_LOCKOUT_S = 0.0   # seconds to refuse commands after home_all()
+POST_HOME_LOCKOUT_S = 0.3   # seconds to refuse commands after home_all()
 
 
 def is_locked() -> bool:
