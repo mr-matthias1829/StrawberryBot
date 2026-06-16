@@ -80,14 +80,14 @@ except ImportError:
 BIN_SIDE: str = "left"
 
 # Turntable: base time for center column (col 1)
-TURNTABLE_BASE_S: float = 1.8
+TURNTABLE_BASE_S: float = 8.0
 # Turntable: extra time per column step (col 0 = -step, col 2 = +step)
-TURNTABLE_STEP_S: float = 0.3
+TURNTABLE_STEP_S: float = 0.6
 
 # Arm: base time for center row (row 1)
-ARM_BASE_S: float = 1.2
+ARM_BASE_S: float = 3.5
 # Arm: extra time per row step (row 0 = -step, row 2 = +step)
-ARM_STEP_S: float = 0.2
+ARM_STEP_S: float = 0.5
 
 # Pivot: seconds to lower berry into slot
 PIVOT_LOWER_S: float = 0.5
