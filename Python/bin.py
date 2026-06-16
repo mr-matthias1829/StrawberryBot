@@ -26,11 +26,11 @@ GRID LAYOUT (3x3, left-to-right, top-to-bottom):
 import time
 import threading
 
-
 # hardware imports
 
 try:
     import turntable as _turntable
+
     _HAS_TURNTABLE = True
 except ImportError:
     _HAS_TURNTABLE = False
@@ -38,6 +38,7 @@ except ImportError:
 
 try:
     import lift as _lift
+
     _HAS_LIFT = True
 except ImportError:
     _HAS_LIFT = False
@@ -45,6 +46,7 @@ except ImportError:
 
 try:
     import arm as _arm
+
     _HAS_ARM = True
 except ImportError:
     _HAS_ARM = False
@@ -52,6 +54,7 @@ except ImportError:
 
 try:
     import pivot as _pivot
+
     _HAS_PIVOT = True
 except ImportError:
     _HAS_PIVOT = False
@@ -59,6 +62,7 @@ except ImportError:
 
 try:
     import gripper as _gripper
+
     _HAS_GRIPPER = True
 except ImportError:
     _HAS_GRIPPER = False
@@ -66,11 +70,11 @@ except ImportError:
 
 try:
     import motor as _motor
+
     _HAS_MOTOR = True
 except ImportError:
     _HAS_MOTOR = False
     print("[bin] motor not available — simulating")
-
 
 # tuning to adjust values for the robot
 
@@ -107,10 +111,12 @@ LOCKOUT_WAIT_TIMEOUT_S: float = 15.0
 # by is_locked() at the moment _wait_for_lockout() is called.
 POST_HOME_SETTLE_S: float = 0.5
 
+# Maximum time to wait for a lockout to clear after it was detected
+LOCKOUT_CLEAR_TIMEOUT_S: float = 2.0
+
 # Grid dimensions (3x3)
 GRID_COLS: int = 3
 GRID_ROWS: int = 3
-
 
 # state
 
@@ -122,7 +128,7 @@ _busy: bool = False
 def _slot_to_row_col(slot: int):
     """Convert slot number (0-8) to (row, col)."""
     row = slot // GRID_COLS  # 0, 1, 2
-    col = slot % GRID_COLS   # 0, 1, 2
+    col = slot % GRID_COLS  # 0, 1, 2
     return row, col
 
 
@@ -157,17 +163,62 @@ def _wait_for_lockout() -> None:
     print("[bin] WARNING: lockout wait timed out — proceeding anyway")
 
 
-def _wait_for_lockout_then_settle() -> None:
+def _wait_for_lockout_robust() -> None:
     """
-    Wait for the motor lockout to expire, then add POST_HOME_SETTLE_S on top.
+    Robust lockout waiting that handles lockouts that start after we start waiting.
 
-    The extra settle absorbs the race where home_all() was called just before
-    this point and the lockout flag has not yet been set by the time
-    _wait_for_lockout() polls is_locked() for the first time.  Without this
-    gap the sub-module writer threads would silently drop the first timed move.
+    This solves the race condition where:
+    1. home_all() is called and returns
+    2. _wait_for_lockout() checks is_locked() -> False (lockout hasn't started yet)
+    3. Lockout starts in background thread
+    4. Timed move gets dropped because lockout is now active
+
+    The robust approach:
+    1. Wait for any existing lockout to clear
+    2. Then watch for new lockouts starting during the settle period
+    3. If a new lockout starts, wait for it to clear too
     """
+    if not _HAS_MOTOR:
+        return
+
+    # First, wait for any current lockout to clear
     _wait_for_lockout()
-    time.sleep(POST_HOME_SETTLE_S)
+
+    # Now we're in the "clear" state. But a lockout might start any moment.
+    # We'll watch for a short period to catch any lockout that starts.
+    start_time = time.monotonic()
+    settle_deadline = start_time + POST_HOME_SETTLE_S
+
+    print(f"[bin] Lockout watch period: {POST_HOME_SETTLE_S:.1f}s")
+
+    while time.monotonic() < settle_deadline:
+        # Check if a lockout was set recently (within the last 0.3s)
+        if hasattr(_motor, 'lock_was_set_recently'):
+            if _motor.lock_was_set_recently(threshold=0.3):
+                print("[bin] New lockout detected during settle period — waiting for it to clear...")
+                # Wait for this lockout to clear
+                clear_deadline = time.monotonic() + LOCKOUT_CLEAR_TIMEOUT_S
+                while time.monotonic() < clear_deadline:
+                    if not _motor.is_locked():
+                        print("[bin] Lockout cleared")
+                        # Reset the settle timer to catch any more lockouts
+                        settle_deadline = time.monotonic() + POST_HOME_SETTLE_S
+                        break
+                    time.sleep(0.05)
+                else:
+                    print("[bin] WARNING: lockout clear timeout — proceeding anyway")
+                    return
+        else:
+            # Fallback: just check is_locked() periodically
+            if _motor.is_locked():
+                print("[bin] Lockout became active during settle — waiting...")
+                _wait_for_lockout()
+                # Reset settle timer
+                settle_deadline = time.monotonic() + POST_HOME_SETTLE_S
+
+        time.sleep(0.02)
+
+    print("[bin] Lockout watch period complete — safe to move")
 
 
 # home helpers
@@ -203,7 +254,7 @@ def _home_axes_keep_gripper_closed() -> None:
 
     # Wait for any lockout started elsewhere, then add a hard settle so the
     # lock is guaranteed expired before the first timed drive move.
-    _wait_for_lockout_then_settle()
+    _wait_for_lockout_robust()
 
     print("[bin] Homing complete (gripper kept closed)")
 
@@ -219,7 +270,7 @@ def _home_all_including_gripper() -> None:
     if _HAS_MOTOR and hasattr(_motor, 'home_all'):
         _motor.home_all()
         # home_all() sets the lockout — wait for it to expire
-        _wait_for_lockout_then_settle()
+        _wait_for_lockout_robust()
     else:
         print("[bin] No motor.home_all() — homing individually...")
 
@@ -248,7 +299,7 @@ def _home_all_including_gripper() -> None:
             _pivot._home()
             time.sleep(SETTLE_S)
 
-        _wait_for_lockout_then_settle()
+        _wait_for_lockout_robust()
 
     print("[bin] Full homing complete")
 
@@ -306,7 +357,7 @@ def _pivot_lower_drop() -> None:
         return
 
     print(f"[bin] Pivot lower {PIVOT_LOWER_S}s")
-    _pivot.rotate_down()          # pivot.py uses rotate_down(), not move_down()
+    _pivot.rotate_down()  # pivot.py uses rotate_down(), not move_down()
     time.sleep(PIVOT_LOWER_S)
     _pivot.stop()
     time.sleep(SETTLE_S)
@@ -329,10 +380,10 @@ def _pivot_raise_home() -> None:
 
     # Make sure no stale lockout is blocking the writer thread before we send
     # the rotate_up command.
-    _wait_for_lockout()
+    _wait_for_lockout_robust()
 
     print(f"[bin] Pivot raise {PIVOT_RAISE_S}s")
-    _pivot.rotate_up()            # pivot.py uses rotate_up(), not move_up()
+    _pivot.rotate_up()  # pivot.py uses rotate_up(), not move_up()
     time.sleep(PIVOT_RAISE_S)
     _pivot.stop()
     time.sleep(SETTLE_S)

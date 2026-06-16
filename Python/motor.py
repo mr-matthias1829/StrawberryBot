@@ -67,9 +67,10 @@ _initialized:  bool   = False
 # HOMING LOCKOUT
 # =============================================================================
 
-_locked:      bool            = False   # True during post-home lockout
-_locked_until: float          = 0.0    # monotonic timestamp when lock expires
-_lock_mutex:  threading.Lock  = threading.Lock()
+_locked:        bool            = False   # True during post-home lockout
+_locked_until:  float           = 0.0     # monotonic timestamp when lock expires
+_locked_set_at: float           = 0.0     # monotonic timestamp when lock was set
+_lock_mutex:    threading.Lock  = threading.Lock()
 
 POST_HOME_LOCKOUT_S = 0.3   # seconds to refuse commands after home_all()
 
@@ -83,17 +84,30 @@ def is_locked() -> bool:
         return _locked
 
 
-def _set_lock(duration: float) -> None:
-    global _locked, _locked_until
+def lock_was_set_recently(threshold: float = 0.5) -> bool:
+    """
+    Return True if the lockout was set within the last 'threshold' seconds.
+    This helps detect lockouts that start after we think we've waited for them.
+    """
     with _lock_mutex:
-        _locked       = True
+        if _locked_set_at == 0:
+            return False
+        return time.monotonic() - _locked_set_at < threshold
+
+
+def _set_lock(duration: float) -> None:
+    global _locked, _locked_until, _locked_set_at
+    with _lock_mutex:
+        _locked = True
         _locked_until = time.monotonic() + duration
+        _locked_set_at = time.monotonic()
 
 
 def _clear_lock() -> None:
-    global _locked
+    global _locked, _locked_set_at
     with _lock_mutex:
         _locked = False
+        _locked_set_at = 0.0
 
 # =============================================================================
 # LIFECYCLE
@@ -114,7 +128,7 @@ def init() -> None:
     _ser = serial.Serial(port=PORT, baudrate=BAUDRATE, timeout=0.1)
 
     _initialized = True
-    print("✅ Motor hardware initialised.")
+    print(" Motor hardware initialised.")
 
     atexit.register(shutdown)
 
@@ -129,7 +143,7 @@ def shutdown() -> None:
     # Guard against double-call from atexit + manual shutdown
     _initialized = False
 
-    print("🛑 Motor shutdown: disabling torque on all servos…")
+    print(" Motor shutdown: disabling torque on all servos…")
     for sid in ALL_SERVO_IDS:
         try:
             _write_word(sid, TORQUE_ENABLE, 0)
@@ -152,7 +166,7 @@ def shutdown() -> None:
             pass
         _h = None
 
-    print("✅ Motor shutdown complete.")
+    print(" Motor shutdown complete.")
 
 # =============================================================================
 # LOW-LEVEL COMMS  (private — used by sub-modules only)
@@ -190,12 +204,12 @@ def _write_byte(servo_id: int, address: int, value: int) -> None:
 # =============================================================================
 
 def enable_torque(servo_id: int) -> None:
-    print(f"⚙️  Torque ON  (ID {servo_id})")
+    print(f"  Torque ON  (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 1)
 
 
 def disable_torque(servo_id: int) -> None:
-    print(f"🛑 Torque OFF (ID {servo_id})")
+    print(f" Torque OFF (ID {servo_id})")
     _write_word(servo_id, TORQUE_ENABLE, 0)
 
 # =============================================================================
@@ -223,7 +237,7 @@ def home_all() -> None:
     import lift    as _lift
     import turntable as _turntable
 
-    print("🏠 home_all(): starting sequential homing…")
+    print(" home_all(): starting sequential homing…")
 
     # 1 ── Gripper ────────────────────────────────────────────────────────────
     print("  [1/4] Gripper → OPEN")
@@ -241,11 +255,11 @@ def home_all() -> None:
     print("  [4/4] Turntable → zero (centre)")
     _turntable._home()
 
-    print(f"🏠 home_all(): complete — locking commands for {POST_HOME_LOCKOUT_S:.0f}s")
+    print(f" home_all(): complete — locking commands for {POST_HOME_LOCKOUT_S:.0f}s")
     _set_lock(POST_HOME_LOCKOUT_S)
     # Spin in a background thread so we don't block the caller forever, but
     # print a clear message when the lock expires.
     def _log_unlock():
         time.sleep(POST_HOME_LOCKOUT_S + 0.05)
-        print("🔓 Motor lockout expired — commands accepted again.")
+        print(" Motor lockout expired — commands accepted again.")
     threading.Thread(target=_log_unlock, daemon=True, name="home-lock-expire").start()
