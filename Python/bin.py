@@ -104,6 +104,11 @@ SETTLE_S: float = 0.2
 # How long to wait for motor lockout to expire after homing (s)
 LOCKOUT_WAIT_TIMEOUT_S: float = 15.0
 
+# Extra settle after homing before any timed drive move, to absorb any
+# lockout that was started by home_all() elsewhere and not yet registered
+# by is_locked() at the moment _wait_for_lockout() is called.
+POST_HOME_SETTLE_S: float = 0.5
+
 # Grid dimensions (3x3)
 GRID_COLS: int = 3
 GRID_ROWS: int = 3
@@ -157,6 +162,19 @@ def _wait_for_lockout() -> None:
     print("[bin] WARNING: lockout wait timed out — proceeding anyway")
 
 
+def _wait_for_lockout_then_settle() -> None:
+    """
+    Wait for the motor lockout to expire, then add POST_HOME_SETTLE_S on top.
+
+    The extra settle absorbs the race where home_all() was called just before
+    this point and the lockout flag has not yet been set by the time
+    _wait_for_lockout() polls is_locked() for the first time.  Without this
+    gap the sub-module writer threads would silently drop the first timed move.
+    """
+    _wait_for_lockout()
+    time.sleep(POST_HOME_SETTLE_S)
+
+
 # =============================================================================
 # HOME HELPERS
 # =============================================================================
@@ -190,9 +208,9 @@ def _home_axes_keep_gripper_closed() -> None:
         _pivot._home()
         time.sleep(SETTLE_S)
 
-    # Individual _home() calls don't set a lockout, but wait just in case
-    # motor.home_all() was triggered elsewhere and is still ticking.
-    _wait_for_lockout()
+    # Wait for any lockout started elsewhere, then add a hard settle so the
+    # lock is guaranteed expired before the first timed drive move.
+    _wait_for_lockout_then_settle()
 
     print("[bin] Homing complete (gripper kept closed)")
 
@@ -208,7 +226,7 @@ def _home_all_including_gripper() -> None:
     if _HAS_MOTOR and hasattr(_motor, 'home_all'):
         _motor.home_all()
         # home_all() sets the lockout — wait for it to expire
-        _wait_for_lockout()
+        _wait_for_lockout_then_settle()
     else:
         print("[bin] No motor.home_all() — homing individually...")
 
@@ -237,7 +255,7 @@ def _home_all_including_gripper() -> None:
             _pivot._home()
             time.sleep(SETTLE_S)
 
-        _wait_for_lockout()
+        _wait_for_lockout_then_settle()
 
     print("[bin] Full homing complete")
 
@@ -304,11 +322,23 @@ def _pivot_lower_drop() -> None:
 
 
 def _pivot_raise_home() -> None:
-    """Raise pivot back to home position."""
+    """
+    Raise pivot back to home position.
+
+    pivot.rotate_up() posts to the writer thread via _post_word(), which
+    checks motor.is_locked() before writing.  After the drop sequence the
+    lockout is not active, so the write goes through immediately.  We still
+    call _wait_for_lockout() here as a guard in case something upstream
+    re-triggered a lockout between drop and raise.
+    """
     if not _HAS_PIVOT:
         print(f"[bin][SIM] pivot raise {PIVOT_RAISE_S}s")
         time.sleep(PIVOT_RAISE_S)
         return
+
+    # Make sure no stale lockout is blocking the writer thread before we send
+    # the rotate_up command.
+    _wait_for_lockout()
 
     print(f"[bin] Pivot raise {PIVOT_RAISE_S}s")
     _pivot.rotate_up()            # pivot.py uses rotate_up(), not move_up()
