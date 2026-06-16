@@ -66,9 +66,10 @@ SENSOR_CHANNEL_B = 0
 MIN_DEG: float | None = -5.0
 MAX_DEG: float | None = 350.0
 
-# Dead-reckoning limit conversion: degrees per (speed-unit × second).
-SPEED_TO_DEG = 0.3
+# dead-reckoning limit conversion: degrees per (speed-unit * second).
+SPEED_TO_DEG = 0.3 # untested, as it always has a sensor
 
+# AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
@@ -90,7 +91,7 @@ HOLD_PULSE_SEC    = 0.08   # duration of each corrective pulse in seconds
 _sensor_mgr = None
 
 
-def _init_sensors() -> None:
+def _init_sensors() -> None: # in hindsight: shouldve used a single global init() for all servo
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -101,7 +102,7 @@ def _init_sensors() -> None:
             _sensor_mgr = mgr
             print(f"[lift] Corner sensor(s) ready on TCA ch {found}.")
         else:
-            print(f"[lift] ⚠️  No AS5600 found on TCA ch "
+            print(f"[lift] !!!  No AS5600 found on TCA ch "
                   f"{SENSOR_CHANNEL_A}/{SENSOR_CHANNEL_B} — running open-loop.")
     except Exception as e:
         print(f"[lift] Corner sensor unavailable ({e}) — running open-loop.")
@@ -140,7 +141,7 @@ def _at_limit(direction: str) -> bool:
     if MIN_DEG is None or MAX_DEG is None:
         return False
 
-    # --- Sensor path ---
+    # sensor path
     if _sensor_mgr is not None:
         reading = _read_sensor(SENSOR_CHANNEL_A)
         if reading is not None:
@@ -153,7 +154,7 @@ def _at_limit(direction: str) -> bool:
             return False
         # sensor present but read failed — fall through to DR
 
-    # --- Dead-reckoning path ---
+    # dead-reckoning path
     estimated_deg = _dead_pos[0] * SPEED_TO_DEG
     if direction == "down" and estimated_deg <= MIN_DEG:
         return True
@@ -161,9 +162,6 @@ def _at_limit(direction: str) -> bool:
         return True
     return False
 
-# =============================================================================
-# STATE
-# =============================================================================
 
 _initialized:    bool = False
 _pending_word_a: int  = -1
@@ -175,15 +173,12 @@ _event     = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
-# Zero-point tracking (shared accumulator; both servos move together)
+# zero-point tracking (shared accumulator; both servos move together)
 _zero_deg:        float | None = None
 _dead_pos:        list          = [0.0]
 _last_write_time: float         = 0.0
 
-# =============================================================================
-# BACKGROUND WRITER THREAD
-# =============================================================================
-
+# background writer thread
 def _writer() -> None:
     global _last_word_a, _last_word_b, _last_write_time
 
@@ -210,9 +205,9 @@ def _writer() -> None:
 
         idle = (word_a == 0 and word_b == 0)
 
-        # ── Holding torque ────────────────────────────────────────────────────
-        # Guard on _sensor_mgr (not _initialized) so this activates as soon
-        # as the sensor is ready, independent of init() completion order.
+        # holding torque
+        # guard on _sensor_mgr (not _initialized) so this activates as soon
+        # as the sensor is ready, independent of init() completion order
         if HOLD_ENABLED and idle and _sensor_mgr is not None:
             reading = _read_sensor(SENSOR_CHANNEL_A)
             if reading is not None:
@@ -241,14 +236,14 @@ def _writer() -> None:
                     _hold_ref_deg = current_deg   # reset ref to corrected position
                     continue   # skip normal write this cycle
             else:
-                # Sensor read failed this cycle — keep ref, try again next loop
+                # sensor read failed this cycle — keep ref, try again next loop
                 pass
         else:
-            # Not idle or no sensor — clear ref so it is recaptured on next idle
+            # not idle or no sensor — clear ref so it is recaptured on next idle
             if not idle:
                 _hold_ref_deg = None
 
-        # ── Normal write ──────────────────────────────────────────────────────
+        # normal write
         if word_a >= 0 and word_a != _last_word_a:
             try:
                 motor._write_word(SERVO_ID_A, _REG_SPEED, word_a)
@@ -263,9 +258,6 @@ def _writer() -> None:
             except Exception as e:
                 print(f"[lift] Serial error (servo {SERVO_ID_B}): {e}")
 
-# =============================================================================
-# LIFECYCLE
-# =============================================================================
 
 def init() -> None:
     global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
@@ -290,20 +282,20 @@ def init() -> None:
     reading = _read_sensor(SENSOR_CHANNEL_A)
     if reading is not None:
         _zero_deg = _sensor_mgr.total_position(reading)
-        print(f"[lift] Zero point: {_zero_deg:.1f}° (sensor ch A)")
+        print(f"[lift] zero point: {_zero_deg:.1f}° (sensor ch A)")
     else:
         _zero_deg = None
-        print("[lift] Zero point: dead-reckoning only")
+        print("[lift] zero point: dead-reckoning only")
 
     _dead_pos[0]     = 0.0
     _last_write_time = time.monotonic()
     _initialized     = True
-    print(f"✅ Lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
+    print(f"✅ lift initialised (IDs {SERVO_ID_A} & {SERVO_ID_B}, wheel mode).")
     if HOLD_ENABLED:
-        print(f"   Holding torque ON  — speed={HOLD_SPEED}, "
+        print(f"   holding torque ON  — speed={HOLD_SPEED}, "
               f"thresh={HOLD_DRIFT_THRESH}°, pulse={HOLD_PULSE_SEC}s")
     else:
-        print("   Holding torque OFF.")
+        print("   holding torque OFF.")
 
 
 def shutdown() -> None:
@@ -325,11 +317,8 @@ def shutdown() -> None:
             pass
 
     _initialized = False
-    print("🛑 Lift shut down.")
+    print("🛑 lift shut down.")
 
-# =============================================================================
-# INTERNAL HELPERS
-# =============================================================================
 
 def _post_words(word_a: int, word_b: int) -> None:
     global _pending_word_a, _pending_word_b
@@ -350,9 +339,6 @@ def _speed_from_dy(dy_abs: int) -> int:
         return SPEED_MEDIUM
     return SPEED_FAST
 
-# =============================================================================
-# PUBLIC API
-# =============================================================================
 
 def stop() -> None:
     _post_words(0, 0)
@@ -414,9 +400,7 @@ def update(dy: int) -> str:
     stop()
     return f"LIFT STOP (dy={dy:+d}, aligned)"
 
-# =============================================================================
-# HOMING  (called by motor.home_all())
-# =============================================================================
+# homing (called by motor.home_all())
 
 def _home() -> None:
     global HOLD_ENABLED
@@ -443,10 +427,10 @@ def _home() -> None:
             if reading is not None:
                 current_abs = _sensor_mgr.total_position(reading)
                 delta = current_abs - _zero_deg
-                print(f"[lift] Homing with sensor → target {_zero_deg:.1f}°, "
+                print(f"[lift] homing with sensor → target {_zero_deg:.1f}°, "
                       f"current {current_abs:.1f}°, delta {delta:+.1f}°")
             else:
-                print(f"[lift] Homing with sensor → target {_zero_deg:.1f}° (sensor unreadable at start)")
+                print(f"[lift] homing with sensor → target {_zero_deg:.1f}° (sensor unreadable at start)")
 
             ok = home_with_sensor(
                 read_sensor_fn    = lambda: _read_sensor(SENSOR_CHANNEL_A),
@@ -456,16 +440,16 @@ def _home() -> None:
                 drive_negative_fn = lambda s: _both(_DIR_CW  | s),
                 stop_fn           = _stop_both,
             )
-            print(f"[lift] Homing {'complete' if ok else 'incomplete — sensor timeout'}.")
+            print(f"[lift] homing {'complete' if ok else 'incomplete — sensor timeout'}.")
         else:
-            print("[lift] Homing with dead-reckoning…")
+            print("[lift] homing with dead-reckoning…")
             home_dead_reckoning(
                 dead_pos_ref      = _dead_pos,
                 drive_positive_fn = lambda s: _both(_DIR_CCW | s),
                 drive_negative_fn = lambda s: _both(_DIR_CW  | s),
                 stop_fn           = _stop_both,
             )
-            print("[lift] Homing complete (dead-reckoning).")
+            print("[lift] homing complete (dead-reckoning).")
     finally:
         HOLD_ENABLED = _hold_was_enabled  # always restore, even if homing raises
 

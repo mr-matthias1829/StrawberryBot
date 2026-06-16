@@ -33,6 +33,7 @@ SPEED     = 1023
 
 SENSOR_CHANNEL = 3
 
+# AX-12A registers
 _REG_CW_LIMIT  = 6
 _REG_CCW_LIMIT = 8
 _REG_TORQUE_EN = 24
@@ -49,7 +50,7 @@ _SPEED_STOP = 0
 _sensor_mgr = None
 
 
-def _init_sensor() -> None:
+def _init_sensor() -> None: # in hindsight: shouldve used a single global init() for all servo
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -58,7 +59,7 @@ def _init_sensor() -> None:
             _sensor_mgr = mgr
             print(f"[gripper] Corner sensor ready on TCA ch {SENSOR_CHANNEL}.")
         else:
-            print(f"[gripper] ⚠️  No AS5600 found on TCA ch {SENSOR_CHANNEL} — running timed mode.")
+            print(f"[gripper] !!!  No AS5600 found on TCA ch {SENSOR_CHANNEL} — running timed mode.")
     except Exception as e:
         print(f"[gripper] Corner sensor unavailable ({e}) — running timed mode.")
 
@@ -76,9 +77,7 @@ def _read_sensor() -> dict | None:
 def get_sensor_reading() -> dict | None:
     return _read_sensor()
 
-# =============================================================================
-# STATE
-# =============================================================================
+# status
 
 _initialized:    bool = False
 _state:          str  = "OPEN"
@@ -89,10 +88,9 @@ _event = threading.Event()
 _stop_flag = False
 _thread: threading.Thread = None  # type: ignore[assignment]
 
-# =============================================================================
-# BACKGROUND WORKER THREAD
-# =============================================================================
 
+# background worker thread
+# dont want to hang the code for gripper since gripper takes its sweet time
 def _worker() -> None:
     global _state, _gripper_open, _pending_action
 
@@ -149,19 +147,16 @@ def _execute_grip() -> None:
 
 
 def _execute_open() -> None:
-    print(f"✋ Gripper opening ({OPEN_TIME}s)…")
+    print(f"✋ gripper opening ({OPEN_TIME}s)…")
     try:
         motor._write_word(SERVO_ID, _REG_SPEED, _SPEED_OPEN)
         time.sleep(OPEN_TIME)
         motor._write_word(SERVO_ID, _REG_SPEED, _SPEED_STOP)
-        print("✅ Gripper opened.")
+        print("✅ gripper opened.")
     except Exception as e:
-        print(f"❌ Open failed: {e}")
+        print(f"❌ open failed: {e}")
         motor._write_word(SERVO_ID, _REG_SPEED, _SPEED_STOP)
 
-# =============================================================================
-# LIFECYCLE
-# =============================================================================
 
 def init() -> None:
     global _initialized, _stop_flag, _thread, _state, _gripper_open
@@ -186,7 +181,7 @@ def init() -> None:
 
     _initialized = True
     servo_status.update(SERVO_ID, "OPEN", 0, real=True)
-    print(f"✅ Gripper initialised (ID {SERVO_ID}, wheel mode). State: OPEN")
+    print(f"✅ gripper initialised (ID {SERVO_ID}, wheel mode). state: OPEN")
 
 
 def shutdown() -> None:
@@ -207,7 +202,7 @@ def shutdown() -> None:
         pass
 
     _initialized = False
-    print("🛑 Gripper shut down.")
+    print("🛑 gripper shut down.")
 
 # =============================================================================
 # PUBLIC API
@@ -230,8 +225,8 @@ def is_gripped() -> bool:
 
 def command(action: str) -> dict:
     """
-    Command the gripper.  Non-blocking.
-    Ignored while the post-home lockout (motor.is_locked()) is active.
+    command the gripper.  Non-blocking.
+    ignored while the post-home lockout (motor.is_locked()) is active.
     """
     global _pending_action
 
@@ -273,14 +268,13 @@ def grip() -> dict:
 def open_gripper() -> dict:
     return command("open")
 
-# =============================================================================
-# HOMING  (called by motor.home_all())
-# =============================================================================
-
+# homing  (called by motor.home_all())
 def _home() -> None:
     """
-    Ensure the gripper is OPEN.  Blocks until the open command completes
+    ensure the gripper is OPEN. blocks until the open command completes
     (or is already confirmed open).
+
+    default state is open, and opening while it's open breaks the gripper
     """
     global _state, _gripper_open
 
@@ -293,7 +287,8 @@ def _home() -> None:
         busy         = (_state == "BUSY")
 
     if busy:
-        # Wait for the current action to finish before we proceed
+        # wait for the current action to finish before we proceed
+        # ... mostly to play it safe
         print("[gripper] _home(): waiting for current action to complete…")
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
@@ -318,10 +313,8 @@ def _home() -> None:
     print("[gripper] _home(): OPEN.")
 
 
-# =============================================================================
-# STANDALONE / TEST ENTRYPOINT
-# =============================================================================
 
+# standalone so we can "fix" the gripper if the robot ended with closed gripper
 if __name__ == "__main__":
     import sys
 
