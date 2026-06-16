@@ -11,9 +11,20 @@ is present.  _home() drives back to zero using whichever is available.
 
 coordinate convention
 ---------------------
-    dz > 0  -> target is FAR    -> extend  (forward)
-    dz < 0  -> target is CLOSE  -> retract (backward)
-    |dz| <= DEAD_ZONE  -> aligned, stop
+    dz > 0  → target is FAR    → extend  (forward)
+    dz < 0  → target is CLOSE  → retract (backward)
+    |dz| ≤ DEAD_ZONE  → aligned, stop
+
+_last_word bookkeeping
+-----------------------
+The background writer thread (_writer) only sends a new _REG_SPEED word
+to the servo when it differs from _last_word, to avoid spamming the
+serial bus with redundant writes. init(), shutdown() and _home() all
+write _REG_SPEED directly, bypassing the writer thread entirely.
+Whenever that happens, _last_word must be reset to -1 afterward —
+otherwise the writer thread's bookkeeping goes stale and it can silently
+skip the very next legitimate move command if it happens to match the
+stale value.
 """
 
 import threading
@@ -55,8 +66,9 @@ _REG_SPEED     = 32
 _DIR_CCW = 0
 _DIR_CW  = 1 << 10
 
-
-# corner sensor
+# =============================================================================
+# CORNER SENSOR
+# =============================================================================
 
 _sensor_mgr = None
 
@@ -170,7 +182,7 @@ def _writer() -> None:
 
 
 def init() -> None:
-    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
+    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time, _last_word
 
     if _initialized:
         return
@@ -182,6 +194,9 @@ def init() -> None:
     motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0); time.sleep(0.02)
     motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1); time.sleep(0.05)
     motor._write_word(SERVO_ID, _REG_SPEED,     0)
+    # direct write above bypasses the writer thread's bookkeeping —
+    # reset so the next _post_word() is never mistaken for a duplicate.
+    _last_word = -1
 
     _thread = threading.Thread(target=_writer, daemon=True, name="arm-writer")
     _thread.start()
@@ -203,7 +218,7 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    global _initialized, _stop_flag
+    global _initialized, _stop_flag, _last_word
 
     if not _initialized:
         return
@@ -218,6 +233,10 @@ def shutdown() -> None:
         motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0)
     except Exception:
         pass
+
+    # direct write above bypasses the writer thread's bookkeeping —
+    # reset so a future re-init / writer restart doesn't inherit a stale value.
+    _last_word = -1
 
     _initialized = False
     print("🛑 arm shut down.")
@@ -298,6 +317,8 @@ def update(dz: int) -> str:
 
 def _home() -> None:
     """retract arm to its zero (startup) position.  Blocks until complete."""
+    global _last_word
+
     if not _initialized:
         print("[arm] _home(): not initialised — skipping")
         return
@@ -326,4 +347,8 @@ def _home() -> None:
         print("[arm] homing complete (dead-reckoning).")
 
     _dead_pos[0] = 0.0
+    # all the writes above (including inside home_with_sensor /
+    # home_dead_reckoning) go straight to the servo, bypassing the writer
+    # thread's bookkeeping — reset so the next _post_word() always lands.
+    _last_word = -1
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)

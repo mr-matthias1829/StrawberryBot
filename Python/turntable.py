@@ -16,6 +16,17 @@ _home()
 Called by motor.home_all().  Drives back to the zero position using the
 sensor if available, otherwise reverses the dead-reckoning accumulator.
 Blocks until complete.
+
+_last_word bookkeeping
+-----------------------
+The background writer thread (_writer) only sends a new _REG_SPEED word
+to the servo when it differs from _last_word, to avoid spamming the
+serial bus with redundant writes. Several functions (init, shutdown,
+_home, home_physical) write _REG_SPEED directly, bypassing the writer
+thread entirely. Whenever that happens, _last_word must be reset to -1
+afterward — otherwise the writer thread's bookkeeping goes stale and it
+can silently skip the very next legitimate move command if it happens to
+match the stale value.
 """
 
 import threading
@@ -180,7 +191,7 @@ def _writer() -> None:
 # =============================================================================
 
 def init() -> None:
-    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time
+    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time, _last_word
 
     if _initialized:
         return
@@ -196,6 +207,9 @@ def init() -> None:
     motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
     time.sleep(0.05)
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
+    # direct write above bypasses the writer thread's bookkeeping —
+    # reset so the next _post_word() is never mistaken for a duplicate.
+    _last_word = -1
 
     _thread = threading.Thread(target=_writer, daemon=True, name="turntable-writer")
     _thread.start()
@@ -217,7 +231,7 @@ def init() -> None:
 
 
 def shutdown() -> None:
-    global _initialized, _stop_flag
+    global _initialized, _stop_flag, _last_word
 
     if not _initialized:
         return
@@ -232,6 +246,10 @@ def shutdown() -> None:
         motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0)
     except Exception:
         pass
+
+    # direct write above bypasses the writer thread's bookkeeping —
+    # reset so a future re-init / writer restart doesn't inherit a stale value.
+    _last_word = -1
 
     _initialized = False
     print("🛑 turntable shut down.")
@@ -313,6 +331,8 @@ def update(dx: int) -> str:
 
 def _home() -> None:
     """drive turntable back to its zero point.  Blocks until complete."""
+    global _last_word
+
     if not _initialized:
         print("[turntable] _home(): not initialised — skipping")
         return
@@ -344,6 +364,10 @@ def _home() -> None:
         print("[turntable] homing complete (dead-reckoning).")
 
     _dead_pos[0] = 0.0
+    # all the writes above (including inside home_with_sensor /
+    # home_dead_reckoning) go straight to the servo, bypassing the writer
+    # thread's bookkeeping — reset so the next _post_word() always lands.
+    _last_word = -1
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
@@ -352,6 +376,8 @@ def home_physical() -> None:
     drive turntable to its physical zero position by hitting the end stop.
     this is for the UI home button, NOT for bin placement.
     """
+    global _last_word, _zero_deg
+
     if not _initialized:
         print("[turntable] home_physical(): not initialised — skipping")
         return
@@ -380,9 +406,12 @@ def home_physical() -> None:
     if _sensor_mgr is not None:
         reading = _read_sensor()
         if reading is not None:
-            global _zero_deg
             _zero_deg = _sensor_mgr.total_position(reading)
             print(f"[turntable] physical home set to {_zero_deg:.1f}°")
+
+    # every write above went straight to the servo, bypassing the writer
+    # thread's bookkeeping — reset so the next _post_word() always lands.
+    _last_word = -1
 
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
     print("[turntable] physical homing complete")
