@@ -1,400 +1,589 @@
 """
-turntable.py
-============
-Controls the turntable servo (AX-12A, ID 13) in wheel /
-continuous-rotation mode so the robot can pan left or right to track
-a strawberry on the X-axis.
+bin.py
+======
 
-Zero-point tracking
--------------------
-At init() the current sensor reading (if available) is stored as
-_zero_deg.  A dead-reckoning accumulator (_dead_pos) tracks movement
-even when no sensor is present.
+Post-grip bin-placement sequencer for StrawberryBot.
 
-_home()
--------
-Called by motor.home_all().  Drives back to the zero position using the
-sensor if available, otherwise reverses the dead-reckoning accumulator.
-Blocks until complete.
+SIMPLE FLOW:
+  1. Gripper is already closed (called after successful grip)
+  2. HOME ALL AXES except gripper (turntable, lift, arm, pivot)
+  3. Wait for motor lockout to expire
+  4. Drive to bin with slot offset (turntable + arm based on grid position)
+  5. Lower pivot, open gripper, raise pivot
+  6. HOME ALL AXES again (including gripper this time)
+  7. Done - robot resumes searching for next berry
 
-_last_word bookkeeping
------------------------
-The background writer thread (_writer) only sends a new _REG_SPEED word
-to the servo when it differs from _last_word, to avoid spamming the
-serial bus with redundant writes. Several functions (init, shutdown,
-_home, home_physical) write _REG_SPEED directly, bypassing the writer
-thread entirely. Whenever that happens, _last_word must be reset to -1
-afterward — otherwise the writer thread's bookkeeping goes stale and it
-can silently skip the very next legitimate move command if it happens to
-match the stale value.
+GRID LAYOUT (3x3, left-to-right, top-to-bottom):
+
+    Row 0 (achter):  [0]  [1]  [2]
+    Row 1 (midden):  [3]  [4]  [5]
+    Row 2 (voor):    [6]  [7]  [8]
+
+    Turntable → kolommen (links = minder tijd, rechts = meer tijd)
+    Arm → rijen (achter = minder tijd, voor = meer tijd)
 """
 
-import threading
 import time
+import threading
 
-import motor
-import servo_status
-from _homing_utils import (
-    home_with_sensor, home_dead_reckoning, accumulate, DR_HOME_SPEED
-)
+# hardware imports
 
-# =============================================================================
-# TUNING
-# =============================================================================
+try:
+    import turntable as _turntable
 
-SERVO_ID = 13
-DEAD_ZONE = 25
+    _HAS_TURNTABLE = True
+except ImportError:
+    _HAS_TURNTABLE = False
+    print("[bin] turntable not available — simulating")
 
-SPEED_SLOW = 40
-SPEED_MEDIUM = 80
-SPEED_FAST = 160
+try:
+    import lift as _lift
 
-THRESHOLD_SLOW = 50
-THRESHOLD_MEDIUM = 150
+    _HAS_LIFT = True
+except ImportError:
+    _HAS_LIFT = False
+    print("[bin] lift not available — simulating")
 
-SENSOR_CHANNEL = 1  # TCA9548A channel wired to this encoder
+try:
+    import arm as _arm
 
-MIN_DEG: float | None = -999999999
-MAX_DEG: float | None = 999999999
+    _HAS_ARM = True
+except ImportError:
+    _HAS_ARM = False
+    print("[bin] arm not available — simulating")
 
-# dead-reckoning limit conversion: degrees per (speed-unit * second).
-SPEED_TO_DEG = 0.3 # untested, as it always has a sensor
+try:
+    import pivot as _pivot
 
-# AX-12A registers
-_REG_CW_LIMIT = 6
-_REG_CCW_LIMIT = 8
-_REG_TORQUE_EN = 24
-_REG_SPEED = 32
+    _HAS_PIVOT = True
+except ImportError:
+    _HAS_PIVOT = False
+    print("[bin] pivot not available — simulating")
 
-_DIR_CCW = 0
-_DIR_CW = 1 << 10
+try:
+    import gripper as _gripper
 
-# =============================================================================
-# CORNER SENSOR
-# =============================================================================
+    _HAS_GRIPPER = True
+except ImportError:
+    _HAS_GRIPPER = False
+    print("[bin] gripper not available — simulating")
 
-_sensor_mgr = None
+try:
+    import motor as _motor
+
+    _HAS_MOTOR = True
+except ImportError:
+    _HAS_MOTOR = False
+    print("[bin] motor not available — simulating")
+
+# tuning to adjust values for the robot
+
+# Direction to rotate toward bin ("left" or "right")
+BIN_SIDE: str = "left"
+
+# Turntable: base time for center column (col 1)
+TURNTABLE_BASE_S: float = 8.0
+# Turntable: extra time per column step (col 0 = -step, col 2 = +step)
+TURNTABLE_STEP_S: float = 0.6
+
+# Arm: base time for center row (row 1)
+ARM_BASE_S: float = 3.5
+# Arm: extra time per row step (row 0 = -step, row 2 = +step)
+ARM_STEP_S: float = 0.5
+
+# Pivot: seconds to lower berry into slot
+PIVOT_LOWER_S: float = 0.5
+
+# Pivot: seconds to raise back up
+PIVOT_RAISE_S: float = 0.5
+
+# Wait after gripper opens before moving away
+GRIPPER_DROP_WAIT_S: float = 0.5
+
+# Settle pause after each move
+SETTLE_S: float = 0.2
+
+# How long to wait for motor lockout to expire after homing (s)
+LOCKOUT_WAIT_TIMEOUT_S: float = 15.0
+
+# Extra settle after homing before any timed drive move, to absorb any
+# lockout that was started by home_all() elsewhere and not yet registered
+# by is_locked() at the moment _wait_for_lockout() is called.
+POST_HOME_SETTLE_S: float = 0.5
+
+# Maximum time to wait for a lockout to clear after it was detected
+LOCKOUT_CLEAR_TIMEOUT_S: float = 2.0
+
+# Grid dimensions (3x3)
+GRID_COLS: int = 3
+GRID_ROWS: int = 3
+
+# state
+
+_lock = threading.Lock()
+_slot_index: int = 0
+_busy: bool = False
 
 
-def _init_sensor() -> None: # in hindsight: shouldve used a single global init() for all servo
-    global _sensor_mgr
-    try:
-        from corner_sensors import CornerSensorManager
-        mgr = CornerSensorManager(bus_num=1)
-        if mgr.channel_has_sensor(SENSOR_CHANNEL):
-            _sensor_mgr = mgr
-            print(f"[turntable] Corner sensor ready on TCA ch {SENSOR_CHANNEL}.")
+def _slot_to_row_col(slot: int):
+    """Convert slot number (0-8) to (row, col)."""
+    row = slot // GRID_COLS  # 0, 1, 2
+    col = slot % GRID_COLS  # 0, 1, 2
+    return row, col
+
+
+def grid_full() -> bool:
+    with _lock:
+        return _slot_index >= GRID_ROWS * GRID_COLS
+
+
+def collected_count() -> int:
+    with _lock:
+        return _slot_index
+
+
+def reset() -> None:
+    global _slot_index
+    with _lock:
+        _slot_index = 0
+    print("[bin] Reset — starting fresh bin.")
+
+
+# lockout helper
+
+def _wait_for_lockout() -> None:
+    """Block until the motor post-home lockout has expired."""
+    if not _HAS_MOTOR:
+        return
+    deadline = time.monotonic() + LOCKOUT_WAIT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not _motor.is_locked():
+            return
+        time.sleep(0.05)
+    print("[bin] WARNING: lockout wait timed out — proceeding anyway")
+
+
+def _wait_for_lockout_robust() -> None:
+    """
+    Robust lockout waiting that handles lockouts that start after we start waiting.
+
+    This solves the race condition where:
+    1. home_all() is called and returns
+    2. _wait_for_lockout() checks is_locked() -> False (lockout hasn't started yet)
+    3. Lockout starts in background thread
+    4. Timed move gets dropped because lockout is now active
+
+    The robust approach:
+    1. Wait for any existing lockout to clear
+    2. Then watch for new lockouts starting during the settle period
+    3. If a new lockout starts, wait for it to clear too
+    """
+    if not _HAS_MOTOR:
+        return
+
+    # First, wait for any current lockout to clear
+    _wait_for_lockout()
+
+    # Now we're in the "clear" state. But a lockout might start any moment.
+    # We'll watch for a short period to catch any lockout that starts.
+    start_time = time.monotonic()
+    settle_deadline = start_time + POST_HOME_SETTLE_S
+
+    print(f"[bin] Lockout watch period: {POST_HOME_SETTLE_S:.1f}s")
+
+    while time.monotonic() < settle_deadline:
+        # Check if a lockout was set recently (within the last 0.3s)
+        if hasattr(_motor, 'lock_was_set_recently'):
+            if _motor.lock_was_set_recently(threshold=0.3):
+                print("[bin] New lockout detected during settle period — waiting for it to clear...")
+                # Wait for this lockout to clear
+                clear_deadline = time.monotonic() + LOCKOUT_CLEAR_TIMEOUT_S
+                while time.monotonic() < clear_deadline:
+                    if not _motor.is_locked():
+                        print("[bin] Lockout cleared")
+                        # Reset the settle timer to catch any more lockouts
+                        settle_deadline = time.monotonic() + POST_HOME_SETTLE_S
+                        break
+                    time.sleep(0.05)
+                else:
+                    print("[bin] WARNING: lockout clear timeout — proceeding anyway")
+                    return
         else:
-            print(f"[turntable] !!!  No AS5600 found on TCA ch {SENSOR_CHANNEL} — running open-loop.")
-    except Exception as e:
-        print(f"[turntable] Corner sensor unavailable ({e}) — running open-loop.")
+            # Fallback: just check is_locked() periodically
+            if _motor.is_locked():
+                print("[bin] Lockout became active during settle — waiting...")
+                _wait_for_lockout()
+                # Reset settle timer
+                settle_deadline = time.monotonic() + POST_HOME_SETTLE_S
+
+        time.sleep(0.02)
+
+    print("[bin] Lockout watch period complete — safe to move")
 
 
-def _read_sensor() -> dict | None:
-    if _sensor_mgr is None:
-        return None
+# home helpers
+
+def _home_axes_keep_gripper_closed() -> None:
+    """
+    Home arm, lift, turntable and pivot — but NOT the gripper.
+    The gripper stays closed because we are still holding the berry.
+    Also waits for the motor lockout to expire before returning,
+    so subsequent timed moves are not silently dropped.
+    """
+    print("[bin] Homing axes (gripper stays closed)...")
+
+    if _HAS_ARM and hasattr(_arm, '_home'):
+        print("[bin]  → arm")
+        _arm._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_LIFT and hasattr(_lift, '_home'):
+        print("[bin]  → lift")
+        _lift._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_TURNTABLE and hasattr(_turntable, '_home'):
+        print("[bin]  → turntable")
+        _turntable._home()
+        time.sleep(SETTLE_S)
+
+    if _HAS_PIVOT and hasattr(_pivot, '_home'):
+        print("[bin]  → pivot")
+        _pivot._home()
+        time.sleep(SETTLE_S)
+
+    # Wait for any lockout started elsewhere, then add a hard settle so the
+    # lock is guaranteed expired before the first timed drive move.
+    _wait_for_lockout_robust()
+
+    print("[bin] Homing complete (gripper kept closed)")
+
+
+def _home_all_including_gripper() -> None:
+    """
+    Home everything including the gripper (berry has been released).
+    Uses motor.home_all() if available, otherwise homes individually.
+    Waits for the lockout to expire before returning.
+    """
+    print("[bin] Homing ALL axes (including gripper)...")
+
+    if _HAS_MOTOR and hasattr(_motor, 'home_all'):
+        _motor.home_all()
+        # home_all() sets the lockout — wait for it to expire
+        _wait_for_lockout_robust()
+    else:
+        print("[bin] No motor.home_all() — homing individually...")
+
+        if _HAS_GRIPPER and hasattr(_gripper, '_home'):
+            print("[bin]  → gripper")
+            _gripper._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_ARM and hasattr(_arm, '_home'):
+            print("[bin]  → arm")
+            _arm._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_LIFT and hasattr(_lift, '_home'):
+            print("[bin]  → lift")
+            _lift._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_TURNTABLE and hasattr(_turntable, '_home'):
+            print("[bin]  → turntable")
+            _turntable._home()
+            time.sleep(SETTLE_S)
+
+        if _HAS_PIVOT and hasattr(_pivot, '_home'):
+            print("[bin]  → pivot")
+            _pivot._home()
+            time.sleep(SETTLE_S)
+
+        _wait_for_lockout_robust()
+
+    print("[bin] Full homing complete")
+
+
+# movement helpers
+
+def _turntable_move(duration: float, direction: str = None) -> None:
+    """Rotate turntable for specific duration."""
+    if direction is None:
+        direction = BIN_SIDE
+
+    if not _HAS_TURNTABLE:
+        print(f"[bin][SIM] turntable {direction} {duration:.2f}s")
+        time.sleep(duration)
+        return
+
+    print(f"[bin] Turntable {direction} {duration:.2f}s")
+    if direction == "left":
+        _turntable.spin_left()
+    else:
+        _turntable.spin_right()
+
+    time.sleep(duration)
+    _turntable.stop()
+    time.sleep(SETTLE_S)
+
+
+def _arm_move(duration: float, forward: bool = True) -> None:
+    """Move arm forward or backward."""
+    if not _HAS_ARM:
+        print(f"[bin][SIM] arm {'forward' if forward else 'backward'} {duration:.2f}s")
+        time.sleep(duration)
+        return
+
+    print(f"[bin] Arm {'forward' if forward else 'backward'} {duration:.2f}s")
+    if forward and hasattr(_arm, 'move_forward'):
+        _arm.move_forward()
+    elif not forward and hasattr(_arm, 'move_backward'):
+        _arm.move_backward()
+    else:
+        _arm.stop()
+        time.sleep(duration)
+        return
+
+    time.sleep(duration)
+    _arm.stop()
+    time.sleep(SETTLE_S)
+
+
+def _pivot_lower_drop() -> None:
+    """Lower pivot to drop berry into bin slot."""
+    if not _HAS_PIVOT:
+        print(f"[bin][SIM] pivot lower {PIVOT_LOWER_S}s")
+        time.sleep(PIVOT_LOWER_S)
+        return
+
+    print(f"[bin] Pivot lower {PIVOT_LOWER_S}s")
+    _pivot.rotate_down()  # pivot.py uses rotate_down(), not move_down()
+    time.sleep(PIVOT_LOWER_S)
+    _pivot.stop()
+    time.sleep(SETTLE_S)
+
+
+def _pivot_raise_home() -> None:
+    """
+    Raise pivot back to home position.
+
+    pivot.rotate_up() posts to the writer thread via _post_word(), which
+    checks motor.is_locked() before writing.  After the drop sequence the
+    lockout is not active, so the write goes through immediately.  We still
+    call _wait_for_lockout() here as a guard in case something upstream
+    re-triggered a lockout between drop and raise.
+    """
+    if not _HAS_PIVOT:
+        print(f"[bin][SIM] pivot raise {PIVOT_RAISE_S}s")
+        time.sleep(PIVOT_RAISE_S)
+        return
+
+    # Make sure no stale lockout is blocking the writer thread before we send
+    # the rotate_up command.
+    _wait_for_lockout_robust()
+
+    print(f"[bin] Pivot raise {PIVOT_RAISE_S}s")
+    _pivot.rotate_up()  # pivot.py uses rotate_up(), not move_up()
+    time.sleep(PIVOT_RAISE_S)
+    _pivot.stop()
+    time.sleep(SETTLE_S)
+
+
+def _open_gripper() -> None:
+    """Open gripper to release berry."""
+    if not _HAS_GRIPPER:
+        print("[bin][SIM] gripper open")
+        return
+
+    print("[bin] Opening gripper...")
+    result = _gripper.open_gripper()
+    print(f"[bin] Gripper open result: {result}")
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if _gripper.get_state() != "BUSY":
+            break
+        time.sleep(0.1)
+
+    time.sleep(GRIPPER_DROP_WAIT_S)
+
+
+# slot position calculation
+
+def _calculate_slot_times(row: int, col: int) -> tuple[float, float]:
+    """
+    Calculate turntable and arm times for a specific slot.
+
+    Row 0 (achter): arm minder tijd
+    Row 1 (midden): arm base tijd
+    Row 2 (voor):   arm meer tijd
+
+    Col 0 (links):  turntable minder tijd
+    Col 1 (midden): turntable base tijd
+    Col 2 (rechts): turntable meer tijd
+    """
+    col_offset = col - 1  # -1, 0, or 1
+    turntable_time = TURNTABLE_BASE_S + (col_offset * TURNTABLE_STEP_S)
+
+    row_offset = row - 1  # -1, 0, or 1
+    arm_time = ARM_BASE_S + (row_offset * ARM_STEP_S)
+
+    return turntable_time, arm_time
+
+
+def _drive_to_slot(row: int, col: int) -> None:
+    """Drive turntable and arm to the specific slot position."""
+    turntable_time, arm_time = _calculate_slot_times(row, col)
+
+    print(f"[bin] Driving to slot (row={row}, col={col})")
+    print(f"[bin]   Turntable: {turntable_time:.2f}s")
+    print(f"[bin]   Arm: {arm_time:.2f}s")
+
+    _turntable_move(turntable_time)
+    _arm_move(arm_time, forward=True)
+
+
+# main sequence
+
+def place_berry() -> bool:
+    """
+    Full post-grip deposit sequence. Blocking.
+
+    Returns True on success, False if already busy.
+    The gripper is guaranteed to be opened even if an error occurs mid-sequence.
+    """
+    global _busy, _slot_index
+
+    with _lock:
+        if _busy:
+            print("[bin] place_berry() called while already busy — ignored.")
+            return False
+        current_slot = _slot_index
+        _busy = True
+
+    success = False
     try:
-        return _sensor_mgr.read_sensor(SENSOR_CHANNEL)
+        total = GRID_ROWS * GRID_COLS
+        row, col = _slot_to_row_col(current_slot)
+
+        print(f"\n[bin] === PLACING BERRY #{current_slot + 1}/{total} ===")
+        print(f"[bin] Slot {current_slot} → Row {row}, Col {col}")
+
+        # homing all axes except the gripper while berry is still held
+        print("[bin] STEP 1: Homing axes (gripper stays closed)...")
+        _home_axes_keep_gripper_closed()
+
+        # driving to specific spot in bin
+        print("[bin] STEP 2: Driving to slot...")
+        _drive_to_slot(row, col)
+
+        # dropping the berry
+        print("[bin] STEP 3: Dropping berry...")
+        _pivot_lower_drop()
+        _open_gripper()
+        _pivot_raise_home()
+
+        # homing all axes, gripper can now move freely
+        print("[bin] STEP 4: Homing all axes...")
+        _home_all_including_gripper()
+
+        # updating counter
+        with _lock:
+            _slot_index += 1
+            new_count = _slot_index
+
+        if new_count >= total:
+            print(f"[bin] Bin full ({total}/{total}) — auto-resetting")
+            reset()
+        else:
+            print(f"[bin] Berry placed. {new_count}/{total} slots filled")
+
+        print("[bin] === DONE ===")
+        success = True
+        return True
+
     except Exception as e:
-        print(f"[turntable] Sensor read error: {e}")
-        return None
+        print(f"[bin] ERROR during placement: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+    finally:
+        # Safety net: if anything went wrong before the gripper was opened,
+        # force it open now so the robot doesn't stay stuck in GRIPPED state.
+        if not success and _HAS_GRIPPER:
+            try:
+                state = _gripper.get_state()
+                if state != "OPEN":
+                    print("[bin] Safety: forcing gripper open after error...")
+                    _gripper.open_gripper()
+                    deadline = time.monotonic() + 10.0
+                    while time.monotonic() < deadline:
+                        if _gripper.get_state() != "BUSY":
+                            break
+                        time.sleep(0.1)
+                    print(f"[bin] Safety: gripper state is now {_gripper.get_state()}")
+            except Exception as e2:
+                print(f"[bin] Safety gripper open failed: {e2}")
+
+        with _lock:
+            _busy = False
 
 
-def get_sensor_reading() -> dict | None:
-    return _read_sensor()
+# status
 
+def status() -> dict:
+    with _lock:
+        idx = _slot_index
+        total = GRID_ROWS * GRID_COLS
+        busy = _busy
 
-def get_dead_reckoning() -> dict:
-    """return dead-reckoning state for dashboard display."""
+    slots = []
+    for i in range(total):
+        r, c = _slot_to_row_col(i)
+        slots.append({
+            "index": i,
+            "row": r,
+            "col": c,
+            "filled": i < idx,
+            "turntable_time": round(TURNTABLE_BASE_S + ((c - 1) * TURNTABLE_STEP_S), 2),
+            "arm_time": round(ARM_BASE_S + ((r - 1) * ARM_STEP_S), 2)
+        })
+
     return {
-        "accumulator": round(_dead_pos[0], 3),
-        "estimated_deg": round(_dead_pos[0] * SPEED_TO_DEG, 2),
-        "zero_deg": round(_zero_deg, 2) if _zero_deg is not None else None,
-        "sensor_active": _sensor_mgr is not None,
-        "min_deg": MIN_DEG,
-        "max_deg": MAX_DEG,
+        "collected": idx,
+        "capacity": total,
+        "full": idx >= total,
+        "busy": busy,
+        "bin_side": BIN_SIDE,
+        "grid": f"{GRID_ROWS}x{GRID_COLS}",
+        "turntable_base": TURNTABLE_BASE_S,
+        "turntable_step": TURNTABLE_STEP_S,
+        "arm_base": ARM_BASE_S,
+        "arm_step": ARM_STEP_S,
+        "slots": slots,
     }
 
 
-def _at_limit(direction: str) -> bool:
-    if MIN_DEG is None or MAX_DEG is None:
-        return False
+# test
 
-    # sensor path
-    if _sensor_mgr is not None:
-        reading = _read_sensor()
-        if reading is not None:
-            abs_deg = _sensor_mgr.total_position(reading)
-            # position relative to our zero point captured at init()
-            deg = abs_deg - (_zero_deg or 0)
-            if direction == "right" and deg >= MAX_DEG:
-                return True
-            if direction == "left" and deg <= MIN_DEG:
-                return True
-            return False
-        # sensor present but read failed — fall through to DR
+if __name__ == "__main__":
+    print("=== bin.py test (3x3 grid) ===")
+    print(f"Grid: {GRID_ROWS}x{GRID_COLS}")
+    print(f"Turntable: base={TURNTABLE_BASE_S}s, step={TURNTABLE_STEP_S}s")
+    print(f"Arm: base={ARM_BASE_S}s, step={ARM_STEP_S}s\n")
 
-    # dead-reckoning path
-    estimated_deg = _dead_pos[0] * SPEED_TO_DEG
-    if direction == "right" and estimated_deg >= MAX_DEG:
-        return True
-    if direction == "left" and estimated_deg <= MIN_DEG:
-        return True
-    return False
+    print("Slot layout:")
+    for row in range(3):
+        line = []
+        for col in range(3):
+            slot = row * 3 + col
+            line.append(f"{slot}")
+        print(f"  Row {row}: {' '.join(line)}")
+    print()
 
-
-
-_initialized: bool = False
-_pending_word: int = -1
-_last_word: int = -1
-_lock = threading.Lock()
-_event = threading.Event()
-_stop_flag = False
-_thread: threading.Thread = None  # type: ignore[assignment]
-
-# Zero-point tracking
-_zero_deg: float | None = None
-_dead_pos: list = [0.0]
-_last_write_time: float = 0.0
-
-
-# background writer thread
-def _writer() -> None:
-    global _last_word, _last_write_time
-    while not _stop_flag:
-        time.sleep(0.05)
-
-        now = time.monotonic()
-        dt = now - _last_write_time if _last_write_time else 0.0
-        _last_write_time = now
-
-        if _last_word >= 0 and dt > 0:
-            accumulate(_dead_pos, _last_word, dt)
-
-        _event.clear()
-        with _lock:
-            word = _pending_word
-
-        if word < 0 or word == _last_word:
-            continue
-        # LOCKOUT CHECK UITGEZET - anders worden alle commando's stil gedropt!
-        # if motor.is_locked():
-        #     continue
-        try:
-            motor._write_word(SERVO_ID, _REG_SPEED, word)
-            _last_word = word
-        except Exception as e:
-            print(f"[turntable] serial error: {e}")
-
-
-# =============================================================================
-# LIFECYCLE
-# =============================================================================
-
-def init() -> None:
-    global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time, _last_word
-
-    if _initialized:
-        return
-
-    _stop_flag = False
-
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0);
-    time.sleep(0.05)
-    motor._write_word(SERVO_ID, _REG_CW_LIMIT, 0);
-    time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0);
-    time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
-    time.sleep(0.05)
-    motor._write_word(SERVO_ID, _REG_SPEED, 0)
-    # direct write above bypasses the writer thread's bookkeeping —
-    # reset so the next _post_word() is never mistaken for a duplicate.
-    _last_word = -1
-
-    _thread = threading.Thread(target=_writer, daemon=True, name="turntable-writer")
-    _thread.start()
-
-    _init_sensor()
-
-    reading = _read_sensor()
-    if reading is not None:
-        _zero_deg = _sensor_mgr.total_position(reading)
-        print(f"[turntable] zero point: {_zero_deg:.1f}° (sensor)")
-    else:
-        _zero_deg = None
-        print("[turntable] zero point: dead-reckoning only")
-
-    _dead_pos[0] = 0.0
-    _last_write_time = time.monotonic()
-    _initialized = True
-    print(f"✅ turntable initialised (ID {SERVO_ID}, wheel mode).")
-
-
-def shutdown() -> None:
-    global _initialized, _stop_flag, _last_word
-
-    if not _initialized:
-        return
-
-    _stop_flag = True
-    _event.set()
-    if _thread is not None:
-        _thread.join(timeout=1.0)
-
-    try:
-        motor._write_word(SERVO_ID, _REG_SPEED, 0)
-        motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0)
-    except Exception:
-        pass
-
-    # direct write above bypasses the writer thread's bookkeeping —
-    # reset so a future re-init / writer restart doesn't inherit a stale value.
-    _last_word = -1
-
-    _initialized = False
-    print("🛑 turntable shut down.")
-
-
-
-def _post_word(word: int) -> None:
-    global _pending_word
-    # LOCKOUT CHECK UITGEZET - anders worden alle commando's stil gedropt!
-    # if motor.is_locked():
-    #     return
-    with _lock:
-        _pending_word = word
-    _event.set()
-
-
-def _speed_from_dx(dx_abs: int) -> int:
-    if dx_abs <= DEAD_ZONE:
-        return 0
-    if dx_abs <= THRESHOLD_SLOW:
-        return SPEED_SLOW
-    if dx_abs <= THRESHOLD_MEDIUM:
-        return SPEED_MEDIUM
-    return SPEED_FAST
-
-
-
-def stop() -> None:
-    _post_word(0)
-    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
-
-
-def spin_left(speed: int = SPEED_MEDIUM) -> dict:
-    speed = max(0, min(1023, speed))
-    _post_word(_DIR_CCW | speed)
-    servo_status.update(SERVO_ID, "LEFT", speed, real=_initialized)
-    return {"direction": "left", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
-
-
-def spin_right(speed: int = SPEED_MEDIUM) -> dict:
-    speed = max(0, min(1023, speed))
-    _post_word(_DIR_CW | speed)
-    servo_status.update(SERVO_ID, "RIGHT", speed, real=_initialized)
-    return {"direction": "right", "servo_id": SERVO_ID, "speed": speed, "status": "ok"}
-
-
-def update(dx: int) -> str:
-    if not _initialized:
-        speed = _speed_from_dx(abs(dx))
-        if dx > DEAD_ZONE:
-            servo_status.update(SERVO_ID, "RIGHT", speed, real=False)
-            return f"TURNTABLE SIMULATED (dx={dx:+d})"
-        if dx < -DEAD_ZONE:
-            servo_status.update(SERVO_ID, "LEFT", speed, real=False)
-            return f"TURNTABLE SIMULATED (dx={dx:+d})"
-        servo_status.update(SERVO_ID, "STOP", 0, real=False)
-        return f"TURNTABLE SIMULATED (dx={dx:+d})"
-
-    speed = _speed_from_dx(abs(dx))
-
-    if dx > DEAD_ZONE:
-        if _at_limit("right"):
-            stop()
-            return f"TURNTABLE LIMIT RIGHT (dx={dx:+d}, pos≥{MAX_DEG})"
-        spin_right(speed)
-        return f"TURNTABLE RIGHT (dx={dx:+d}, speed={speed})"
-
-    if dx < -DEAD_ZONE:
-        if _at_limit("left"):
-            stop()
-            return f"TURNTABLE LIMIT LEFT  (dx={dx:+d}, pos≤{MIN_DEG})"
-        spin_left(speed)
-        return f"TURNTABLE LEFT  (dx={dx:+d}, speed={speed})"
-
-    stop()
-    return f"TURNTABLE STOP  (dx={dx:+d}, aligned)"
-
-
-# homing (called by motor.home_all())
-
-def _home() -> None:
-    """drive turntable back to its zero point.  Blocks until complete."""
-    global _last_word
-
-    if not _initialized:
-        print("[turntable] _home(): not initialised — skipping")
-        return
-
-    motor._write_word(SERVO_ID, _REG_SPEED, 0)
-
-    if _zero_deg is not None:
-        print(f"[turntable] homing with sensor → target {_zero_deg:.1f}°")
-        ok = home_with_sensor(
-            read_sensor_fn=_read_sensor,
-            total_position_fn=_sensor_mgr.total_position,
-            zero_deg=_zero_deg,
-            drive_positive_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
-            drive_negative_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | s),
-            stop_fn=lambda: motor._write_word(SERVO_ID, _REG_SPEED, 0),
-        )
-        if ok:
-            print("[turntable] homing complete (sensor).")
-        else:
-            print("[turntable] homing incomplete — sensor timeout.")
-    else:
-        print("[turntable] homing with dead-reckoning…")
-        home_dead_reckoning(
-            dead_pos_ref=_dead_pos,
-            drive_positive_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | s),
-            drive_negative_fn=lambda s: motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | s),
-            stop_fn=lambda: motor._write_word(SERVO_ID, _REG_SPEED, 0),
-        )
-        print("[turntable] homing complete (dead-reckoning).")
-
-    _dead_pos[0] = 0.0
-    # all the writes above (including inside home_with_sensor /
-    # home_dead_reckoning) go straight to the servo, bypassing the writer
-    # thread's bookkeeping — reset so the next _post_word() always lands.
-    _last_word = -1
-    servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
-
-
-def home_physical() -> None:
-    """
-    drive turntable to its physical zero position by hitting the end stop.
-    this is for the UI home button, NOT for bin placement.
-    """
-    global _last_word, _zero_deg
-
-    if not _initialized:
-        print("[turntable] home_physical(): not initialised — skipping")
-        return
-
-    print("[turntable] physical homing - moving to end stop...")
-
-    # stop any current movement
-    motor._write_word(SERVO_ID, _REG_SPEED, 0)
-    time.sleep(0.1)
-
-    # move left (CW) until we hit the end stop (3 seconds should be enough)
-    motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | SPEED_MEDIUM)
-    time.sleep(3.0)
-    motor._write_word(SERVO_ID, _REG_SPEED, 0)
-    time.sleep(0.3)
-
-    # move a tiny bit off the end stop
-    motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | SPEED_SLOW)
+    for i in range(GRID_ROWS * GRID_COLS + 1):
+        print(f"\n--- Test #{i + 1} ---")
+        place_berry()
+        print(f"Status: {status()}")
+        time.sleep(1)
