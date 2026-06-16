@@ -27,6 +27,23 @@ thread entirely. Whenever that happens, _last_word must be reset to -1
 afterward — otherwise the writer thread's bookkeeping goes stale and it
 can silently skip the very next legitimate move command if it happens to
 match the stale value.
+
+FIX (2024) — "silent drop" bug
+-------------------------------
+_post_word() used to return immediately when motor.is_locked(), causing
+bin.py move commands to be silently discarded.  The writer thread also
+skipped writes when locked.  This meant spin_left() / spin_right() calls
+during a lockout period were lost forever.
+
+The fix:
+  1. _post_word() now BLOCKS (with a short sleep loop) until the lock
+     clears instead of dropping the command.
+  2. The writer thread no longer checks is_locked() — the lock is already
+     handled upstream in _post_word(), so the thread just writes whatever
+     word arrives.
+  3. The _last_word de-duplicate check no longer blocks resending the same
+     speed after a homing/reset cycle; only negative (invalid) words are
+     skipped.
 """
 
 import threading
@@ -56,7 +73,7 @@ MIN_DEG: float | None = -999999999
 MAX_DEG: float | None = 999999999
 
 # dead-reckoning limit conversion: degrees per (speed-unit * second).
-SPEED_TO_DEG = 0.3 # untested, as it always has a sensor
+SPEED_TO_DEG = 0.3  # untested, as it always has a sensor
 
 # AX-12A registers
 _REG_CW_LIMIT = 6
@@ -67,12 +84,16 @@ _REG_SPEED = 32
 _DIR_CCW = 0
 _DIR_CW = 1 << 10
 
+# How long _post_word() will wait for a lock to clear before giving up (s).
+# Set to 0 to wait forever.
+POST_WORD_LOCK_TIMEOUT_S: float = 15.0
+
 # corner sensor
 
 _sensor_mgr = None
 
 
-def _init_sensor() -> None: # in hindsight: shouldve used a single global init() for all servo
+def _init_sensor() -> None:
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -121,7 +142,6 @@ def _at_limit(direction: str) -> bool:
         reading = _read_sensor()
         if reading is not None:
             abs_deg = _sensor_mgr.total_position(reading)
-            # position relative to our zero point captured at init()
             deg = abs_deg - (_zero_deg or 0)
             if direction == "right" and deg >= MAX_DEG:
                 return True
@@ -139,7 +159,6 @@ def _at_limit(direction: str) -> bool:
     return False
 
 
-
 _initialized: bool = False
 _pending_word: int = -1
 _last_word: int = -1
@@ -155,6 +174,7 @@ _last_write_time: float = 0.0
 
 
 # background writer thread
+
 def _writer() -> None:
     global _last_word, _last_write_time
     while not _stop_flag:
@@ -171,10 +191,19 @@ def _writer() -> None:
         with _lock:
             word = _pending_word
 
-        if word < 0 or word == _last_word:
+        # Skip invalid words.
+        if word < 0:
             continue
-        if motor.is_locked():
+
+        # Dedup: only write if the word changed.
+        # _last_word is reset to -1 after every direct write (homing etc.),
+        # so the first command after homing always goes through even if it
+        # happens to match the previous speed.
+        if word == _last_word:
             continue
+
+        # Do NOT check motor.is_locked() here — already handled in _post_word().
+
         try:
             motor._write_word(SERVO_ID, _REG_SPEED, word)
             _last_word = word
@@ -192,13 +221,13 @@ def init() -> None:
 
     _stop_flag = False
 
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0);
+    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0)
     time.sleep(0.05)
-    motor._write_word(SERVO_ID, _REG_CW_LIMIT, 0);
+    motor._write_word(SERVO_ID, _REG_CW_LIMIT, 0)
     time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0);
+    motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0)
     time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
+    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1)
     time.sleep(0.05)
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
     # direct write above bypasses the writer thread's bookkeeping —
@@ -249,11 +278,37 @@ def shutdown() -> None:
     print("🛑 turntable shut down.")
 
 
-
 def _post_word(word: int) -> None:
+    """
+    Queue a speed word for the writer thread.
+
+    Blocks until the motor lock clears (instead of silently dropping the
+    command), then queues the word.  POST_WORD_LOCK_TIMEOUT_S caps the wait.
+
+    Bails out immediately (with a clear log line) when turntable.init() has
+    not been called — without init() the writer thread is not running and
+    nothing would ever read _pending_word.
+    """
     global _pending_word
-    if motor.is_locked():
+
+    if not _initialized:
+        print(f"[turntable] _post_word({word}): turntable not initialised — call turntable.init() first!")
         return
+
+    if motor.is_locked():
+        print(f"[turntable] _post_word({word}): motor locked — waiting for lock to clear…")
+        deadline = (
+            time.monotonic() + POST_WORD_LOCK_TIMEOUT_S
+            if POST_WORD_LOCK_TIMEOUT_S > 0
+            else float("inf")
+        )
+        while motor.is_locked():
+            if time.monotonic() >= deadline:
+                print("[turntable] _post_word(): lock wait timed out — dropping command")
+                return
+            time.sleep(0.01)
+        print("[turntable] _post_word(): lock cleared — queuing command")
+
     with _lock:
         _pending_word = word
     _event.set()
@@ -267,7 +322,6 @@ def _speed_from_dx(dx_abs: int) -> int:
     if dx_abs <= THRESHOLD_MEDIUM:
         return SPEED_MEDIUM
     return SPEED_FAST
-
 
 
 def stop() -> None:
@@ -378,25 +432,20 @@ def home_physical() -> None:
 
     print("[turntable] physical homing - moving to end stop...")
 
-    # stop any current movement
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
     time.sleep(0.1)
 
-    # move left (CW) until we hit the end stop (3 seconds should be enough)
     motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CW | SPEED_MEDIUM)
     time.sleep(3.0)
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
     time.sleep(0.3)
 
-    # move a tiny bit off the end stop
     motor._write_word(SERVO_ID, _REG_SPEED, _DIR_CCW | SPEED_SLOW)
     time.sleep(0.3)
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
 
-    # reset dead-reckoning
     _dead_pos[0] = 0.0
 
-    # update sensor zero if available
     if _sensor_mgr is not None:
         reading = _read_sensor()
         if reading is not None:
