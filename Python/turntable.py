@@ -38,9 +38,7 @@ from _homing_utils import (
     home_with_sensor, home_dead_reckoning, accumulate, DR_HOME_SPEED
 )
 
-# =============================================================================
-# TUNING
-# =============================================================================
+# tuning
 
 SERVO_ID = 13
 DEAD_ZONE = 25
@@ -69,9 +67,7 @@ _REG_SPEED = 32
 _DIR_CCW = 0
 _DIR_CW = 1 << 10
 
-# =============================================================================
-# CORNER SENSOR
-# =============================================================================
+# corner sensor
 
 _sensor_mgr = None
 
@@ -186,9 +182,7 @@ def _writer() -> None:
             print(f"[turntable] serial error: {e}")
 
 
-# =============================================================================
-# LIFECYCLE
-# =============================================================================
+# lifecycle
 
 def init() -> None:
     global _initialized, _stop_flag, _thread, _zero_deg, _last_write_time, _last_word

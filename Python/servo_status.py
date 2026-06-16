@@ -18,9 +18,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-# =============================================================================
-# SERVO REGISTRY
-# =============================================================================
+# servo registry
 
 # All known servo IDs with their human-readable name and module owner.
 # Order here is the order they appear in the UI panel.
@@ -43,9 +41,7 @@ class ServoState:
     simulated: bool = True      # False once real hardware has been seen
 
 
-# =============================================================================
-# MODULE STATE
-# =============================================================================
+# module state
 
 _lock: threading.Lock = threading.Lock()
 _states: Dict[int, ServoState] = {
@@ -54,9 +50,7 @@ _states: Dict[int, ServoState] = {
 }
 
 
-# =============================================================================
-# PUBLIC API
-# =============================================================================
+# public API
 
 def update(servo_id: int, status: str, speed: int = 0, *, real: bool = False) -> None:
     """

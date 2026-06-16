@@ -1,6 +1,8 @@
 import socket
 import json
 
+# used for testing connection, now unused
+
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 packet = {

@@ -714,7 +714,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
 
 <main>
 
-/* settings panel */ 
+<!-- ── SETTINGS PANEL ── --> 
 <div class="panel" id="settingsPanel">
   <div class="tabs">
     <button class="tab on" onclick="switchTab('detect')">Detect</button>
@@ -724,7 +724,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     <button class="tab" onclick="switchTab('sensors')">Sensors</button>
   </div>
 
-  /* detect */
+  <!-- ── DETECT ── -->
   <div class="pane on" id="tab-detect">
     <div class="sec">
       <div class="sec-t">Detector mode</div>
@@ -781,7 +781,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  /* thresholds */
+  <!-- ── THRESHOLDS ── -->
   <div class="pane" id="tab-thresholds">
     <div class="sec">
       <div class="sec-t">Confidence thresholds</div>
@@ -794,7 +794,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  /* tracking */
+  <!-- ── TRACKING ── -->
   <div class="pane" id="tab-tracking">
     <div class="sec">
       <div class="sec-t">Persistence & possible-hit</div>
@@ -807,7 +807,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  /* advanced */
+  <!-- ── ADVANCED ── -->
   <div class="pane" id="tab-advanced">
     <div class="sec">
       <div class="grp-h">Fusion weights</div>
@@ -833,7 +833,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     </div>
   </div>
 
-  /* sensors */
+  <!-- ── SENSORS ── -->
   <div class="pane" id="tab-sensors">
     <div class="sec">
       <div class="sec-t" style="display:flex;justify-content:space-between;align-items:center">
@@ -851,12 +851,11 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
       <div id="servoList"></div>
     </div>
   </div>
-</div>
+</div><!-- /panel -->
 
-/* panel */
 <div class="div" id="divLeft"></div>
 
-/* video (MAGIC PORTALLLL) */
+<!-- ── VIDEO ── -->
 <div class="video">
   <span class="clabel tl" id="camLabel">CAM</span>
   <span class="clabel tr" id="resLabel"></span>
@@ -867,7 +866,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
 
 <div class="div" id="divRight"></div>
 
-/* console */
+<!-- ── CONSOLE ── -->
 <div class="con" id="consolePanel">
   <div class="con-bar">
     <span class="con-t">Console</span>
