@@ -72,7 +72,7 @@ _DIR_CW = 1 << 10
 _sensor_mgr = None
 
 
-def _init_sensor() -> None:  # in hindsight: shouldve used a single global init() for all servo
+def _init_sensor() -> None:
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -170,10 +170,12 @@ def _writer() -> None:
         with _lock:
             word = _pending_word
 
-        if word < 0 or word == _last_word:
+        if word < 0:
             continue
+
         if motor.is_locked():
             continue
+
         try:
             motor._write_word(SERVO_ID, _REG_SPEED, word)
             _last_word = word
@@ -191,8 +193,7 @@ def init() -> None:
 
     _stop_flag = False
 
-    # CRITICAL FIX: Enable torque FIRST before writing limit registers
-    # The AX-12A needs torque enabled to accept limit register writes
+    # Enable torque FIRST before writing limit registers
     motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
     time.sleep(0.05)
 
@@ -206,8 +207,7 @@ def init() -> None:
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
     time.sleep(0.02)
 
-    # direct write above bypasses the writer thread's bookkeeping —
-    # reset so the next _post_word() is never mistaken for a duplicate.
+    # Reset bookkeeping
     _last_word = -1
 
     _thread = threading.Thread(target=_writer, daemon=True, name="turntable-writer")
@@ -246,10 +246,7 @@ def shutdown() -> None:
     except Exception:
         pass
 
-    # direct write above bypasses the writer thread's bookkeeping —
-    # reset so a future re-init / writer restart doesn't inherit a stale value.
     _last_word = -1
-
     _initialized = False
     print("🛑 turntable shut down.")
 
@@ -328,13 +325,15 @@ def update(dx: int) -> str:
 
 def _home() -> None:
     """drive turntable back to its zero point.  Blocks until complete."""
-    global _last_word
+    global _last_word, _pending_word
 
     if not _initialized:
         print("[turntable] _home(): not initialised — skipping")
         return
 
+    # Stop any movement
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
+    time.sleep(0.1)
 
     if _zero_deg is not None:
         print(f"[turntable] homing with sensor → target {_zero_deg:.1f}°")
@@ -360,11 +359,18 @@ def _home() -> None:
         )
         print("[turntable] homing complete (dead-reckoning).")
 
+    # Reset state for the writer thread
     _dead_pos[0] = 0.0
-    # all the writes above (including inside home_with_sensor /
-    # home_dead_reckoning) go straight to the servo, bypassing the writer
-    # thread's bookkeeping — reset so the next _post_word() always lands.
+
+    # CRITICAL FIX: Reset BOTH _last_word AND _pending_word to ensure
+    # the writer thread will accept new commands
     _last_word = -1
+    with _lock:
+        _pending_word = -1
+
+    # Wake up the writer thread so it processes the new state
+    _event.set()
+
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
 
@@ -373,7 +379,7 @@ def home_physical() -> None:
     drive turntable to its physical zero position by hitting the end stop.
     this is for the UI home button, NOT for bin placement.
     """
-    global _last_word, _zero_deg
+    global _last_word, _zero_deg, _pending_word
 
     if not _initialized:
         print("[turntable] home_physical(): not initialised — skipping")
@@ -406,9 +412,11 @@ def home_physical() -> None:
             _zero_deg = _sensor_mgr.total_position(reading)
             print(f"[turntable] physical home set to {_zero_deg:.1f}°")
 
-    # every write above went straight to the servo, bypassing the writer
-    # thread's bookkeeping — reset so the next _post_word() always lands.
+    # Reset both bookkeeping variables and wake up writer thread
     _last_word = -1
+    with _lock:
+        _pending_word = -1
+    _event.set()
 
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
     print("[turntable] physical homing complete")
