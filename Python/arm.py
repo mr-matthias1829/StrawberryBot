@@ -11,9 +11,9 @@ is present.  _home() drives back to zero using whichever is available.
 
 coordinate convention
 ---------------------
-    dz > 0  → target is FAR    → extend  (forward)
-    dz < 0  → target is CLOSE  → retract (backward)
-    |dz| ≤ DEAD_ZONE  → aligned, stop
+    dz > 0  -> target is FAR    -> extend  (forward)
+    dz < 0  -> target is CLOSE  -> retract (backward)
+    |dz| =< DEAD_ZONE  -> aligned, stop
 
 _last_word bookkeeping
 -----------------------
