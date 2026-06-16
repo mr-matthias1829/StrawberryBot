@@ -190,8 +190,8 @@ def _home_axes_keep_gripper_closed() -> None:
         _pivot._home()
         time.sleep(SETTLE_S)
 
-    # The individual _home() calls don't set a lockout, but if motor.home_all()
-    # was used elsewhere and the lockout is still ticking, wait it out now.
+    # Individual _home() calls don't set a lockout, but wait just in case
+    # motor.home_all() was triggered elsewhere and is still ticking.
     _wait_for_lockout()
 
     print("[bin] Homing complete (gripper kept closed)")
@@ -290,14 +290,14 @@ def _arm_move(duration: float, forward: bool = True) -> None:
 
 
 def _pivot_lower_drop() -> None:
-    """Lower pivot to drop berry."""
+    """Lower pivot to drop berry into bin slot."""
     if not _HAS_PIVOT:
         print(f"[bin][SIM] pivot lower {PIVOT_LOWER_S}s")
         time.sleep(PIVOT_LOWER_S)
         return
 
     print(f"[bin] Pivot lower {PIVOT_LOWER_S}s")
-    _pivot.move_down()
+    _pivot.rotate_down()          # pivot.py uses rotate_down(), not move_down()
     time.sleep(PIVOT_LOWER_S)
     _pivot.stop()
     time.sleep(SETTLE_S)
@@ -311,7 +311,7 @@ def _pivot_raise_home() -> None:
         return
 
     print(f"[bin] Pivot raise {PIVOT_RAISE_S}s")
-    _pivot.move_up()
+    _pivot.rotate_up()            # pivot.py uses rotate_up(), not move_up()
     time.sleep(PIVOT_RAISE_S)
     _pivot.stop()
     time.sleep(SETTLE_S)
@@ -327,7 +327,7 @@ def _open_gripper() -> None:
     result = _gripper.open_gripper()
     print(f"[bin] Gripper open result: {result}")
 
-    deadline = time.monotonic() + 6.0
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if _gripper.get_state() != "BUSY":
             break
@@ -369,10 +369,7 @@ def _drive_to_slot(row: int, col: int) -> None:
     print(f"[bin]   Turntable: {turntable_time:.2f}s")
     print(f"[bin]   Arm: {arm_time:.2f}s")
 
-    # First rotate turntable to correct column
     _turntable_move(turntable_time)
-
-    # Then extend arm to correct row
     _arm_move(arm_time, forward=True)
 
 
@@ -385,6 +382,7 @@ def place_berry() -> bool:
     Full post-grip deposit sequence. Blocking.
 
     Returns True on success, False if already busy.
+    The gripper is guaranteed to be opened even if an error occurs mid-sequence.
     """
     global _busy, _slot_index
 
@@ -395,6 +393,7 @@ def place_berry() -> bool:
         current_slot = _slot_index
         _busy = True
 
+    success = False
     try:
         total = GRID_ROWS * GRID_COLS
         row, col = _slot_to_row_col(current_slot)
@@ -442,15 +441,33 @@ def place_berry() -> bool:
             print(f"[bin] Berry placed. {new_count}/{total} slots filled")
 
         print("[bin] === DONE ===")
+        success = True
         return True
 
     except Exception as e:
-        print(f"[bin] ERROR: {e}")
+        print(f"[bin] ERROR during placement: {e}")
         import traceback
         traceback.print_exc()
         return False
 
     finally:
+        # Safety net: if anything went wrong before the gripper was opened,
+        # force it open now so the robot doesn't stay stuck in GRIPPED state.
+        if not success and _HAS_GRIPPER:
+            try:
+                state = _gripper.get_state()
+                if state != "OPEN":
+                    print("[bin] Safety: forcing gripper open after error...")
+                    _gripper.open_gripper()
+                    deadline = time.monotonic() + 10.0
+                    while time.monotonic() < deadline:
+                        if _gripper.get_state() != "BUSY":
+                            break
+                        time.sleep(0.1)
+                    print(f"[bin] Safety: gripper state is now {_gripper.get_state()}")
+            except Exception as e2:
+                print(f"[bin] Safety gripper open failed: {e2}")
+
         with _lock:
             _busy = False
 
