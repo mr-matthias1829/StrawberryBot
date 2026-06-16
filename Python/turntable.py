@@ -56,7 +56,7 @@ MIN_DEG: float | None = -999999999
 MAX_DEG: float | None = 999999999
 
 # dead-reckoning limit conversion: degrees per (speed-unit * second).
-SPEED_TO_DEG = 0.3 # untested, as it always has a sensor
+SPEED_TO_DEG = 0.3  # untested, as it always has a sensor
 
 # AX-12A registers
 _REG_CW_LIMIT = 6
@@ -72,7 +72,7 @@ _DIR_CW = 1 << 10
 _sensor_mgr = None
 
 
-def _init_sensor() -> None: # in hindsight: shouldve used a single global init() for all servo
+def _init_sensor() -> None:  # in hindsight: shouldve used a single global init() for all servo
     global _sensor_mgr
     try:
         from corner_sensors import CornerSensorManager
@@ -139,7 +139,6 @@ def _at_limit(direction: str) -> bool:
     return False
 
 
-
 _initialized: bool = False
 _pending_word: int = -1
 _last_word: int = -1
@@ -192,15 +191,21 @@ def init() -> None:
 
     _stop_flag = False
 
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 0);
+    # CRITICAL FIX: Enable torque FIRST before writing limit registers
+    # The AX-12A needs torque enabled to accept limit register writes
+    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
     time.sleep(0.05)
+
+    # Now write the limit registers with torque ON
     motor._write_word(SERVO_ID, _REG_CW_LIMIT, 0);
     time.sleep(0.02)
     motor._write_word(SERVO_ID, _REG_CCW_LIMIT, 0);
     time.sleep(0.02)
-    motor._write_word(SERVO_ID, _REG_TORQUE_EN, 1);
-    time.sleep(0.05)
+
+    # Ensure torque stays ON and speed is zero
     motor._write_word(SERVO_ID, _REG_SPEED, 0)
+    time.sleep(0.02)
+
     # direct write above bypasses the writer thread's bookkeeping —
     # reset so the next _post_word() is never mistaken for a duplicate.
     _last_word = -1
@@ -249,7 +254,6 @@ def shutdown() -> None:
     print("🛑 turntable shut down.")
 
 
-
 def _post_word(word: int) -> None:
     global _pending_word
     if motor.is_locked():
@@ -267,7 +271,6 @@ def _speed_from_dx(dx_abs: int) -> int:
     if dx_abs <= THRESHOLD_MEDIUM:
         return SPEED_MEDIUM
     return SPEED_FAST
-
 
 
 def stop() -> None:
