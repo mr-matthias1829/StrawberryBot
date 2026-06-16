@@ -170,9 +170,11 @@ def _writer() -> None:
         with _lock:
             word = _pending_word
 
+        # Skip only if no command is pending
         if word < 0:
             continue
 
+        # Skip if motor is locked out
         if motor.is_locked():
             continue
 
@@ -362,14 +364,14 @@ def _home() -> None:
     # Reset state for the writer thread
     _dead_pos[0] = 0.0
 
-    # CRITICAL FIX: Reset BOTH _last_word AND _pending_word to ensure
-    # the writer thread will accept new commands
+    # Reset bookkeeping variables
     _last_word = -1
     with _lock:
         _pending_word = -1
 
-    # Wake up the writer thread so it processes the new state
-    _event.set()
+    # Send a stop command to kick-start the writer thread
+    # This ensures the writer thread wakes up and is ready for new commands
+    _post_word(0)
 
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
 
@@ -412,11 +414,13 @@ def home_physical() -> None:
             _zero_deg = _sensor_mgr.total_position(reading)
             print(f"[turntable] physical home set to {_zero_deg:.1f}°")
 
-    # Reset both bookkeeping variables and wake up writer thread
+    # Reset bookkeeping variables
     _last_word = -1
     with _lock:
         _pending_word = -1
-    _event.set()
+
+    # Send a stop command to kick-start the writer thread
+    _post_word(0)
 
     servo_status.update(SERVO_ID, "STOP", 0, real=_initialized)
     print("[turntable] physical homing complete")
