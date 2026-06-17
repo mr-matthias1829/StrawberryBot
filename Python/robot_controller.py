@@ -29,8 +29,13 @@ Post-grip sequence
 After a successful grip, drive_hardware() freezes:
   - all servos (turntable, lift, arm) stop
   - _gripped is set True, blocking all subsequent drive_hardware() calls
-  - bin.place_berry() runs on a daemon worker thread
-  - when place_berry() finishes, _gripped clears and tracking resumes
+  - control_mode.force_manual() is called so the user can drive the berry
+    to the bin by hand
+  - manual_controller homes all axes once the gripper is opened again via
+    the controller, then switches control_mode back to "autonomous"
+  - RobotController is subscribed to control_mode changes; when it sees
+    "autonomous" come back while _gripped is True, it clears _gripped and
+    resets the EMA so tracking resumes cleanly
 
 Smoothing
 ---------
@@ -156,8 +161,15 @@ class RobotController:
         self._stable_since: Optional[float] = None   # monotonic timestamp
         self._debounce_logged: bool = False           # suppress repeat log spam
 
-        # True while bin.place_berry() is running
+        # True while waiting for the user to manually drop the berry in the
+        # bin and re-open the gripper (see _run_place_berry / _on_mode_change)
         self._gripped: bool = False
+
+        try:
+            import control_mode
+            control_mode.on_change(self._on_mode_change)
+        except ImportError:
+            print("[RC] control_mode not available — manual handoff disabled")
 
 
     @staticmethod
@@ -390,21 +402,27 @@ class RobotController:
 
     def _run_place_berry(self) -> None:
         """
-        worker thread: run the full bin-placement sequence,
-        then release the gripped lock so tracking resumes.
+        worker thread: force manual mode so the user can drive the berry to
+        the bin by hand. manual_controller takes it from here — it homes
+        all axes once the gripper is opened again via the controller, then
+        flips control_mode back to "autonomous". _on_mode_change picks that
+        up and clears _gripped.
         """
         try:
-            print("[RC] Starting bin placement sequence…")
-            if _HAS_BIN:
-                _bin.place_berry()
-            else:
-                print("[RC][SIM] bin not available — skipping place_berry()")
+            import control_mode
+            print("[RC] Grip successful — forcing manual mode for bin drop-off…")
+            control_mode.force_manual()
         except Exception as e:
-            print(f"[RC] ERROR in place_berry thread: {e}")
-        finally:
+            print(f"[RC] ERROR forcing manual mode: {e}")
             self._gripped = False
             self._reset_ema()
-            print("[RC] Bin placement done — resuming tracking")
+
+    def _on_mode_change(self, new_mode: str) -> None:
+        """called by control_mode whenever the mode switches."""
+        if new_mode == "autonomous" and self._gripped:
+            self._gripped = False
+            self._reset_ema()
+            print("[RC] Back to autonomous — resuming tracking")
 
 
     def generate_dx(self, gripper_x: int) -> int:
@@ -432,7 +450,7 @@ class RobotController:
 
     def generate_movementstring(self, gripper_x: int, gripper_y: int) -> str:
         if self._gripped:
-            return "PLACING BERRY…"
+            return "MANUAL — AWAITING BIN DROP-OFF"
 
         if self.current_target is None:
             return "NO TARGET"
@@ -462,7 +480,7 @@ class RobotController:
 
     def generate_gripperstring(self) -> str:
         if self._gripped:
-            return "GRIPPER: PLACING BERRY"
+            return "GRIPPER: AWAITING MANUAL DROP-OFF"
 
         if not _HAS_GRIPPER:
             return "GRIPPER: SIMULATED"
@@ -483,7 +501,7 @@ class RobotController:
         if not _HAS_ARM:
             return "ARM: SIMULATED"
         if self._gripped:
-            return "ARM: STOPPED (placing)"
+            return "ARM: STOPPED (manual drop-off)"
         if self._arm_retracting:
             return "ARM: RETRACTING (no target)"
         return f"ARM: {'EXTENDING' if contained else 'STOPPED'}"
@@ -535,8 +553,10 @@ class RobotController:
         self._hw_log_counter += 1
         do_log = self._hw_log_counter % HW_LOG_EVERY == 0
 
-        # while bin.place_berry() is running on its worker thread, hold all
-        # servos stopped. EMA decays toward zero so no lurch when tracking resumes.
+        # while waiting for the user to manually drop the berry, hold all
+        # servos stopped. EMA decays toward zero so no lurch when tracking
+        # resumes (handled by _on_mode_change when control_mode flips back
+        # to "autonomous").
         if self._gripped:
             self._stop_all_servos()
             self._update_ema(0, 0)
