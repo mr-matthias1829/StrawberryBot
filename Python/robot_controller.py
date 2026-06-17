@@ -127,8 +127,6 @@ DEPTH_UNITS_MAX = 1000
 # depth estimation
 DEPTH_CONF_WEIGHT = 0.35
 
-HW_LOG_EVERY = 5
-
 # servo output is suppressed until the target has been continuously visible
 # for this many seconds (accounts for RTSP feed latency). set to 0.0 to disable.
 ACTION_DEBOUNCE_S = 0.1
@@ -149,7 +147,6 @@ class RobotController:
     def __init__(self) -> None:
         self.current_target: Optional[RobotTarget] = None
         self._ghost_frames: int = 0
-        self._hw_log_counter = 0
         self._gripper_containment_frames = 0
         self._last_target_id = None
         self._arm_extending: bool = False
@@ -326,7 +323,7 @@ class RobotController:
         if elapsed >= ACTION_DEBOUNCE_S:
             return True
         if not self._debounce_logged:
-            print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
+            #print(f"[DEBOUNCE] waiting {ACTION_DEBOUNCE_S - elapsed:.2f}s before acting")
             self._debounce_logged = True
         return False
 
@@ -550,8 +547,6 @@ class RobotController:
             return False, "ARM: STOPPED"
 
     def drive_hardware(self, gripper_x: int, gripper_y: int) -> None:
-        self._hw_log_counter += 1
-        do_log = self._hw_log_counter % HW_LOG_EVERY == 0
 
         # while waiting for the user to manually drop the berry, hold all
         # servos stopped. EMA decays toward zero so no lurch when tracking
@@ -571,9 +566,6 @@ class RobotController:
             # _drive_arm handles the move_backward() call and logging
             _, arm_msg = self._drive_arm(gripper_x, gripper_y)
             self._update_ema(0, 0)
-            if do_log:
-                print(f"[HW] TURNTABLE stopped | LIFT stopped | {arm_msg}")
-            return
 
         # hold position (let EMA decay) until the target has been stable long
         # enough to compensate for camera feed latency
@@ -631,12 +623,3 @@ class RobotController:
                             ).start()
             else:
                 gripper_msg = "GRIPPER SIMULATED"
-
-        if do_log:
-            print(
-                f"[HW] "
-                f"{tt_msg} | "
-                f"{lift_msg} | "
-                f"{arm_msg} | "
-                f"{gripper_msg}"
-            )

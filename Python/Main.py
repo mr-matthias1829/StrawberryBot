@@ -444,7 +444,7 @@ def run_webcam() -> None:
             now = time.perf_counter()
             if now - fps_timer >= 1.0:
                 print(
-                    f"FPS: {fps_count:2d} | "
+                    f"FPS: {(fps_count/1):2f} | "
                     f"Read: {last_read_ms:6.1f} ms | "
                     f"Proc: {last_proc_ms:6.1f} ms | "
                     f"AI: {debug['ai_count']} CV: {debug['cv_count']} "

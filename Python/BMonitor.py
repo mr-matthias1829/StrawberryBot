@@ -5,6 +5,8 @@ Monitors GPIO 22 (pin 15) for battery status.
 HIGH = battery fine, LOW = battery critical → home all + shutdown.
 
 Run alongside Main.py or import and call start() from Main.py.
+
+ICT made this
 """
 
 import threading
