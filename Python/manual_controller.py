@@ -274,7 +274,7 @@ def _listener() -> None:
 
         _last_packet_time = time.monotonic()
 
-        if not connected:
+        if not connected or control_mode.is_autonomous():
             print("[manual] Controller verbonden.")
             connected = True
             control_mode._set_mode("manual")
