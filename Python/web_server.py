@@ -492,6 +492,29 @@ def api_auto_move_post():
     setattr(config, "AUTO_MODE_ALLOW_MOVE", enabled)
     print(f"[WebUI] Auto-move set to: {enabled} (arm + gripper)")
     return jsonify({"ok": True, "enabled": enabled})
+# ── Control mode override ─────────────────────────────────────────────────────
+
+@_app.route("/api/control_mode", methods=["GET"])
+def api_control_mode_get():
+    try:
+        import control_mode
+        return jsonify({"mode": control_mode.get_mode()})
+    except ImportError:
+        return jsonify({"mode": "autonomous", "error": "control_mode not available"})
+
+@_app.route("/api/control_mode", methods=["POST"])
+def api_control_mode_post():
+    try:
+        import control_mode
+    except ImportError:
+        return jsonify({"ok": False, "error": "control_mode not available"}), 500
+    data = request.get_json(force=True, silent=True) or {}
+    mode = data.get("mode")
+    if mode not in ("autonomous", "manual"):
+        return jsonify({"ok": False, "error": "mode must be 'autonomous' or 'manual'"}), 400
+    control_mode._set_mode(mode)
+    print(f"[WebUI] Control mode forced to: {mode}")
+    return jsonify({"ok": True, "mode": mode})
 
 @_app.route("/favicon.ico")
 def route_favicon():
@@ -709,6 +732,7 @@ footer{display:flex;align-items:center;justify-content:space-between;padding:0 1
     <div class="sep"></div>
     <button id="homeBtn" onclick="triggerHome()" style="padding:3px 10px;border-color:var(--yel);color:var(--yel);background:rgba(245,200,66,.08)">🏠 Home</button>
     <button id="killBtn" onclick="toggleKill()" style="padding:3px 10px;border-color:var(--acc);color:var(--acc);background:rgba(255,61,90,.08)">☠ KILL</button>
+    <button id="modeBtn" onclick="toggleMode()" style="padding:3px 10px;border-color:var(--pur);color:var(--pur);background:rgba(176,108,255,.08)">⚙ AUTO</button>
   </div>
 </header>
 
@@ -1043,6 +1067,7 @@ async function loadAutoMoveState() {
   } catch(e) { console.warn("Failed to load auto-move state:", e); }
 }
 
+
 /* init */
 async function initUI(){
   try{
@@ -1054,8 +1079,10 @@ async function initUI(){
     Object.assign(_cfg,full);
     ["thresholds","fusion","tracking","shape","zoom"].forEach(buildKnobs);
     await loadAutoMoveState();
+    await loadMode();
   }catch(e){console.warn("initUI failed:",e);}
 }
+
 function loadCVConfig(cfg){
   const map={"sl-h1l":cfg.h1_low,"sl-h1h":cfg.h1_high,"sl-h2l":cfg.h2_low,"sl-h2h":cfg.h2_high,"sl-sat":cfg.sat_min,"sl-vmin":cfg.val_min,"sl-vmax":cfg.val_max};
   for(const[id,val]of Object.entries(map)){const e=document.getElementById(id);if(e)e.value=val;}
@@ -1358,6 +1385,35 @@ async function toggleKill(){
     btn.style.background=_killActive?"rgba(255,61,90,.3)":"rgba(255,61,90,.08)";
     addLine(_killActive?"── KILL SWITCH ACTIVE ──":"── kill switch released ──");
   }catch(e){_killActive=!_killActive;addLine("ERROR: kill request failed");}
+}
+let _currentMode="autonomous";
+async function loadMode(){
+  try{
+    const r=await fetch("/api/control_mode");
+    const d=await r.json();
+    _currentMode=d.mode;_updateModeBtn();
+  }catch(e){console.warn("Failed to load mode:",e);}
+}
+function _updateModeBtn(){
+  const btn=document.getElementById("modeBtn");
+  if(_currentMode==="manual"){
+    btn.textContent="⚙ MANUAL";
+    btn.style.borderColor="var(--yel)";btn.style.color="var(--yel)";
+    btn.style.background="rgba(245,200,66,.08)";
+  }else{
+    btn.textContent="⚙ AUTO";
+    btn.style.borderColor="var(--pur)";btn.style.color="var(--pur)";
+    btn.style.background="rgba(176,108,255,.08)";
+  }
+}
+async function toggleMode(){
+  const next=_currentMode==="autonomous"?"manual":"autonomous";
+  try{
+    const r=await fetch("/api/control_mode",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:next})});
+    const d=await r.json();
+    if(d.ok){_currentMode=d.mode;_updateModeBtn();addLine(`── control mode forced: ${d.mode} ──`);}
+    else addLine(`ERROR: mode switch failed: ${d.error}`);
+  }catch(e){addLine("ERROR: mode switch request failed");}
 }
 </script>
 </body>
