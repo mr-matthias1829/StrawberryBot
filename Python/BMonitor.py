@@ -22,7 +22,7 @@ _running = False
 
 
 def _monitor():
-    time.sleep(30)
+    time.sleep(5)
     if ON_PI:
         import lgpio
         h = lgpio.gpiochip_open(0)
