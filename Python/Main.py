@@ -67,6 +67,9 @@ if ON_PI:
     import manual_controller
     manual_controller.start()
 
+    import BMonitor
+    BMonitor.start()
+
 # =============================================================================
 # Stdin diagnostics (harmless on all platforms)
 # =============================================================================
