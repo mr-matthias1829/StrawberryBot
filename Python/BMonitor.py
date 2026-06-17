@@ -29,6 +29,7 @@ def _monitor():
 
     low_count = 0
     print(f"[battery] Monitoring GPIO {GPIO_PIN} (pin 15). HIGH=ok, LOW=critical.")
+    time.sleep(10)
 
     while _running:
         if ON_PI:
