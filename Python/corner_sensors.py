@@ -1,8 +1,8 @@
 from smbus2 import SMBus
 import time
 
-TCA_ADDR    = 0x70
-AS5600_ADDR = 0x36
+TCA_ADDR    = 0x70 # multiplexer
+AS5600_ADDR = 0x36 # sensor
 RAW_MSB     = 0x0C
 RAW_LSB     = 0x0D
 

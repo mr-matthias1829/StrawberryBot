@@ -292,7 +292,8 @@ def _post_word(word: int) -> None:
     global _pending_word
 
     if not _initialized:
-        print(f"[turntable] _post_word({word}): turntable not initialised — call turntable.init() first!")
+        # print(f"[turntable] _post_word({word}): turntable not initialised — call turntable.init() first!")
+        # THIS LOG WAS PISSING ME OFF AS IT WENT EVERY GODDAMN SECOND AAAAAAAAA
         return
 
     if motor.is_locked():
