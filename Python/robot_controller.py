@@ -12,6 +12,7 @@ Arm logic (autonomous mode)
 The arm extends forward whenever the current target is fully contained
 inside the gripper bounding box, regardless of apparent depth.
 Once the target leaves the gripper area the arm stops.
+When there is no active target, the arm retracts backward.
 
 Grip logic
 ----------
@@ -153,6 +154,7 @@ class RobotController:
         self._gripper_containment_frames = 0
         self._last_target_id = None
         self._arm_extending: bool = False
+        self._arm_retracting: bool = False
 
         self._smooth_dx: float = 0.0
         self._smooth_dy: float = 0.0
@@ -389,7 +391,8 @@ class RobotController:
             _lift.stop()
         if _HAS_ARM:
             _arm.stop()
-        self._arm_extending = False
+        self._arm_extending  = False
+        self._arm_retracting = False
 
     def _run_place_berry(self) -> None:
         """
@@ -487,22 +490,29 @@ class RobotController:
             return "ARM: SIMULATED"
         if self._gripped:
             return "ARM: STOPPED (placing)"
+        if self._arm_retracting:
+            return "ARM: RETRACTING (no target)"
         return f"ARM: {'EXTENDING' if contained else 'STOPPED'}"
 
 
     def _drive_arm(self, gripper_x: int, gripper_y: int) -> Tuple[bool, str]:
+        # no target — retract the arm
         if self.current_target is None:
             if _HAS_ARM:
-                _arm.stop()
+                _arm.move_backward()
+            if not self._arm_retracting:
+                print("[ARM] No target — retracting arm")
+                self._arm_retracting = True
             self._arm_extending = False
-            return False, "ARM: no target"
+            return False, "ARM: RETRACTING (no target)"
 
         if not config.AUTO_MODE_ALLOW_MOVE:
             if _HAS_ARM:
                 _arm.stop()
-            if self._arm_extending:
+            if self._arm_extending or self._arm_retracting:
                 print("[ARM] Auto-move disabled — arm stopped")
-                self._arm_extending = False
+                self._arm_extending  = False
+                self._arm_retracting = False
             return False, "ARM: DISABLED (auto-move off)"
 
         bbox      = self.get_gripper_bbox(gripper_x, gripper_y)
@@ -515,7 +525,8 @@ class RobotController:
                 _arm.move_forward()
             if not self._arm_extending:
                 print("[ARM] Target contained — extending arm forward")
-                self._arm_extending = True
+                self._arm_extending  = True
+                self._arm_retracting = False
             return True, "ARM: EXTENDING (target contained)"
         else:
             if _HAS_ARM:
@@ -523,6 +534,7 @@ class RobotController:
             if self._arm_extending:
                 print("[ARM] Target left gripper area — arm stopped")
                 self._arm_extending = False
+            self._arm_retracting = False
             return False, "ARM: STOPPED"
 
     def drive_hardware(self, gripper_x: int, gripper_y: int) -> None:
@@ -536,15 +548,17 @@ class RobotController:
             self._update_ema(0, 0)
             return
 
+        # no target — stop turntable/lift, retract arm
         if self.current_target is None:
             if _HAS_TURNTABLE:
                 _turntable.stop()
             if _HAS_LIFT:
                 _lift.stop()
-            if _HAS_ARM:
-                _arm.stop()
-            self._arm_extending = False
+            # _drive_arm handles the move_backward() call and logging
+            _, arm_msg = self._drive_arm(gripper_x, gripper_y)
             self._update_ema(0, 0)
+            if do_log:
+                print(f"[HW] TURNTABLE stopped | LIFT stopped | {arm_msg}")
             return
 
         # hold position (let EMA decay) until the target has been stable long
