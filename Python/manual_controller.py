@@ -164,7 +164,7 @@ def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
 
     # gripper toggle (knop, stijgende flank)
     if _HAS_GRIPPER:
-        if grip == 1 and _grip_btn_prev == 0:
+        if grip != _grip_btn_prev:
             state = _gripper.get_state()
 
             if state == "BUSY":
