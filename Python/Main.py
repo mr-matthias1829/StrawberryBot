@@ -84,8 +84,8 @@ print(f"isatty={isatty}, stdin fd={stdin_fd}, pid={os.getpid()}", flush=True)
 import config
 import web_server
 import control_mode
-from fusion_engine import FusionEngine, DETECT_EVERY, INFER_SCALE
-
+from fusion_engine import FusionEngine
+from config import DETECT_EVERY, INFER_SCALE
 
 DISPLAY_WIDTH  = 1280
 DISPLAY_HEIGHT = 720

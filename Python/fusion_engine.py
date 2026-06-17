@@ -34,19 +34,8 @@ import numpy as np
 
 import config
 import servo_status
-from detection import AIDetector, CVDectector, Detection, CLASS_COLORS, CLASS_NAMES, iou
+from detection import AIDetector, CVDectector, Detection, CLASS_COLORS, iou
 from robot_controller import RobotController
-
-
-INFER_SCALE      = 1
-DETECT_EVERY     = 1
-CLEANUP_INTERVAL = 30
-MIN_TARGET_BOX_AREA = 900   # px²
-
-ARROW_LOOKAHEAD_SEC = 0.5
-ARROW_MIN_PX        = 8
-TRAIL_STEPS         = 4
-TRAIL_MAX_SEC       = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +338,7 @@ class DetectionWorker:
         cv_dets, mask = (self.cv.detect(job.small, timestamp=job.timestamp)
                          if is_cv_enabled() else ([], None))
 
-        inv = 1.0 / INFER_SCALE
+        inv = 1.0 / config.INFER_SCALE
         ai_dets = [_scale_det(d, inv) for d in ai_dets]
         cv_dets = [_scale_det(d, inv) for d in cv_dets]
 
@@ -420,7 +409,7 @@ class DetectionWorker:
 # =============================================================================
 
 def _draw_velocity_arrow(img, cx, cy, vx, vy, color,
-                         lookahead=ARROW_LOOKAHEAD_SEC, min_px=ARROW_MIN_PX):
+                         lookahead=config.ARROW_LOOKAHEAD_SEC, min_px=config.ARROW_MIN_PX):
     tip_x, tip_y = cx + vx * lookahead, cy + vy * lookahead
     if np.hypot(tip_x - cx, tip_y - cy) < min_px:
         return
@@ -431,7 +420,7 @@ def _draw_velocity_arrow(img, cx, cy, vx, vy, color,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
 def _draw_ghost_trail(img, cx, cy, vx, vy, w, h, color,
-                      steps=TRAIL_STEPS, max_sec=TRAIL_MAX_SEC):
+                      steps=config.TRAIL_STEPS, max_sec=config.TRAIL_MAX_SEC):
     overlay = img.copy()
     for i in range(1, steps + 1):
         t     = max_sec * i / steps
@@ -607,7 +596,7 @@ class FusionEngine:
     def _update_tracking(self, fused_dets: List[Detection],
                          now: float) -> List[KalmanBoxTrack]:
         valid = [d for d in fused_dets
-                 if d.is_targetable and _box_area(d) >= MIN_TARGET_BOX_AREA]
+                 if d.is_targetable and _box_area(d) >= config.MIN_TARGET_BOX_AREA]
 
         matches = self._associate(valid, now)
 
@@ -625,7 +614,7 @@ class FusionEngine:
                 track.mark_missed(now)
 
         # Periodic + emergency cleanup
-        if self.detect_count % CLEANUP_INTERVAL == 0 or len(self.tracks) > 40:
+        if self.detect_count % config.CLEANUP_INTERVAL == 0 or len(self.tracks) > 40:
             self.tracks = {tid: t for tid, t in self.tracks.items() if not t.is_lost}
         else:
             dead = [tid for tid, t in self.tracks.items()
@@ -658,7 +647,7 @@ class FusionEngine:
 
         now = time.monotonic()
         self.frame_count += 1
-        small = cv2.resize(frame, (0, 0), fx=INFER_SCALE, fy=INFER_SCALE,
+        small = cv2.resize(frame, (0, 0), fx=config.INFER_SCALE, fy=config.INFER_SCALE,
                            interpolation=cv2.INTER_LINEAR)
         self._worker.push_frame(frame, small, now)
         gripper_x = frame.shape[1] // 2

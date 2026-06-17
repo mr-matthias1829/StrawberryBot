@@ -2,13 +2,12 @@
 
 import os
 import numpy as np
+from typing import Dict, Tuple
 
-BASE_DIR   = os.path.dirname(__file__)
+BASE_DIR = os.path.dirname(__file__)
 MODEL_PATH = os.path.join(BASE_DIR, "..", "runs", "detect", "CV", "weights", "best.pt")
 
-# ---------------------------------------------------------------------------
 # FUSION THRESHOLDS
-# ---------------------------------------------------------------------------
 YOLO_BASE_THRESHOLD = 0.50       # minimum YOLO conf to even consider
 CV_BASE_THRESHOLD   = 0.50
 
@@ -40,9 +39,8 @@ CV_FUSION_WEIGHT    = CV_MINORITY_FUSION_WEIGHT
 HIGH_AI_CONFIDENCE  = AI_TRUST_HIGH
 LOW_AI_CONFIDENCE   = AI_TRUST_LOW
 
-# ---------------------------------------------------------------------------
 # KALMAN TRACKER  (KalmanBoxTrack in fusion_engine)
-# ---------------------------------------------------------------------------
+
 # How large the process noise is for position vs velocity states.
 # Larger = filter trusts measurements more (snappier but noisier).
 KALMAN_PROCESS_NOISE_POS   = 2.0
@@ -64,16 +62,14 @@ TRACK_COAST_MAX_S         = 0.60   # seconds
 TRACK_MATCH_IOU_MIN           = 0.15   # relaxed from 0.30 — helps fast movers
 TRACK_MATCH_CENTER_DIST_MAX   = 1.50   # max normalized center distance (diagonal units)
 
-# ---------------------------------------------------------------------------
 # FRAME-AGE DEBOUNCE  (addresses real camera latency)
-# ---------------------------------------------------------------------------
+
 # Detections older than this (wall-clock seconds since frame capture) are
 # excluded from driving the robot.  Tune to ≈ your observed camera latency.
 MAX_ACCEPTABLE_FRAME_AGE_S = 3   # seconds  — start conservative, tune down
 
-# ---------------------------------------------------------------------------
 # ZOOM RECHECK  (per-track, time-based cooldown)
-# ---------------------------------------------------------------------------
+
 MAX_RECHECKS              = 2    # legacy alias kept for web_server schema
 ZOOM_RECHECK_MAX_PER_TRACK = 3
 ZOOM_RECHECK_COOLDOWN_S    = 1.5  # seconds between recheck requests for one track
@@ -81,9 +77,8 @@ ZOOM_SCALE_FACTOR          = 2.0
 RECHECK_AI_CONF            = 0.55
 RECHECK_CV_CONF            = 0.45
 
-# ---------------------------------------------------------------------------
 # POSSIBLE-HIT FALLBACK
-# ---------------------------------------------------------------------------
+
 POSSIBLE_TARGET_FALLBACK_ENABLED = True
 POSSIBLE_TARGET_MIN_CONF         = 0.50
 
@@ -100,9 +95,8 @@ POSSIBLE_AI_ONLY_MIN_CONF        = 0.60
 POSSIBLE_AI_ONLY_MIN_SEEN        = 1
 POSSIBLE_AI_CONF_WEIGHT          = 0.50
 
-# ---------------------------------------------------------------------------
 # CV COLOUR RANGES  (HSV, OpenCV convention)
-# ---------------------------------------------------------------------------
+
 RED_LOWER1, RED_UPPER1 = np.array([0,   100, 135]), np.array([10,  255, 255])
 RED_LOWER2, RED_UPPER2 = np.array([170, 100, 135]), np.array([179, 255, 255])
 
@@ -127,9 +121,8 @@ BERRY_SIZE_IDEAL = 15_000
 BERRY_SIZE_MIN   = 200
 BERRY_SIZE_MAX   = 500_000
 
-# ---------------------------------------------------------------------------
 # GRIPPER
-# ---------------------------------------------------------------------------
+
 GRIPPER_BB_WIDTH          = 500
 GRIPPER_BB_HEIGHT         = 500
 GRIPPER_CONTAINMENT_FRAMES = 3
@@ -138,9 +131,8 @@ MIN_GRAB_AREA_RATIO        = 0.15
 GRAB_CENTER_TOLERANCE_X    = 15
 GRAB_CENTER_TOLERANCE_Y    = 15
 
-# ---------------------------------------------------------------------------
 # DISPLAY / MISC
-# ---------------------------------------------------------------------------
+
 SHOW_DEBUG_WINDOWS = False
 COLOR_AI       = (0,   255,   0)
 COLOR_CV       = (255,  80,   0)
@@ -149,3 +141,30 @@ COLOR_ZOOMED   = (255, 255,   0)
 COLOR_POSSIBLE = (180, 100, 255)
 
 AUTO_MODE_ALLOW_MOVE = True
+
+# fusion_engine.py
+INFER_SCALE      = 1
+DETECT_EVERY     = 1
+CLEANUP_INTERVAL = 30
+MIN_TARGET_BOX_AREA = 900   # px²
+
+ARROW_LOOKAHEAD_SEC = 0.5
+ARROW_MIN_PX        = 8
+TRAIL_STEPS         = 4
+TRAIL_MAX_SEC       = 0.5
+
+# detection.py
+CLASS_NAMES: Dict[int, str] = {
+    0: "strawberry",
+    1: "bad strawberry",
+    2: "leaf",
+}
+
+CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
+    0: (100, 100, 200),   # strawberry  — muted pink
+    1: (0,   0,   100),   # bad/rotten  — dark red
+    2: (0,  180,   60),   # leaf        — green
+}
+
+# Only these class IDs are valid robot targets
+TARGETABLE_CLASS_IDS = {0}

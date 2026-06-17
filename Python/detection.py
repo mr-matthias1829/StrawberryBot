@@ -24,28 +24,9 @@ import numpy as np
 from ultralytics import YOLO
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
+from config import CLASS_NAMES, CLASS_COLORS, TARGETABLE_CLASS_IDS
 
 import config
-
-
-# ---------------------------------------------------------------------------
-# Class definitions — must match dataset_aug yaml order
-# ---------------------------------------------------------------------------
-
-CLASS_NAMES: Dict[int, str] = {
-    0: "strawberry",
-    1: "bad strawberry",
-    2: "leaf",
-}
-
-CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
-    0: (100, 100, 200),   # strawberry  — muted pink
-    1: (0,   0,   100),   # bad/rotten  — dark red
-    2: (0,  180,   60),   # leaf        — green
-}
-
-# Only these class IDs are valid robot targets
-TARGETABLE_CLASS_IDS = {0}
 
 
 # ---------------------------------------------------------------------------
