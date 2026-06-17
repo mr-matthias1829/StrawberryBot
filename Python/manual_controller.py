@@ -117,14 +117,6 @@ def _joystick_to_speed(value: int) -> int:
     return int(ratio * SPEED_MAX)
 
 
-def _trigger_post_drop_home() -> None:
-    """Start de homing-sequentie nadat de gripper via de controller is geopend."""
-    global _homing_in_progress
-    with _home_lock:
-        if _homing_in_progress:
-            return
-        _homing_in_progress = True
-    threading.Thread(target=_post_drop_home, daemon=True, name="post-drop-home").start()
 
 
 def _post_drop_home() -> None:
