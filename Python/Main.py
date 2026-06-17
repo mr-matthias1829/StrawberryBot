@@ -42,9 +42,8 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 
 ON_PI = platform.system() == "Linux"
 
-# =============================================================================
-# Hardware init — must happen before any submodule that touches motor/servos
-# =============================================================================
+# Hardware init: must happen before any submodule that touches motor/servos
+
 if ON_PI:
     import motor
     motor.init()
@@ -67,9 +66,8 @@ if ON_PI:
     import manual_controller
     manual_controller.start()
 
-# =============================================================================
 # Stdin diagnostics (harmless on all platforms)
-# =============================================================================
+
 try:
     isatty   = sys.stdin.isatty()
     stdin_fd = sys.stdin.fileno() if hasattr(sys.stdin, "fileno") else None
@@ -82,7 +80,8 @@ print(f"isatty={isatty}, stdin fd={stdin_fd}, pid={os.getpid()}", flush=True)
 import config
 import web_server
 import control_mode
-from fusion_engine import DETECT_EVERY, INFER_SCALE, FusionEngine
+from fusion_engine import FusionEngine, DETECT_EVERY, INFER_SCALE
+
 
 DISPLAY_WIDTH  = 1280
 DISPLAY_HEIGHT = 720
@@ -91,9 +90,7 @@ DISPLAY_HEIGHT = 720
 RTSP_USB      = "rtsp://admin:admin@192.168.42.1:554/live"
 
 
-# =============================================================================
 # Real-Time Robust Capture Thread (Auto-reconnects on drop)
-# =============================================================================
 
 class Capture:
     def __init__(self, rtsp_url: str, label: str):
@@ -182,9 +179,7 @@ class Capture:
                 self.cap.release()
 
 
-# =============================================================================
 # Worker state
-# =============================================================================
 
 @dataclass
 class _WorkerState:
@@ -194,9 +189,7 @@ class _WorkerState:
     stop:   bool                 = False
 
 
-# =============================================================================
 # Camera finder helper
-# =============================================================================
 
 def _find_available_camera_source() -> tuple[str, str]:
     options = [
@@ -240,9 +233,7 @@ def _find_available_camera_source() -> tuple[str, str]:
         time.sleep(0.5)
 
 
-# =============================================================================
 # Camera badge
-# =============================================================================
 
 def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
     label   = f"CAM: {mode}"
@@ -274,9 +265,7 @@ def _draw_camera_badge(frame: np.ndarray, mode: str) -> None:
                 font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
 
-# =============================================================================
 # Control mode badge
-# =============================================================================
 
 def _draw_mode_badge(frame: np.ndarray) -> None:
     is_manual = control_mode.is_manual()
@@ -308,10 +297,7 @@ def _draw_mode_badge(frame: np.ndarray) -> None:
     cv2.putText(frame, label, (dot_x + 10, y1 + padding + th),
                 font, scale, (230, 230, 230), thick, cv2.LINE_AA)
 
-
-# =============================================================================
 # Inference worker thread
-# =============================================================================
 
 def _inference_worker(st: _WorkerState) -> None:
     """Owns a FusionEngine; processes the latest frame posted by the capture loop."""
@@ -350,10 +336,7 @@ def _inference_worker(st: _WorkerState) -> None:
         except Exception:
             pass
 
-
-# =============================================================================
 # run_webcam
-# =============================================================================
 
 def run_webcam() -> None:
     web_server.start()
@@ -394,9 +377,6 @@ def run_webcam() -> None:
                 time.sleep(0.03)
                 continue
 
-            # ------------------------------------------------------------------
-            # MANUAL MODE — skip autonomous inference, just stream the raw frame
-            # ------------------------------------------------------------------
             if control_mode.is_manual():
                 h, w = frame.shape[:2]
                 display = (
@@ -427,9 +407,6 @@ def run_webcam() -> None:
                 time.sleep(0.03)
                 continue
 
-            # ------------------------------------------------------------------
-            # AUTONOMOUS MODE — pass frame to inference worker
-            # ------------------------------------------------------------------
             with cast(threading.Lock, state.lock):
                 state.frame = frame
 
@@ -516,9 +493,6 @@ def run_webcam() -> None:
             motor.shutdown()
 
 
-# =============================================================================
-# run_image
-# =============================================================================
 
 def run_image(image_path: Optional[str] = None) -> None:
     if image_path is None:
@@ -583,10 +557,6 @@ def run_image(image_path: Optional[str] = None) -> None:
         except Exception:
             pass
 
-
-# =============================================================================
-# Entry point
-# =============================================================================
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--image":
