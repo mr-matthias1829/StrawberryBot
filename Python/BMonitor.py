@@ -26,7 +26,7 @@ def _monitor():
     if ON_PI:
         import lgpio
         h = lgpio.gpiochip_open(0)
-        lgpio.gpio_claim_input(h, GPIO_PIN)
+        lgpio.gpio_claim_input(h, GPIO_PIN, lgpio.SET_PULL_UP)
 
     low_count = 0
     print(f"[battery] Monitoring GPIO {GPIO_PIN} (pin 15). HIGH=ok, LOW=critical.")
