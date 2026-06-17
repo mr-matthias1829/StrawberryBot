@@ -22,6 +22,7 @@ _running = False
 
 
 def _monitor():
+    time.sleep(30)
     if ON_PI:
         import lgpio
         h = lgpio.gpiochip_open(0)
@@ -29,7 +30,7 @@ def _monitor():
 
     low_count = 0
     print(f"[battery] Monitoring GPIO {GPIO_PIN} (pin 15). HIGH=ok, LOW=critical.")
-    time.sleep(30)
+
 
     while _running:
         if ON_PI:
