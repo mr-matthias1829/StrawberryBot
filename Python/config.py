@@ -45,13 +45,13 @@ LOW_AI_CONFIDENCE   = AI_TRUST_LOW
 # ---------------------------------------------------------------------------
 # How large the process noise is for position vs velocity states.
 # Larger = filter trusts measurements more (snappier but noisier).
-KALMAN_PROCESS_NOISE_POS   = 1.0
-KALMAN_PROCESS_NOISE_VEL   = 10.0
+KALMAN_PROCESS_NOISE_POS   = 2.0
+KALMAN_PROCESS_NOISE_VEL   = 5.0
 
 # Measurement noise per detector type.
 # Smaller = filter trusts that detector's bbox more.
 KALMAN_MEASUREMENT_NOISE_AI = 25.0   # AI boxes are usually precise
-KALMAN_MEASUREMENT_NOISE_CV = 60.0   # CV boxes are noisier
+KALMAN_MEASUREMENT_NOISE_CV = 36.0   # CV boxes are noisier
 
 # A track is "confirmed" after this many REAL updates AND this much wall-time
 TRACK_CONFIRM_MIN_UPDATES = 3
