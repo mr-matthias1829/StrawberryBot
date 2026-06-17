@@ -1,16 +1,12 @@
 """
-fusion_engine.py  — reworked
+fusion_engine.py
 ==============================
-Major changes vs. the old version:
-
-1. TRACKING  — real per-track Kalman filter (constant-velocity, 8-state)
-   replaces the old EMA + IoU-only matching.  Tracks coast through missed
-   frames instead of flickering in and out.  Matching uses both IoU AND
-   normalised centre-distance so fast-moving boxes keep their lock.
+1. TRACKING  — real per-track Kalman filter (constant-velocity, 8-state).
+   Tracks coast through missed frames instead of flickering.  Matching uses
+   both IoU AND normalised centre-distance so fast-moving boxes keep their lock.
 
 2. ZOOM RECHECK  — keyed per *track id* with a time-based cooldown.
-   Results are merged back into the track that requested them (matched by
-   IoU against the predicted box), not dropped as disconnected one-offs.
+   Results are merged back into the track that requested them.
 
 3. AI PRIMACY  — three-tier acceptance:
      HIGH  → trusted outright (CV is bonus)
@@ -20,7 +16,13 @@ Major changes vs. the old version:
 
 4. FRAME-AGE DEBOUNCE  — every detection carries the monotonic timestamp of
    the frame it came from.  Detections older than MAX_ACCEPTABLE_FRAME_AGE_S
-   are excluded from driving the robot, addressing camera latency directly.
+   are excluded from driving the robot.
+
+5. INDEPENDENT AI/CV CADENCE  — AI and CV each run on their own background
+   thread with their own "detect every Nth pushed frame" counter
+   (config.AI_DETECT_EVERY / config.CV_DETECT_EVERY).  Each detector posts
+   its results the moment it finishes, independently of the other, so a
+   slow AI pass never throttles CV's refresh rate (and vice versa).
 """
 
 import queue
@@ -116,9 +118,6 @@ class KalmanBoxTrack:
     """
     Single-object track — constant-velocity Kalman filter over
     state [cx, cy, w, h, vx, vy, vw, vh].
-
-    Using a proper predict/update cycle lets the track coast convincingly
-    through missed frames (the main flicker fix).
     """
 
     _next_id = 1
@@ -129,7 +128,6 @@ class KalmanBoxTrack:
 
         self.kf = cv2.KalmanFilter(8, 4)
 
-        # Measurement matrix: observe [cx, cy, w, h] from state
         self.kf.measurementMatrix = np.zeros((4, 8), dtype=np.float32)
         for i in range(4):
             self.kf.measurementMatrix[i, i] = 1.0
@@ -150,21 +148,19 @@ class KalmanBoxTrack:
             [cx, cy, w, h, 0, 0, 0, 0], dtype=np.float32
         ).reshape(8, 1)
 
-        self.detection        = det
-        self.last_update_time = det.timestamp
-        self.last_predict_time= det.timestamp
-        self.created_at       = det.timestamp
+        self.detection         = det
+        self.last_update_time  = det.timestamp
+        self.last_predict_time = det.timestamp
+        self.created_at        = det.timestamp
 
-        self.update_count     = 1
-        self.coast_seconds    = 0.0
+        self.update_count  = 1
+        self.coast_seconds = 0.0
 
         self.last_zoom_request_time = 0.0
         self.zoom_request_count     = 0
 
         self.fused_confidence = det.confidence
         self.source_history: List[str] = [det.source]
-
-    # ------------------------------------------------------------------
 
     def _set_measurement_noise(self, source: str) -> None:
         noise = (config.KALMAN_MEASUREMENT_NOISE_AI
@@ -193,10 +189,10 @@ class KalmanBoxTrack:
         self._set_measurement_noise(det.source)
         self.kf.correct(meas)
 
-        self.detection     = det
+        self.detection        = det
         self.last_update_time = det.timestamp
-        self.coast_seconds = 0.0
-        self.update_count += 1
+        self.coast_seconds    = 0.0
+        self.update_count    += 1
         self.fused_confidence = 0.6 * det.confidence + 0.4 * self.fused_confidence
 
         self.source_history.append(det.source)
@@ -205,9 +201,6 @@ class KalmanBoxTrack:
 
     def mark_missed(self, now: float) -> None:
         self.coast_seconds = now - self.last_update_time
-
-    # ------------------------------------------------------------------
-    # Properties
 
     @property
     def velocity(self) -> Tuple[float, float]:
@@ -250,6 +243,21 @@ class KalmanBoxTrack:
 # =============================================================================
 # Worker: detection off the main thread + zoom rechecks
 # =============================================================================
+#
+# AI and CV each get their own single-slot queue and their own background
+# thread.  They never block each other: a slow YOLO pass doesn't delay CV,
+# and a CV-heavy frame doesn't delay the next AI inference.
+#
+# push_frame() is called every camera frame.  Each detector has its own
+# frame counter; it only acts on every Nth push (config.AI_DETECT_EVERY /
+# config.CV_DETECT_EVERY).  The counters are completely independent, so you
+# can run CV every frame and AI every 2nd, or any other ratio.
+#
+# Both detectors write into _ai_dets / _cv_dets under a shared lock, but
+# each only touches its own slot — no contention beyond the brief lock hold.
+# read_frame() returns "fresh=True" if EITHER detector produced new output
+# since the last read, so FusionEngine re-fuses on every tick that either
+# source updated instead of waiting for both in lockstep.
 
 @dataclass
 class _FrameJob:
@@ -259,11 +267,11 @@ class _FrameJob:
 
 @dataclass
 class _ZoomJob:
-    frame:    np.ndarray
-    box:      Tuple[int, int, int, int]
-    source:   str
-    track_id: int
-    timestamp:float
+    frame:     np.ndarray
+    box:       Tuple[int, int, int, int]
+    source:    str
+    track_id:  int
+    timestamp: float
 
 @dataclass
 class _ZoomResult:
@@ -275,27 +283,68 @@ class DetectionWorker:
     def __init__(self, ai: AIDetector, cv: CVDectector) -> None:
         self.ai = ai
         self.cv = cv
-        self._frame_q: queue.Queue = queue.Queue(maxsize=1)
-        self._zoom_q:  queue.Queue = queue.Queue(maxsize=8)
-        self._lock  = threading.Lock()
-        self._stop  = threading.Event()
 
-        self._ai_dets:      List[Detection]   = []
-        self._cv_dets:      List[Detection]   = []
+        # Separate single-slot queues so each detector always works on the
+        # most recently pushed frame, independent of the other's progress.
+        self._ai_frame_q: queue.Queue = queue.Queue(maxsize=1)
+        self._cv_frame_q: queue.Queue = queue.Queue(maxsize=1)
+        self._zoom_q:      queue.Queue = queue.Queue(maxsize=8)
+
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+
+        # Independent "run every Nth push" counters.
+        # Incremented once per push_frame() call, independently for each detector.
+        self._ai_frame_counter = 0
+        self._cv_frame_counter = 0
+
+        self._ai_dets:      List[Detection]      = []
+        self._cv_dets:      List[Detection]      = []
         self._mask:         Optional[np.ndarray] = None
-        self._zoom_results: List[_ZoomResult] = []
-        self._results_fresh = False
+        self._zoom_results: List[_ZoomResult]    = []
 
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="detection-worker"
+        # Each detector flips its own freshness flag independently.
+        # read_frame() returns True if either flag is set.
+        self._ai_fresh = False
+        self._cv_fresh = False
+
+        self._ai_thread = threading.Thread(
+            target=self._run_ai, daemon=True, name="detection-worker-ai"
         )
-        self._thread.start()
+        self._cv_thread = threading.Thread(
+            target=self._run_cv, daemon=True, name="detection-worker-cv"
+        )
+        self._zoom_thread = threading.Thread(
+            target=self._run_zoom, daemon=True, name="detection-worker-zoom"
+        )
+        self._ai_thread.start()
+        self._cv_thread.start()
+        self._zoom_thread.start()
+
+    # ------------------------------------------------------------------
+    # Push — called every camera frame from FusionEngine.process_frame().
+    # Each detector decides for itself whether this push is one it acts on.
+    # ------------------------------------------------------------------
 
     def push_frame(self, frame: np.ndarray, small: np.ndarray, timestamp: float) -> None:
-        try:   self._frame_q.get_nowait()
-        except queue.Empty: pass
-        try:   self._frame_q.put_nowait(_FrameJob(frame, small, timestamp))
-        except queue.Full:  pass
+        job = _FrameJob(frame, small, timestamp)
+
+        self._ai_frame_counter += 1
+        every_ai = max(1, config.AI_DETECT_EVERY)
+        if self._ai_frame_counter % every_ai == 0:
+            # Drop stale frame if the AI thread is still busy, then push fresh one.
+            try:   self._ai_frame_q.get_nowait()
+            except queue.Empty: pass
+            try:   self._ai_frame_q.put_nowait(job)
+            except queue.Full:  pass
+
+        self._cv_frame_counter += 1
+        every_cv = max(1, config.CV_DETECT_EVERY)
+        if self._cv_frame_counter % every_cv == 0:
+            try:   self._cv_frame_q.get_nowait()
+            except queue.Empty: pass
+            try:   self._cv_frame_q.put_nowait(job)
+            except queue.Full:  pass
 
     def push_zoom(self, frame: np.ndarray, box, source: str,
                   track_id: int, timestamp: float) -> None:
@@ -305,9 +354,16 @@ class DetectionWorker:
             pass
 
     def read_frame(self):
+        """
+        Returns (ai_dets, cv_dets, mask, fresh).
+        `fresh` is True if EITHER detector produced new output since the last
+        read — the caller re-fuses whenever either source updates, without
+        waiting for both to refresh in lockstep.
+        """
         with self._lock:
-            fresh = self._results_fresh
-            self._results_fresh = False
+            fresh = self._ai_fresh or self._cv_fresh
+            self._ai_fresh = False
+            self._cv_fresh = False
             return self._ai_dets, self._cv_dets, self._mask, fresh
 
     def read_zoom(self) -> List[_ZoomResult]:
@@ -318,28 +374,50 @@ class DetectionWorker:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=2)
+        self._ai_thread.join(timeout=2)
+        self._cv_thread.join(timeout=2)
+        self._zoom_thread.join(timeout=2)
 
-    def _run(self) -> None:
+    # ------------------------------------------------------------------
+    # AI loop — independent thread, independent cadence
+    # ------------------------------------------------------------------
+
+    def _run_ai(self) -> None:
         while not self._stop.is_set():
             try:
-                self._process_frame(self._frame_q.get(timeout=0.05))
+                job = self._ai_frame_q.get(timeout=0.05)
             except queue.Empty:
-                pass
-            for _ in range(2):
-                try:
-                    self._process_zoom(self._zoom_q.get_nowait())
-                except queue.Empty:
-                    break
+                continue
+            self._process_ai_frame(job)
 
-    def _process_frame(self, job: _FrameJob) -> None:
+    def _process_ai_frame(self, job: _FrameJob) -> None:
         ai_dets = (self.ai.detect(job.small, timestamp=job.timestamp)
                    if is_ai_enabled() else [])
+
+        inv = 1.0 / config.INFER_SCALE
+        ai_dets = [_scale_det(d, inv) for d in ai_dets]
+
+        with self._lock:
+            self._ai_dets  = ai_dets
+            self._ai_fresh = True
+
+    # ------------------------------------------------------------------
+    # CV loop — independent thread, independent cadence
+    # ------------------------------------------------------------------
+
+    def _run_cv(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._cv_frame_q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            self._process_cv_frame(job)
+
+    def _process_cv_frame(self, job: _FrameJob) -> None:
         cv_dets, mask = (self.cv.detect(job.small, timestamp=job.timestamp)
                          if is_cv_enabled() else ([], None))
 
         inv = 1.0 / config.INFER_SCALE
-        ai_dets = [_scale_det(d, inv) for d in ai_dets]
         cv_dets = [_scale_det(d, inv) for d in cv_dets]
 
         if mask is not None:
@@ -347,10 +425,21 @@ class DetectionWorker:
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
         with self._lock:
-            self._ai_dets       = ai_dets
-            self._cv_dets       = cv_dets
-            self._mask          = mask
-            self._results_fresh = True
+            self._cv_dets  = cv_dets
+            self._mask     = mask
+            self._cv_fresh = True
+
+    # ------------------------------------------------------------------
+    # Zoom recheck loop — separate thread, never competes with AI or CV
+    # ------------------------------------------------------------------
+
+    def _run_zoom(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._zoom_q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            self._process_zoom(job)
 
     def _process_zoom(self, job: _ZoomJob) -> None:
         x1, y1, x2, y2 = job.box
@@ -539,7 +628,7 @@ class FusionEngine:
         return None
 
     # ------------------------------------------------------------------
-    # Zoom request helper — keyed by track, with cooldown decay
+    # Zoom request helper
     # ------------------------------------------------------------------
 
     def _request_zoom_for_track(self, track: Optional[KalmanBoxTrack],
@@ -560,7 +649,6 @@ class FusionEngine:
 
     def _associate(self, fused_dets: List[Detection],
                    now: float) -> Dict[int, int]:
-        """Return {detection_index: track_id} for matched pairs."""
         predicted: Dict[int, Tuple[int, int, int, int]] = {
             tid: t.predict(now) for tid, t in self.tracks.items()
         }
@@ -613,7 +701,6 @@ class FusionEngine:
             if tid not in matched_tids:
                 track.mark_missed(now)
 
-        # Periodic + emergency cleanup
         if self.detect_count % config.CLEANUP_INTERVAL == 0 or len(self.tracks) > 40:
             self.tracks = {tid: t for tid, t in self.tracks.items() if not t.is_lost}
         else:
@@ -656,7 +743,10 @@ class FusionEngine:
         ai_dets, cv_dets, mask, fresh = self._worker.read_frame()
 
         if not fresh:
-            # No new detector output this tick — predict tracks forward
+            # Neither detector produced new output this tick — predict tracks
+            # forward using the Kalman filter and keep drawing the last known
+            # AI/CV boxes.  "not fresh" simply means both happened to be
+            # between updates at the moment we sampled.
             for t in self.tracks.values():
                 t.predict(now)
             confirmed, possible = self._classify_hits(
@@ -669,7 +759,7 @@ class FusionEngine:
             )
             return annotated, confirmed, self._last_debug, self._last_mask
 
-        # ── We have fresh detections ──────────────────────────────────
+        # ── At least one detector produced fresh output ───────────────
 
         self.detect_count += 1
         zoom_results = self._worker.read_zoom()
@@ -709,7 +799,6 @@ class FusionEngine:
             else:
                 recheck_requests.append(((det.x1, det.y1, det.x2, det.y2), "cv"))
 
-        # Merge zoom results back into tracks
         for zr in zoom_results:
             if zr.detection.is_targetable:
                 fused.append(zr.detection)
@@ -719,7 +808,6 @@ class FusionEngine:
         self.last_confirmed_hits = confirmed
         self.last_possible_hits  = possible
 
-        # Fire per-track zoom rechecks for anything that didn't pass acceptance
         for box, source in recheck_requests:
             bx1, by1, bx2, by2 = box
             best_track, best_iou_s = None, 0.0
@@ -764,9 +852,9 @@ class FusionEngine:
                     target_id = t.id
                     break
 
-        self._last_movement     = movement
-        self._last_target_id    = target_id
-        self._last_target_center= target_center
+        self._last_movement      = movement
+        self._last_target_id     = target_id
+        self._last_target_center = target_center
         self._last_debug = self._make_debug(
             len(ai_dets), len(cv_dets), len(matches), len(fused),
             len(confirmed), len(possible), stale_count)
@@ -886,7 +974,6 @@ class FusionEngine:
         for t in possible:
             _draw_track(t, config.COLOR_POSSIBLE, "P", 0.45, 1)
 
-        # Gripper overlay
         gripping = False
         try:
             import gripper as _gripper
@@ -919,7 +1006,6 @@ class FusionEngine:
         if target_center is not None:
             cv2.line(out, (gripper_x, gripper_y), target_center, (0, 165, 255), 2)
 
-        # Legend
         legend_items = [
             (CLASS_COLORS[0], "Strawberry (targetable)"),
             (CLASS_COLORS[1], "Bad (display only)"),
@@ -932,7 +1018,6 @@ class FusionEngine:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
             ly += 20
 
-        # HUD
         ai_badge   = "AI:ON" if is_ai_enabled() else "AI:OFF"
         cv_badge   = "CV:ON" if is_cv_enabled() else "CV:OFF"
         pred_badge = " [PRED]" if use_predicted else ""

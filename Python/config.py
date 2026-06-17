@@ -49,7 +49,7 @@ KALMAN_PROCESS_NOISE_VEL   = 5.0
 # Measurement noise per detector type.
 # Smaller = filter trusts that detector's bbox more.
 KALMAN_MEASUREMENT_NOISE_AI = 25.0   # AI boxes are usually precise
-KALMAN_MEASUREMENT_NOISE_CV = 36.0   # CV boxes are noisier
+KALMAN_MEASUREMENT_NOISE_CV = 45.0   # CV boxes are noisier
 
 # A track is "confirmed" after this many REAL updates AND this much wall-time
 TRACK_CONFIRM_MIN_UPDATES = 3
@@ -142,10 +142,22 @@ COLOR_POSSIBLE = (180, 100, 255)
 
 AUTO_MODE_ALLOW_MOVE = True
 
-# fusion_engine.py
+# ---------------------------------------------------------------------------
+# INFERENCE CADENCE
+# ---------------------------------------------------------------------------
+# AI and CV each run on their own background thread.  These counters control
+# how many frames are *pushed* before each detector actually runs.
+#   1 = run every frame  (max freshness, highest CPU)
+#   2 = run every other frame, etc.
+# Tune independently: e.g. AI_DETECT_EVERY=2, CV_DETECT_EVERY=1 lets CV
+# refresh twice as often as the heavier YOLO pass.
+
 INFER_SCALE      = 1
-DETECT_EVERY     = 1
-CLEANUP_INTERVAL = 30
+DETECT_EVERY     = 1   # legacy alias — kept for any external code that reads it
+AI_DETECT_EVERY  = 1   # run AI inference every Nth pushed frame
+CV_DETECT_EVERY  = 3   # run CV inference every Nth pushed frame
+
+CLEANUP_INTERVAL    = 30
 MIN_TARGET_BOX_AREA = 900   # px²
 
 ARROW_LOOKAHEAD_SEC = 0.5
