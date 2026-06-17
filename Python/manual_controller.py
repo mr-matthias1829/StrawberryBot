@@ -74,7 +74,7 @@ UDP_PORT = 5005
 
 # hoe lang geen pakket voordat de verbinding als verloren wordt beschouwd
 # stel in op ~3× de zendinterval van de ESP32
-DISCONNECT_TIMEOUT = 1.0
+DISCONNECT_TIMEOUT = 3.0
 
 SOCKET_TIMEOUT = 0.2
 DEADZONE       = 15
