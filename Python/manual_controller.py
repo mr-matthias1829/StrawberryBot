@@ -29,6 +29,13 @@ UDP-pakketformaat (JSON)
 
     Alle velden optioneel; ontbrekend = 0.
     "grip" toggle werkt op stijgende flank (één toggle per druk).
+
+Post-drop homing
+-----------------
+Zodra de gripper via de controller wordt GEOPEND (toggle naar open), wordt
+er een achtergrondthread gestart die wacht tot de gripper-actie klaar is en
+daarna motor.home_all() aanroept (dezelfde aanroep als de webserver se
+/api/home knop) — daarna schakelt het systeem terug naar autonomous.
 """
 
 import json
@@ -68,6 +75,12 @@ try:
 except ImportError:
     _HAS_GRIPPER = False
 
+try:
+    import motor as _motor
+    _HAS_MOTOR = True
+except ImportError:
+    _HAS_MOTOR = False
+
 
 UDP_HOST = "0.0.0.0"
 UDP_PORT = 5005
@@ -91,6 +104,10 @@ _last_packet_time: float = 0.0   # monotonic, bijgewerkt bij elk pakket
 _gripper_open  = True
 _grip_btn_prev = 0
 
+# post-drop homing state
+_home_lock: threading.Lock = threading.Lock()
+_homing_in_progress: bool  = False
+
 
 def _joystick_to_speed(value: int) -> int:
     """zet joystick-waarde (-100..100) om naar servo-snelheid (0..SPEED_MAX)."""
@@ -98,6 +115,48 @@ def _joystick_to_speed(value: int) -> int:
         return 0
     ratio = (abs(value) - DEADZONE) / (100 - DEADZONE)
     return int(ratio * SPEED_MAX)
+
+
+def _trigger_post_drop_home() -> None:
+    """Start de homing-sequentie nadat de gripper via de controller is geopend."""
+    global _homing_in_progress
+    with _home_lock:
+        if _homing_in_progress:
+            return
+        _homing_in_progress = True
+    threading.Thread(target=_post_drop_home, daemon=True, name="post-drop-home").start()
+
+
+def _post_drop_home() -> None:
+    """
+    Wacht tot de gripper klaar is met openen, homet daarna alle assen
+    (zelfde aanroep als de webserver /api/home knop) en schakelt terug
+    naar autonomous.
+    """
+    global _homing_in_progress
+
+    if _HAS_GRIPPER:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if _gripper.get_state() != "BUSY":
+                break
+            time.sleep(0.1)
+
+    if _HAS_MOTOR and hasattr(_motor, "home_all"):
+        print("[manual] Gripper geopend — homen naar startpositie...")
+        try:
+            _motor.home_all()
+        except Exception as e:
+            print(f"[manual] home_all() mislukt: {e}")
+    else:
+        print("[manual] Geen motor.home_all() beschikbaar — homing overgeslagen.")
+
+    import control_mode
+    control_mode._set_mode("autonomous")
+    print("[manual] Homing klaar — terug naar autonomous.")
+
+    with _home_lock:
+        _homing_in_progress = False
 
 
 def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
@@ -158,6 +217,7 @@ def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
             _gripper_open = not _gripper_open
             if _gripper_open:
                 _gripper.open_gripper()
+                _trigger_post_drop_home()
             else:
                 _gripper.grip()
 

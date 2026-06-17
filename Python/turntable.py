@@ -31,7 +31,7 @@ match the stale value.
 FIX (2024) — "silent drop" bug
 -------------------------------
 _post_word() used to return immediately when motor.is_locked(), causing
-bin.py move commands to be silently discarded.  The writer thread also
+ move commands to be silently discarded.  The writer thread also
 skipped writes when locked.  This meant spin_left() / spin_right() calls
 during a lockout period were lost forever.
 

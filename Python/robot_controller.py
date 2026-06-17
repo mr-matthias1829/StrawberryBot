@@ -95,12 +95,6 @@ try:
 except ImportError:
     _HAS_GRIPPER = False
 
-try:
-    import bin as _bin
-    _HAS_BIN = True
-except ImportError:
-    _HAS_BIN = False
-
 
 X_THRESHOLD = 25
 Y_THRESHOLD = 25

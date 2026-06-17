@@ -84,3 +84,13 @@ def _set_mode(new_mode: str) -> None:
             cb(new_mode)
         except Exception as e:
             print(f"[control_mode] callback error: {e}")
+
+
+def force_manual() -> None:
+    """
+    Forceer manual mode, los van de UDP-verbindingsstatus.
+    Wordt aangeroepen direct na een succesvolle auto-grip: autonome
+    detectie/beweging stopt onmiddellijk zodat de gebruiker de berry
+    veilig naar de bak kan rijden.
+    """
+    _set_mode("manual")
