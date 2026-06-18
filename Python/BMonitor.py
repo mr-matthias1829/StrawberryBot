@@ -61,6 +61,8 @@ def _monitor():
 
 
 def _do_shutdown():
+    return
+
     try:
         import motor
         motor.home_all()
