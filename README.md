@@ -1,3 +1,13 @@
+## issues and such
+
+so, you found this repo and are now wondering "theres this bug, can you fix it?", or "can you add this or this?".
+to be directly straight forward: no.
+this was made as part of a school project and at one point will no longer be updated anymore. it's also very unlikely that anyone will respond to any issues.
+while there is no license attached, you are free to do whatever you wish as long as you give the proper credits.
+thats all, thanks!
+
+
+
 # StrawberryBot
 
 "fine, strawberries r like the weird cousins of the fruit world, all sweet n stuff but also kinda... seedy, dunno why u care tho, we were in the middle of somethin else"

@@ -101,13 +101,7 @@ _sock:   Optional[socket.socket]    = None
 
 _last_packet_time: float = 0.0   # monotonic, bijgewerkt bij elk pakket
 
-_gripper_open  = True
 _grip_btn_prev = 0
-
-# post-drop homing state
-_home_lock: threading.Lock = threading.Lock()
-_homing_in_progress: bool  = False
-
 
 def _joystick_to_speed(value: int) -> int:
     """zet joystick-waarde (-100..100) om naar servo-snelheid (0..SPEED_MAX)."""
@@ -115,49 +109,6 @@ def _joystick_to_speed(value: int) -> int:
         return 0
     ratio = (abs(value) - DEADZONE) / (100 - DEADZONE)
     return int(ratio * SPEED_MAX)
-
-
-def _trigger_post_drop_home() -> None:
-    """Start de homing-sequentie nadat de gripper via de controller is geopend."""
-    global _homing_in_progress
-    with _home_lock:
-        if _homing_in_progress:
-            return
-        _homing_in_progress = True
-    threading.Thread(target=_post_drop_home, daemon=True, name="post-drop-home").start()
-
-
-def _post_drop_home() -> None:
-    """
-    Wacht tot de gripper klaar is met openen, homet daarna alle assen
-    (zelfde aanroep als de webserver /api/home knop) en schakelt terug
-    naar autonomous.
-    """
-    global _homing_in_progress
-
-    if _HAS_GRIPPER:
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if _gripper.get_state() != "BUSY":
-                break
-            time.sleep(0.1)
-
-    if _HAS_MOTOR and hasattr(_motor, "home_all"):
-        print("[manual] Gripper geopend — homen naar startpositie...")
-        try:
-            _motor.home_all()
-        except Exception as e:
-            print(f"[manual] home_all() mislukt: {e}")
-    else:
-        print("[manual] Geen motor.home_all() beschikbaar — homing overgeslagen.")
-
-    import control_mode
-    control_mode._set_mode("autonomous")
-    print("[manual] Homing klaar — terug naar autonomous.")
-
-    with _home_lock:
-        _homing_in_progress = False
-
 
 def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
     """
@@ -169,7 +120,7 @@ def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
     ry  →  arm         (voor/achter,    servo 5)
     grip → gripper     (toggle,         servo 8)
     """
-    global _gripper_open, _grip_btn_prev
+    global _grip_btn_prev
 
     # turntable (linker stick X)
     if _HAS_TURNTABLE:
@@ -214,12 +165,14 @@ def _apply_input(lx: int, ly: int, rx: int, ry: int, grip: int) -> None:
     # gripper toggle (knop, stijgende flank)
     if _HAS_GRIPPER:
         if grip != _grip_btn_prev:
-            _gripper_open = not _gripper_open
-            if _gripper_open:
-                _gripper.open_gripper()
-                _trigger_post_drop_home()
-            else:
+            state = _gripper.get_state()
+
+            if state == "BUSY":
+                pass
+            elif state == "OPEN":
                 _gripper.grip()
+            elif state == "GRIPPED":
+                _gripper.open_gripper()
 
     _grip_btn_prev = grip
 
